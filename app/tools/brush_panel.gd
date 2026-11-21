@@ -12,6 +12,10 @@ var radius_m := 32.0
 var pressure := 20
 var shape := Document.BrushShape.BELL
 var mode := Mode.RAISE
+var mirror_x := false
+var mirror_z := false
+var mirror_x_button: Button
+var mirror_z_button: Button
 var size_buttons: Array[Button] = []
 var mode_buttons: Array[Button] = []
 var shape_buttons: Array[Button] = []
@@ -64,6 +68,10 @@ func _ready() -> void:
 	for index in PRESSURES.size():
 		var value: int = PRESSURES[index]
 		pressure_buttons.append(choice(pressures, "%d%%" % value, "Shift+" + ["Z", "X", "C", "V"][index], set_pressure.bind(value)))
+	section(layout, "Symmetry", "Live mirror: every dab also lands on the opposite half")
+	var symmetry := grid(layout, 2)
+	mirror_x_button = choice(symmetry, "Mirror X", "Mirror every brush dab across the X axis", func(): set_mirror_x(not mirror_x))
+	mirror_z_button = choice(symmetry, "Mirror Z", "Mirror every brush dab across the Z axis", func(): set_mirror_z(not mirror_z))
 	target_label.text = "Paint height (m)"
 	layout.add_child(target_label)
 	target.min_value = -3000
@@ -138,6 +146,16 @@ func set_pressure(value: int) -> void:
 	update_buttons()
 
 
+func set_mirror_x(value: bool) -> void:
+	mirror_x = value
+	update_buttons()
+
+
+func set_mirror_z(value: bool) -> void:
+	mirror_z = value
+	update_buttons()
+
+
 func use_picked_height(height: float) -> void:
 	target.value = height
 	set_mode(Mode.PAINT)
@@ -154,6 +172,8 @@ func update_buttons() -> void:
 		shape_buttons[index].set_pressed_no_signal(shape == index)
 	for index in pressure_buttons.size():
 		pressure_buttons[index].set_pressed_no_signal(PRESSURES[index] == pressure)
+	mirror_x_button.set_pressed_no_signal(mirror_x)
+	mirror_z_button.set_pressed_no_signal(mirror_z)
 	pressure_label.text = "Pressure · %d%%" % pressure
 	target.editable = layer == Terrain.Layer.HEIGHT and (mode == Mode.PAINT or mode == Mode.SPRAY)
 	rgb.editable = layer == Terrain.Layer.COLOR
@@ -171,6 +191,21 @@ func valid_rgb() -> bool:
 
 
 func apply_dab(document: Document, point: Vector2) -> void:
+	dab_at(document, point)
+	if mirror_x:
+		dab_at(document, mirrored(document, point, true))
+	if mirror_z:
+		dab_at(document, mirrored(document, point, false))
+
+
+func mirrored(document: Document, point: Vector2, across_x: bool) -> Vector2:
+	var dimensions := document.package.terrain.dimensions
+	return Vector2(dimensions.x - 1 - point.x, point.y) if across_x else Vector2(point.x, dimensions.y - 1 - point.y)
+
+
+func dab_at(document: Document, point: Vector2) -> void:
+	if point.x < 0 or point.y < 0:
+		return
 	var strength := pressure / 100.0
 	match paint_layer():
 		Terrain.Layer.COLOR:

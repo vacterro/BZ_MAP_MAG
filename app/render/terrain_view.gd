@@ -33,6 +33,7 @@ var pitch := 0.78
 var distance := 1000.0
 var radius_m := 32.0
 var square_brush := false
+var fly := false
 
 
 func _ready() -> void:
@@ -206,10 +207,31 @@ func set_view(overhead: bool) -> void:
 		camera.size = maxf(document.package.terrain.dimensions.x, document.package.terrain.dimensions.y) * 2.2
 		pitch = 1.54
 		yaw = 0.0
+		fly = false
 	else:
 		camera.projection = Camera3D.PROJECTION_PERSPECTIVE
 		pitch = 0.78
 		yaw = 0.55
+	update_camera()
+
+
+func set_fly(enabled: bool) -> void:
+	fly = enabled
+	if fly and camera.projection == Camera3D.PROJECTION_ORTHOGONAL:
+		set_view(false)
+
+
+func fly_step(forward: float, side: float, rise: float, delta: float) -> void:
+	if not fly or document == null or delta <= 0.0:
+		return
+	var terrain := document.package.terrain
+	var speed := distance * 0.6 * delta
+	var heading := Vector3(-sin(yaw), 0, -cos(yaw))
+	var right := Vector3(cos(yaw), 0, -sin(yaw))
+	center += heading * (forward * speed) + right * (side * speed) + Vector3.UP * (rise * speed * 0.5)
+	center.x = clampf(center.x, Vector2(terrain.origin).x * terrain.SPACING, (terrain.origin.x + terrain.dimensions.x) * terrain.SPACING)
+	center.z = clampf(center.z, Vector2(terrain.origin).y * terrain.SPACING, (terrain.origin.y + terrain.dimensions.y) * terrain.SPACING)
+	center.y = clampf(center.y, terrain.min_height - 500.0, terrain.max_height + 3000.0)
 	update_camera()
 
 

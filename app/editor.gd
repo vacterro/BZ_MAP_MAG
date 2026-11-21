@@ -50,6 +50,10 @@ var active_object_scan: Document
 var loaded_objects: Document
 var solid_button: Button
 var wire_button: Button
+var fly_button: Button
+const AUTOSAVE_INTERVAL := 180.0
+const AUTOSAVE_KEEP := 3
+var autosave_seconds := 0.0
 var open_dialog := FileDialog.new()
 var blank_dialog := FileDialog.new()
 var flat_template_dialog := FileDialog.new()
@@ -222,7 +226,7 @@ func _ready() -> void:
 	add_child(confirmation)
 	confirmation.confirmed.connect(func(): open_map(pending_path))
 	keys_dialog.title = "Editor Hotkeys"
-	keys_dialog.dialog_text = "Shift+1–6  Brush size\nShift+Q/W/E/R  Square / Circle / Cone / Bell\nShift+Z/X/C/V  Pressure 10 / 20 / 50 / 100%\nShift+A/S/D/F/G  Paint / Spray / Raise / Blend / Pick\nAlt+H  Height brush\nF5  Playtest\nCtrl+O/S/Z/Y  Open / Save Project / Undo / Redo\n\nMove Points tool\nDrag  Move a point\nShift+click  Append a point\nDelete  Remove selected point\nEsc  Cancel drag\n\nMove Object tool\nDrag  Move an object\nShift+drag  Snap to terrain grid\n[ / ]  Rotate −15° / +15°  (Shift for 1°)\nCtrl+D  Duplicate the selection\nDelete  Remove the selection\nEsc  Cancel drag\n\nEdit Water dialog\nLeft drag  Paint coverage on the chosen layer\nShift+drag  Erase coverage\nApply Elevation  Set the layer water height\nDialog closes  Painting stops"
+	keys_dialog.dialog_text = "F  Fly camera (3D view)\nW/S/A/D  Fly forward / back / strafe\nQ/E  Fly down / up\n\nShift+1–6  Brush size\nShift+Q/W/E/R  Square / Circle / Cone / Bell\nShift+Z/X/C/V  Pressure 10 / 20 / 50 / 100%\nShift+A/S/D/F/G  Paint / Spray / Raise / Blend / Pick\nAlt+H  Height brush\nF5  Playtest\nCtrl+O/S/Z/Y  Open / Save Project / Undo / Redo\n\nMove Points tool\nDrag  Move a point\nShift+click  Append a point\nDelete  Remove selected point\nEsc  Cancel drag\n\nMove Object tool\nDrag  Move an object\nShift+drag  Snap to terrain grid\n[ / ]  Rotate −15° / +15°  (Shift for 1°)\nCtrl+D  Duplicate the selection\nDelete  Remove the selection\nEsc  Cancel drag\n\nEdit Water dialog\nLeft drag  Paint coverage on the chosen layer\nShift+drag  Erase coverage\nApply Elevation  Set the layer water height\nDialog closes  Painting stops"
 	add_child(keys_dialog)
 	studio.hide()
 	add_child(studio)
@@ -308,6 +312,8 @@ func add_camera_toolbar(parent: Control) -> void:
 	camera_buttons.append(add_button(parent, "Top", scene_view.set_view.bind(true), "Orthographic top view"))
 	camera_buttons.append(add_button(parent, "Orbit", scene_view.set_view.bind(false), "Perspective orbit view"))
 	focus_button = add_button(parent, "Focus", focus_terrain, "Focus the 3D camera on the last terrain cursor")
+	fly_button = add_button(parent, "Fly", toggle_fly, "Free-flight camera. W/S forward and back, A/D strafe, Q/E down and up, right drag to look, F toggles.")
+	fly_button.toggle_mode = true
 	color_button = add_button(parent, "Color", show_vertex_colors, "Preview native TER vertex colors")
 	color_button.toggle_mode = true
 	texture_button = add_button(parent, "Texture", toggle_textures, "Preview native TRN tile textures with terrain tint and blending")
@@ -440,7 +446,11 @@ func _shortcut_input(event: InputEvent) -> void:
 				report(document.error)
 			get_viewport().set_input_as_handled()
 			return
-	if event.alt_pressed and key == KEY_H:
+	if event.keycode == KEY_F and not event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and not object_tool.active:
+		fly_button.set_pressed_no_signal(not fly_button.button_pressed)
+		toggle_fly()
+		get_viewport().set_input_as_handled()
+	elif event.alt_pressed and key == KEY_H:
 		leave_object_tool()
 		move_path_button.set_pressed_no_signal(false)
 		path_tool_changed()
@@ -465,6 +475,7 @@ func sync_actions() -> void:
 	export_button.disabled = locked
 	playtest_button.disabled = locked or launcher_pid > 0 or game_pid > 0 or OS.get_name() != "Windows"
 	focus_button.disabled = locked
+	fly_button.disabled = locked
 	for button in camera_buttons:
 		button.disabled = locked
 	nodes_button.disabled = locked
@@ -504,6 +515,7 @@ func remember_saved_changes() -> void:
 	saved_colors = document.package.terrain.color_edits.duplicate()
 	saved_tiles = document.package.terrain.tile_edits.duplicate()
 	saved_water_edits = document.water_edits.duplicate(true)
+	autosave_seconds = 0.0
 	saved_water_heights = document.water_heights.duplicate()
 
 
@@ -1023,9 +1035,19 @@ func mark_material_refresh(region: Rect2i, layer: int) -> void:
 	pending_materials[layer] = prior.merge(region) if prior.has_area() else region
 
 
-func _process(_time: float) -> void:
+func _process(time: float) -> void:
 	poll_playtest()
 	poll_objects()
+	if fly_button != null and fly_button.button_pressed and document != null:
+		var forward: float = (1.0 if Input.is_key_pressed(KEY_W) else 0.0) - (1.0 if Input.is_key_pressed(KEY_S) else 0.0)
+		var side: float = (1.0 if Input.is_key_pressed(KEY_D) else 0.0) - (1.0 if Input.is_key_pressed(KEY_A) else 0.0)
+		var rise: float = (1.0 if Input.is_key_pressed(KEY_E) else 0.0) - (1.0 if Input.is_key_pressed(KEY_Q) else 0.0)
+		if forward != 0.0 or side != 0.0 or rise != 0.0:
+			scene_view.fly_step(forward, side, rise, time)
+	if document != null:
+		autosave_seconds += time
+		if autosave_seconds >= AUTOSAVE_INTERVAL and has_unsaved_changes() and not document.stroke_active and not document.water_stroke_active and path_drag_view == null and object_tool.drag_view == null and paint_view == null:
+			autosave_now()
 	if pending_refresh.has_area():
 		top.refresh(pending_refresh)
 		scene_view.refresh(pending_refresh)
@@ -1050,6 +1072,41 @@ func focus_terrain() -> void:
 	var target := last_cursor if last_cursor.x >= 0 else Vector2(terrain.dimensions) * 0.5
 	scene_view.center = scene_view.point_world(target)
 	scene_view.update_camera()
+
+
+func toggle_fly() -> void:
+	scene_view.set_fly(fly_button.button_pressed)
+	report("Fly camera on. W/S forward and back, A/D strafe, Q/E down and up, right drag to look." if fly_button.button_pressed else "Fly camera off.")
+	sync_actions()
+
+
+func autosave_path(base: String, slot: int) -> String:
+	var stem := document.package.source_path.get_file().get_basename()
+	return base.path_join("%s-autosave-%d.bzmag" % [stem, slot])
+
+
+func autosave_now(base := "") -> bool:
+	if document == null:
+		return false
+	autosave_seconds = 0.0
+	if not has_unsaved_changes():
+		return false
+	if base.is_empty():
+		base = document.package.source_path.get_base_dir()
+	var writer := Snapshots.new()
+	DirAccess.remove_absolute(autosave_path(base, AUTOSAVE_KEEP))
+	for slot in range(AUTOSAVE_KEEP - 1, 0, -1):
+		var previous := autosave_path(base, slot)
+		if FileAccess.file_exists(previous):
+			if DirAccess.rename_absolute(previous, autosave_path(base, slot + 1)) != OK:
+				report("Autosave failed. Choose a writable map folder.")
+				return false
+	var target := autosave_path(base, 1)
+	if not writer.save_project(document, target):
+		report("Autosave failed. " + writer.error)
+		return false
+	report("Autosaved " + target)
+	return true
 
 
 func open_studio() -> void:

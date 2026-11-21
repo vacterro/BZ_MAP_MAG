@@ -7,6 +7,7 @@ const Snapshots := preload("res://bridge/snapshots.gd")
 const Graph := preload("res://nodes/height_graph.gd")
 const Water := preload("res://formats/water_v5.gd")
 const BznObjects := preload("res://formats/bzn_objects.gd")
+const TerrainView := preload("res://render/terrain_view.gd")
 
 var failures := 0
 
@@ -169,6 +170,7 @@ func run() -> void:
 	await test_object_move(editor, args[0], args[2])
 	await test_object_tools(editor, args[0], args[2])
 	await test_water_tools(editor, args[0], args[2])
+	await test_fly_autosave_symmetry(editor, args[0], args[2])
 	print("Native height at (0,0): %.4f -> %.4f, changed samples: %d" % [baseline, intended, document.edits.size()])
 	print("FAILURES: %d" % failures)
 	quit(0 if failures == 0 else 1)
@@ -1111,3 +1113,75 @@ func test_water_tools(editor: Control, source: String, scratch: String) -> void:
 	var bad := Document.new()
 	check(not bad.open(bad_path) and bad.error == "Invalid project water layer.", "the project loader rejects out-of-range water layers")
 	print("Water tools: coverage, elevation, project and export verified on layer 0 and 2.")
+
+
+func test_fly_autosave_symmetry(editor: Control, source: String, scratch: String) -> void:
+	check(editor.open_map(source), "load the fly, autosave and symmetry fixture")
+	var doc: Document = editor.document
+	var terrain := doc.package.terrain
+	var view: TerrainView = editor.scene_view
+	view.set_view(false)
+
+	var center_before: Vector3 = view.center
+	editor.fly_button.set_pressed_no_signal(true)
+	editor.toggle_fly()
+	check(view.fly, "the Fly button arms the free-flight camera")
+	view.fly_step(1.0, 0.0, 0.0, 0.25)
+	var heading := Vector3(-sin(view.yaw), 0, -cos(view.yaw))
+	check(view.center.distance_to(center_before + heading * (view.distance * 0.6 * 0.25)) < 0.01, "W moves the camera forward along the look heading")
+	view.fly_step(0.0, 1.0, 1.0, 0.5)
+	var right := Vector3(cos(view.yaw), 0, -sin(view.yaw))
+	var expected := center_before + heading * (view.distance * 0.6 * 0.25) + right * (view.distance * 0.6 * 0.5) + Vector3.UP * (view.distance * 0.6 * 0.5 * 0.5)
+	check(view.center.distance_to(expected) < 0.01, "strafe and rise move the camera sideways and up")
+	editor.fly_button.set_pressed_no_signal(false)
+	editor.toggle_fly()
+	check(not view.fly, "toggle off disarms flight")
+	view.set_view(true)
+	check(not view.fly, "the top view disarms flight")
+	editor.fly_button.set_pressed_no_signal(true)
+	editor.toggle_fly()
+	check(view.fly and view.camera.projection == Camera3D.PROJECTION_PERSPECTIVE, "entering flight from the top view returns to perspective")
+	editor.fly_button.set_pressed_no_signal(false)
+	editor.toggle_fly()
+	object_key(editor, KEY_F)
+	check(view.fly and editor.fly_button.button_pressed, "the F hotkey toggles the fly camera on")
+	object_key(editor, KEY_F)
+	check(not view.fly, "the F hotkey toggles the fly camera off")
+
+	check(not editor.autosave_now(scratch), "autosave skips a clean document")
+	doc.begin_stroke()
+	doc.dab(Vector2(512.0, 512.0), 48, 24)
+	doc.end_stroke()
+	var first_count := doc.edits.size()
+	check(editor.autosave_now(scratch) and FileAccess.file_exists(editor.autosave_path(scratch, 1)), "autosave writes the newest rolling slot")
+	doc.begin_stroke()
+	doc.dab(Vector2(360.0, 512.0), 24, 30)
+	doc.end_stroke()
+	check(editor.autosave_now(scratch), "a second autosave rolls a new slot")
+	var newest := Document.new()
+	check(newest.open(editor.autosave_path(scratch, 1)) and newest.edits.size() == doc.edits.size(), "the newest autosave reopens with every current edit")
+	var older := Document.new()
+	check(older.open(editor.autosave_path(scratch, 2)) and older.edits.size() == first_count, "the previous autosave shifts to slot 2 unchanged")
+	editor.autosave_now(scratch)
+	editor.autosave_now(scratch)
+	check(FileAccess.file_exists(editor.autosave_path(scratch, 3)) and not FileAccess.file_exists(editor.autosave_path(scratch, 4)), "the rolling store keeps exactly three autosaves")
+	check(editor.has_unsaved_changes(), "autosaving does not clear the unsaved marker")
+
+	editor.brush_panel.mirror_x_button.pressed.emit()
+	check(editor.brush_panel.mirror_x, "the Mirror X toggle arms live symmetry")
+	var index_a := 512 * terrain.dimensions.x + 100
+	var index_b := 512 * terrain.dimensions.x + 923
+	var base_a: float = terrain.heights[index_a]
+	var base_b: float = terrain.heights[index_b]
+	doc.begin_stroke()
+	editor.brush_panel.apply_dab(doc, Vector2(100.0, 512.0))
+	doc.end_stroke()
+	check(terrain.heights[index_a] > base_a + 0.1 and terrain.heights[index_b] > base_b + 0.1, "one mirrored dab raises both halves")
+	check(absf(terrain.heights[index_a] - base_a - (terrain.heights[index_b] - base_b)) <= doc.package.granularity + 0.001, "the mirrored half changes within one native height step")
+	doc.undo()
+	check(terrain.heights[index_a] == base_a and terrain.heights[index_b] == base_b, "one undo restores both mirrored halves")
+	editor.brush_panel.set_mirror_x(false)
+	check(not editor.brush_panel.mirror_x, "the mirror toggle turns off")
+	check(editor.brush_panel.mirrored(doc, Vector2(100.0, 200.0), true) == Vector2(923.0, 200.0)
+		and editor.brush_panel.mirrored(doc, Vector2(100.0, 200.0), false) == Vector2(100.0, 823.0), "mirror points compute the opposite samples")
+	print("Fly camera, rolling autosave and live symmetry verified.")

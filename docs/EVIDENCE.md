@@ -115,3 +115,12 @@ The suite's `test_water_tools` now edits the native WAT v5 alongside the terrain
 - BZMAG round-trip keeps both edited elevation keys and every coverage bit: the saved `waterEdits` record reopens with identical effective cover dictionaries.
 - Native export patches the WAT in place: only mask bits and layer-height floats change, the file keeps exactly 6,512 bytes, and the written file matches `Water.encode(document-water-bytes, edits, heights)` byte for byte. Re-importing the export decodes the edited layers (221 blocks at 150.5 m after erasing one source block, plus one block at 90 m for layer 2) equal to the document's effective layers, and the exported height floats survive the 32-bit encode because the tested values are step-aligned (the earlier 150.25 m dialog value snapped to 150.3 m through the 0.1 m spin step, which reproduced the 32-bit rounding gap and is why the suite uses 150.5 m).
 - The full headless suite including the new water workflow prints `FAILURES: 0`.
+
+## Fly camera, rolling autosave and live symmetric brush
+
+The suite's `test_fly_autosave_symmetry` covers the three remaining VRV-parity workflow features on Brave:
+
+- Fly mode: the Fly button (or the F hotkey) arms free flight. W moves the camera along the exact look heading (`center + heading * distance * 0.6 * dt`), A/D strafe along the view right vector, Q/E rise and sink at half that rate, and the camera position clamps to the terrain bounds and 500 m below/3000 m above the terrain height range. The top view disables flight, arming flight from the top view returns the camera to perspective, and F toggles cleanly off.
+- Rolling autosave: `autosave_now` refuses a clean document, writes `<map>-autosave-1.bzmag` next to the source on the first change, shifts the previous snapshot to slot 2 on the next write (verified by reopening both slots and comparing their edit counts), and keeps exactly three files — the fourth write removes the oldest and no slot 4 appears. An autosave never clears the unsaved marker, and the timer walks only while no brush, water stroke or drag is active.
+- Live symmetric brush: Mirror X repeats a raise dab at the reflected sample (100 → 923 on a 1,024-sample axis); both halves rise and one undo restores both exactly. The headroom between the two deltas stays within one native 0.1 m height granularity step, which the suite asserts explicitly. Turning the toggle off stops mirroring immediately.
+- The suite's full headless run again prints `FAILURES: 0`.
