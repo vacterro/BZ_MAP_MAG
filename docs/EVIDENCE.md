@@ -1,0 +1,96 @@
+# Verification record
+
+Paths under `build/` and terrain suite output directories are local artifacts. The terrain suite prints its temporary output directory on the first line. Tests ran on Windows 10 Pro, Ryzen 7 5800X, NVIDIA RTX 3060, Godot 4.7.2 official `ed1daf0bf`. Runtime target was the Steam public Windows x64 BZCC 2.0.185 executable.
+
+## Automated workflow
+
+```powershell
+$godotRoot = 'V:/__STORE_V/_SOFT/Godot/4.7.2-stable'
+$godot = "$godotRoot/Godot_v4.7.2-stable_win64.exe"
+$vrv = 'V:/___VAC/__K/__CODE/_MISC/_BZDECOMP/vrv'
+$game = 'V:/__STORE_V/_SOFT/Steam/steamapps/common/BZ2R'
+$run = (./tools/Test-Terrain.ps1 -Godot $godot)[0]
+./tools/Test-Terrain.ps1 -Godot $godot -WithGpu
+g++ -O2 -std=c++17 -static-libgcc -static-libstdc++ -I "$vrv/src/shared" tools/terrain_oracle.cpp -o build/terrain_oracle.exe
+./build/terrain_oracle.exe 'map_references/Brave Lil Toaster/braveliltoaster.TER' "$run/terrain-edit/braveliltoaster.TER"
+./build/terrain_oracle.exe 'map_references/Brave Lil Toaster/braveliltoaster.TER' "$run/material-graph/braveliltoaster.TER" --graph
+./tools/Test-BznTools.ps1 -Dotnet 'path/to/dotnet.exe'
+```
+
+The internal suite rejects truncated TER, unsupported versions, bad bounds, and nonfinite heights. It checks exact no-op export, changed-source and destination collision handling, shared 2D/3D projection, 3D input, native path overlays, all three brush modes, undo/redo, project save/reopen, and edited TER reimport. Graph coverage includes port validation, cycles, deterministic two-layer output, preview isolation, undoable bake, and graph export/reimport. The suite also checks actual Verdana on the editor, node window and file dialog in Windows.
+
+The independent VRV C++ codec verified 1,747 changed samples, a change from 100 m to 124 m at world (0, 0), and identical non-height layers. BZNTools built from a local source copy with Microsoft SDK 8.0.428. The library read both BZN files, but the writer emitted only the recognized prefix.
+
+The material graph export from Brave changed 12,842 heights, 12,125 RGB samples and 13 base tile IDs in the independent VRV decoder. The decoder verified identical alpha, draw masks, point flags and overlay tile IDs. The editor suite verified that unedited block bytes and all companion hashes match. The GPU run at 640 × 540 checked the evaluated RGB and base tile colors in a 2D texture and the corresponding 3D mesh vertices.
+
+The original SAIPEN suite records used the non-Git fingerprint. A before/after comparison using the installed engine's exact file-selection rules found 104 new files from one passing run, all under that run's `build/test-*` directory. Source and Godot metadata hashes matched, and the fingerprint excluded SAIPEN records. After moving outputs to the temporary directory, all 2,613 measured paths and hashes matched. With Git, the declared suite compares the content of tracked and nonignored source files before and after execution. The tests verify linked fixture hashes separately.
+
+| BZN | Read entities / paths | Source bytes | Serialized bytes | Exact prefix |
+|---|---:|---:|---:|---:|
+| Brave Lil Toaster 1196 | 76 / 23 | 31,795 | 23,764 | 23,764 |
+| Blank 1192 | 1 / 23 | 10,708 | 2,677 | 2,677 |
+
+## Playtest on 2.0.185
+
+```powershell
+./tools/Start-Playtest.ps1 -Game $game -VrvSource $vrv -Mission "$run/terrain-edit/braveliltoaster.bzn"
+./tools/Start-Playtest.ps1 -Game $game -VrvSource $vrv -Mission "$run/graph-bake/braveliltoaster.bzn"
+./tools/Start-Playtest.ps1 -Game $game -VrvSource $vrv -Mission "$run/material-graph/braveliltoaster.bzn"
+$flat = ./tools/New-FlatTerrainSnapshot.ps1 -Mission 'map_references/blank_map1/duel_map_27_autosave_01.bzn' -VrvTemplate "$vrv/mod/Data/Templates/vrv_new_blank.ter"
+./tools/Start-Playtest.ps1 -Game $game -VrvSource $vrv -Mission $flat -KeepBznLayout -WithoutMissionScript -StartInEditor
+```
+
+The exported height edit and graph bake were tested in separate BZCC sessions with mission scripts enabled. Both loaded terrain at 2048 × 2048 m at (-1024, -1024), loaded `braveliltoaster.bzn`, entered MISSION / RUN, and later logged normal shutdown. The game used a resource stream that put only the Playtest snapshot ahead of stock and VSR assets. Its copied TER hashes matched the respective editor exports. The converter removed exactly one `ejectRatio` field in each BZN working copy with a separate restoration proof. The chosen converted BZN hash was `1ad84f9e0a0dde381c978fa4666e4e18c0647079d7a10e9c2c2613fb1b2cb450`. Multi-client gameplay and mission objectives were outside this run.
+
+| File | SHA-256 |
+|---|---|
+| Brave source TER | `fc0577c372f1f196e6bfa6582d4b569add26ac8d9fa05a24acad101118901a9f82` |
+| Terrain brush export and game snapshot TER | `d5b58426d4b6c4795c92ed15319687d0ba5263938db055bafdad481010714a00` |
+| Graph bake export and game snapshot TER | `f6b0687306ae98a3c408ac26cfb9877056c877d3d2c018bbb8039be5816a8748` |
+| Flat blank TER | `f264a6351f75bbf181230da05cb11ab3cde9d5ae99319bb4463a36cf3ae81ed2` |
+
+The blank TRN and VRV template share a 2048 m square and nominal 100 m height. The copied 1192 BZN loaded in BZCC with `/startedit /noscript` and entered MISSION / RUN. Source files remained unchanged.
+
+Engine log identifiers on this machine are `01.12.42.9156` (brush), `01.24.24.750` (graph), and `01.28.18.5640` (blank), all on 2026-11-21. The app's Playtest action was also exercised using `res://tests/playtest_session.gd`. It generated an isolated snapshot, started the helper and confirmed the launched process. Its game log `01.31.11.7984` records MISSION / RUN and normal shutdown.
+
+The 2026-11-21 log `08.24.58.9406` records the mixed material graph export loading with VSR's `Strategy02.dll`, entering MISSION / RUN and shutting down normally. The private runtime TER matched the exported SHA-256 `ed5f391e49981a635d6c565100191038f5cc94cbdc32d13a8f3361c979a37782`. The helper removed the private game directory after exit.
+
+## Initial engine spike
+
+In-process Godot loads and displays 2048 m Brave in about 1.2 s and 4096 m Workshop BZTC Total Coop `coop_bztcbd01` in 4.3 s on this machine. These are observed headless client startup measurements with OS caching uncontrolled.
+
+| Data | 48 m dirty brush, median / max | Godot static memory, final / peak | Wall time including 10 strokes and 10 undos |
+|---|---:|---:|---:|
+| 2048 m Brave | 5.6 / 21.8 ms | 66.8 / 68.1 MiB | 3.32 s |
+| 4096 m BZTC Total Coop | 4.9 / 18.7 ms | 147.9 / 160.5 MiB | 8.80 s |
+
+The graphics-backed automated test measured 15.6 ms for a single brush and CPU-side dirty view update and 704 ms for transactional edited export on Brave. Frame pacing, GPU timing and true cold startup still need controlled sampling. Run the benchmark by passing an absolute BZN path to `--script res://tests/benchmark.gd` after `--`.
+
+The external VRV C++ decoder read Brave in 23.6 ms. A separate run read both files and verified all layers in 58.2 ms wall time. Its compiled executable is 2.54 MB. That gives a useful validation backend if a separate terrain worker becomes necessary. The BZN .NET probe took about 401 ms end-to-end for both fixtures, including managed startup, type hints, parse and write. Probe deployment files totaled 1.56 MB, associated runtime directory files 73.6 MB. These measurements exercise different format operations. The in-process GDScript implementation already meets the measured brush latency goal without a worker protocol or .NET runtime dependency.
+
+The Godot CLI builds the PCK from application files only. Windows x64 packaging uses the matching release template. [Godot command line](https://docs.godotengine.org/en/stable/tutorials/editor/command_line_tutorial.html) · [.NET 8 SDK reference](https://dotnet.microsoft.com/en-us/download/dotnet/8.0).
+
+## Steam discovery and existing path edits
+
+```powershell
+./tools/Find-Bzcc.ps1
+./tools/Test-Playtest.ps1 -Godot $godot -Mission "$run/path-edit/braveliltoaster.bzn"
+./tools/Clean-Build.ps1 -Apply
+```
+
+With an empty test settings file, Playtest detected the Steam installation on V: and started the game process in 1,500 ms. The app exported the current map into a short `%TEMP%\bzm` directory. The BZCC log records the edited map entering MISSION / RUN. A normal exit removed the temporary runtime and map, and the editor reported that editing was ready. The standalone Steam lookup also found the game through a test libraryfolders entry in a separate Steam root.
+
+The native path regression checks UI drag, rename, movement, duplicate name rejection, project round-trip and shared undo/redo. Its game-tested snapshot adds a point and changes `11Patrol1` to a loop. A comparison asserts exact bytes before the point record and after the edited route. The preserved bytes include the unknown BZN trailer. This run proves engine acceptance of the structure. It leaves route behavior and map-author intent to a mission-specific test.
+
+The GPU test checks that button presets and the VRV shortcut bindings affect the same brush state shown in both views. It also checks path overlay updates, the native folder picker configuration and 3D view mode commands. The reference for the new workspace is the large terrain view, compact tool buttons and side map shown in the supplied BZCC screenshots, with the project's own Golden Default controls and Verdana.
+
+## Native visual assets
+
+```powershell
+./tools/Build-ObjectPreview.ps1 -VrvSource $vrv
+./tools/Test-ObjectPreview.ps1 -Godot $godot -Game $game -WithGpu
+```
+
+The GPU test opens the native map, enables Objects and Texture through the editor actions, and renders 76 object models, eight scrap pool instances and 16 terrain texture slots. Eight distinct object materials resolved native diffuse textures. The object scanner's count agrees with the independently parsed BZN. The screenshot and run log are under `build/object-preview`. The helper compiles locally from the installed VRV source and reads installed assets in place.
+
+The local Workshop scan found 972 WAT v5 samples with the same 2,416-byte overhead followed by one byte per terrain block. The Brave terrain test verifies matching bounds, 222 layer-1 tiles and an encoded elevation of 135 m. WAT byte preservation remains covered by native export tests. The current water surface is an editor preview of that first layer.

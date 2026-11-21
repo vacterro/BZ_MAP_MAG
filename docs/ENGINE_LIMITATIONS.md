@@ -1,0 +1,10 @@
+# Engine limitations
+
+- TER v5 has one height per X/Z. Overhangs, caves and negative volumes do not fit in one terrain layer. A future prop or mesh placement workflow requires its own model, collision, and mission validation.
+- The native TER sample interval is 2 m in the reviewed format. The 8 m TRN setting is an independent parameter. Heights are floats in the file. VRV observed non-granularity-aligned values in-game, so the editor's snapping is a controlled authoring choice. The ±32,000 step editing bound is conservative and does not claim an engine maximum.
+- The preview intentionally renders elevation. Its colors and tessellation do not reconstruct the complete BZCC material stack. In particular the displayed 3D mesh is decimated at an 8 m interval while brush sampling and export retain 2 m heights.
+- BZN version alone does not determine the public 185 object stream layout. Playtest conversion uses an explicit VRV adapter for the reviewed late layouts. Ordinary native export preserves BZN exactly.
+- Missing mod assets, omitted packed companions, Steam availability and mission DLL dependencies can prevent loading after a valid TER parse. The package loader currently expects same-stem BZN/TRN/INF/TER on disk. Some stock packages store those files in different search roots or archives.
+- VRV's 2.0.206.10 comparison identifies local fog controls and several weather/texture-rate settings that require a newer executable. Its 2.0.185 port covers only a subset. Newer version support remains experimental.
+- Playtest runs a native game process with a private resource configuration and separate profile. It exposes launch/exit status. Steam remains the actual client, and BZCC can write session logs to its shared Documents log directory. Runtime hot reload and external three-way merge are pending.
+- The node evaluator covers a circular region up to 256 m radius. Its material outputs cover vertex RGB and the base tile lane. Tile evaluation samples each 16 × 16 block at its center.

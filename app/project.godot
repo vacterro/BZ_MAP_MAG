@@ -1,0 +1,21 @@
+config_version=5
+
+[application]
+config/name="BZ_MAP_MAG"
+run/main_scene="res://editor.tscn"
+config/features=PackedStringArray("4.3", "GL Compatibility")
+
+[display]
+window/size/viewport_width=1120
+window/size/viewport_height=690
+window/size/window_width_override=1120
+window/size/window_height_override=690
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+textures/default_filters/use_nearest_mipmap_filter=false
+
+[gui]
+theme/default_font_antialiasing=0
+theme/default_font_subpixel_positioning=0
