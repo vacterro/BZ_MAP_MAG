@@ -383,9 +383,15 @@ func save_project(document: Document, target: String) -> bool:
 		object_removals.append(index)
 	var object_inserts := []
 	for addition: Dictionary in document.object_additions:
-		object_inserts.append({"template": addition["template"], "id": addition["id"], "label": addition["label"],
+		var ins_rec := {"template": addition["template"], "id": addition["id"], "label": addition["label"],
 			"sequence": addition["sequence"], "position": [addition["transform"].origin.x, addition["transform"].origin.y, addition["transform"].origin.z],
-			"basis": basis_array(addition["transform"].basis)})
+			"basis": basis_array(addition["transform"].basis)}
+		if bool(addition.get("native_class", false)):
+			ins_rec["native_class"] = true
+			ins_rec["odf"] = String(addition.get("odf", ""))
+			ins_rec["team"] = int(addition.get("team", 0))
+			ins_rec["builder"] = String(addition.get("builder", ""))
+		object_inserts.append(ins_rec)
 	var object_label_edits := {}
 	for index: int in document.object_label_edits:
 		object_label_edits[str(index)] = String(document.object_label_edits[index])
@@ -488,25 +494,33 @@ func export_native(document: Document, target: String) -> bool:
 					next_pointer_id = maxi(next_pointer_id, ptr_id + 1)
 			var blocks: Array = []
 			for addition: Dictionary in document.object_additions:
-				var template_idx := int(addition.get("template", -1))
-				if template_idx < 0 or template_idx >= package.objects.size():
-					return fail("Missing native object template for insertion.")
 				var allocated_ptr := allocate_unique_pointer_id(pointer_counts, next_pointer_id)
 				if allocated_ptr <= 0:
 					return fail("No unused native object pointer ID is available.")
 				pointer_counts[allocated_ptr] = 1
 				next_pointer_id = 1 if allocated_ptr >= 4294967295 else allocated_ptr + 1
-				var template: Dictionary = package.objects[template_idx]
 				var add_label := String(addition["label"])
 				var add_seq := int(addition["sequence"])
 				if add_label.is_empty():
 					add_seq = add_seq | 0x800000
 				else:
 					add_seq = add_seq & ~0x800000
-				var add_odf := String(addition.get("odf", ""))
-				if add_odf.is_empty() and document.object_odf_edits.has(template_idx):
-					add_odf = String(document.object_odf_edits[template_idx])
-				var block := BznObjects.build_block(source_bzn, template, add_seq, add_label, addition["transform"], allocated_ptr, add_odf)
+				var block := PackedByteArray()
+				if bool(addition.get("native_class", false)):
+					var add_odf := String(addition.get("odf", ""))
+					var add_team := int(addition.get("team", 0))
+					block = BznObjects.build_native_class_block(add_odf, add_seq, add_label, addition["transform"], allocated_ptr, add_team, package.bzn_version)
+					if block.is_empty():
+						return fail("No verified native class builder for ODF '%s' on BZN %d." % [add_odf, package.bzn_version])
+				else:
+					var template_idx := int(addition.get("template", -1))
+					if template_idx < 0 or template_idx >= package.objects.size():
+						return fail("Missing native object template for insertion.")
+					var template: Dictionary = package.objects[template_idx]
+					var add_odf := String(addition.get("odf", ""))
+					if add_odf.is_empty() and document.object_odf_edits.has(template_idx):
+						add_odf = String(document.object_odf_edits[template_idx])
+					block = BznObjects.build_block(source_bzn, template, add_seq, add_label, addition["transform"], allocated_ptr, add_odf)
 				blocks.append(block)
 			var removals: Array = []
 			for index: int in document.object_removals:

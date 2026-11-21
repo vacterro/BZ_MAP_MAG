@@ -131,7 +131,7 @@ func _draw() -> void:
 			var world := object_preview if selected and object_preview.is_finite() else document.object_position(index)
 			var pixel := path_point_pixel(Vector2(world.x, world.z))
 			if rect.has_point(pixel):
-				var pool := pools.has(document.object_pool_reference(index))
+				var pool := pools.has(document.object_pool_reference(index)) or ("pool" in document.object_odf(index).to_lower())
 				var radius := 6.0 if selected else (4.0 if pool else 1.5)
 				draw_circle(pixel, radius, palette["accentTeal"] if selected else palette["borderHighlight"], not pool and not selected)
 	for secondary: Dictionary in extra_paths:

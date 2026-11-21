@@ -71,8 +71,11 @@ func _ready() -> void:
 	layout.add_child(limits)
 	parameter(limits, "Min", "low", -3000, 3000, 1, "m", -200, 500)
 	parameter(limits, "Max", "high", -3000, 3000, 1, "m", -200, 500)
-	label(limits, "Radius")
-	spin(limits, range_field, 32, 256, 16, "m")
+	var rad_grp := HBoxContainer.new()
+	rad_grp.add_theme_constant_override("separation", 3)
+	label(rad_grp, "Radius")
+	spin(rad_grp, range_field, 32, 256, 16, "m")
+	limits.add_child(rad_grp)
 	range_field.value = 128
 	range_field.value_changed.connect(func(_value): invalidate())
 	var materials := HFlowContainer.new()
@@ -159,20 +162,26 @@ func spin(parent: Control, field: SliderField, minimum: float, maximum: float, s
 
 
 func parameter(bar: Control, caption: String, key: String, minimum: float, maximum: float, step: float, unit: String = "", slider_lo: float = NAN, slider_hi: float = NAN) -> void:
-	label(bar, caption)
+	var grp := HBoxContainer.new()
+	grp.add_theme_constant_override("separation", 3)
+	label(grp, caption)
 	var field := SliderField.new()
-	spin(bar, field, minimum, maximum, step, unit, slider_lo, slider_hi)
+	spin(grp, field, minimum, maximum, step, unit, slider_lo, slider_hi)
 	field.value_changed.connect(func(value): set_parameter(key, value))
+	bar.add_child(grp)
 	parameters[key] = field
 
 
 func color_parameter(bar: Control, caption: String, key: String) -> void:
-	label(bar, caption)
+	var grp := HBoxContainer.new()
+	grp.add_theme_constant_override("separation", 3)
+	label(grp, caption)
 	var field := ColorPickerButton.new()
 	field.custom_minimum_size = Vector2(34, 20)
 	field.edit_alpha = false
 	field.color_changed.connect(func(color: Color): set_parameter(key, Terrain.rgb_word(color)))
-	bar.add_child(field)
+	grp.add_child(field)
+	bar.add_child(grp)
 	color_parameters[key] = field
 
 

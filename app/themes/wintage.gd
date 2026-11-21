@@ -119,12 +119,14 @@ static func make(colors: Dictionary, font_size: int = 12, compact: bool = false)
 		theme.set_font(rtl_font, "RichTextLabel", font)
 	for rtl_bold in ["bold_font", "bold_italics_font"]:
 		theme.set_font(rtl_bold, "RichTextLabel", bold)
+	var active_ink: Color = colors["accentTealDeep"] if (colors["selection"] as Color).get_luminance() > 0.5 else colors["borderHighlight"]
 	for type in ["Label", "Button", "LineEdit", "CheckButton", "CheckBox", "OptionButton", "PopupMenu", "RichTextLabel", "ItemList", "TabContainer"]:
 		theme.set_font("font", type, font)
 		theme.set_font_size("font_size", type, clamped_size)
 		theme.set_color("font_color", type, colors["textPrimary"])
-		theme.set_color("font_hover_color", type, colors["borderHighlight"])
-		theme.set_color("font_pressed_color", type, colors["borderHighlight"])
+		theme.set_color("font_hover_color", type, active_ink)
+		theme.set_color("font_pressed_color", type, active_ink)
+		theme.set_color("font_hover_pressed_color", type, active_ink)
 		theme.set_color("font_disabled_color", type, colors["textMuted"])
 	theme.set_color("default_color", "RichTextLabel", colors["textPrimary"])
 	theme.set_stylebox("normal", "Button", box(colors["surfaceRaised"], colors["bevelLight"], colors["borderDark"], compact))

@@ -3,6 +3,8 @@ extends RefCounted
 const Package := preload("res://formats/map_package.gd")
 const Graph := preload("res://nodes/height_graph.gd")
 const PathCodec := preload("res://formats/bzn_paths.gd")
+const BznObjects := preload("res://formats/bzn_objects.gd")
+const Layouts := preload("res://formats/bzn_layouts.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
 const Water := preload("res://formats/water_v5.gd")
 const SlopeShapes := preload("res://core/slope_shapes.gd")
@@ -1310,11 +1312,23 @@ func valid_object_edit(index: int, fields: Dictionary) -> bool:
 
 func valid_object_insertion(item: Dictionary) -> bool:
 	var template: Variant = item.get("template")
-	if not valid_native_integer(template):
-		return false
-	var index := int(template)
-	if index < 0 or index >= package.objects.size():
-		return false
+	var is_native_class := bool(item.get("native_class", false))
+	var index := -1
+	if is_native_class:
+		if not ((template is int or template is float) and is_finite(template) and int(template) == -1):
+			return false
+		var odf_v: Variant = item.get("odf", "")
+		if not (odf_v is String) or not BznObjects.supports_native_new_class(String(odf_v), package.bzn_version):
+			return false
+		var team_v: Variant = item.get("team", 0)
+		if not valid_native_integer(team_v) or int(team_v) < 0 or int(team_v) > 15:
+			return false
+	else:
+		if not valid_native_integer(template):
+			return false
+		index = int(template)
+		if index < 0 or index >= package.objects.size():
+			return false
 	if not valid_native_integer(item.get("sequence")) or not valid_native_integer(item.get("id")):
 		return false
 	if sequence_taken(int(item["sequence"])):
@@ -1517,6 +1531,10 @@ func object_label(view: int) -> String:
 
 
 func object_team(view: int) -> int:
+	if object_is_added(view):
+		var add := object_addition(view)
+		if add.has("team"):
+			return int(add["team"])
 	return int(object_template(view).get("team", 0))
 
 
@@ -1620,6 +1638,68 @@ func label_taken(label: String) -> bool:
 	return false
 
 
+func fresh_sequence_for_new(auto_label: bool = true) -> int:
+	var mask := 0x800000 if auto_label else 0
+	var low := 1
+	for entry in package.objects:
+		low = maxi(low, int(entry["sequence"]) & 0x7fffff)
+	for addition in object_additions:
+		low = maxi(low, int(addition["sequence"]) & 0x7fffff)
+	for attempt in 65535:
+		var candidate := (low + 1 + attempt) & 0x7fffff
+		if candidate > 0 and not sequence_taken(candidate | mask) and not sequence_taken(candidate | (0 if auto_label else 0x800000)):
+			return candidate | mask
+	return -1
+
+
+func place_native_object(odf: String, position: Vector3, team: int = -1, label: String = "") -> int:
+	if stroke_active or has_preview():
+		fail("Finish the current terrain edit first.")
+		return -1
+	if not valid_object_position(position):
+		fail("Choose a finite object position on the terrain.")
+		return -1
+	if object_count() >= 8192:
+		fail("Object count has reached the native BZN limit (8192).")
+		return -1
+	var count_cap := Layouts.capability_status(package.layout_id, Layouts.EDIT_OBJECT_COUNT)
+	if not (count_cap in ["NATIVE", "BAKED"]):
+		fail("Native object insertion is not supported on BZN layout %s (%s)." % [package.layout_id, count_cap])
+		return -1
+	if not BznObjects.supports_native_new_class(odf, package.bzn_version):
+		fail("No verified class-specific native BZN builder exists for '%s' on BZN %d." % [odf, package.bzn_version])
+		return -1
+	var clean_label := label.strip_edges()
+	if not valid_object_label(clean_label):
+		fail("Choose a valid ASCII label of at most 128 characters.")
+		return -1
+	var spec := BznObjects.native_class_spec(odf)
+	var canonical_odf := String(spec["odf"])
+	var chosen_team := clampi(team if team >= 0 else int(spec.get("defaultTeam", 0)), 0, 15)
+	var sequence := fresh_sequence_for_new(clean_label.is_empty())
+	if sequence < 0:
+		fail("No unused native object sequence is available.")
+		return -1
+	var addition := {
+		"id": next_object_id,
+		"template": -1,
+		"native_class": true,
+		"builder": String(spec["builder"]),
+		"odf": canonical_odf,
+		"team": chosen_team,
+		"label": clean_label,
+		"sequence": sequence,
+		"position": [position.x, position.y, position.z],
+		"basis": [],
+		"transform": Transform3D(Basis.IDENTITY, position),
+	}
+	push_history({"object_add": addition, "slot": object_additions.size()})
+	object_additions.append(addition)
+	next_object_id += 1
+	objects_changed.emit()
+	return object_count() - 1
+
+
 func duplicate_object(view: int, position: Vector3, label_override: Variant = null) -> int:
 	if stroke_active or has_preview():
 		fail("Finish the current terrain edit first.")
@@ -1633,6 +1713,14 @@ func duplicate_object(view: int, position: Vector3, label_override: Variant = nu
 	if label_override != null and (not (label_override is String) or not valid_object_label(String(label_override))):
 		fail("Choose a valid ASCII label of at most 128 characters.")
 		return -1
+	if object_is_added(view) and bool(object_addition(view).get("native_class", false)):
+		var src_add := object_addition(view)
+		var next_lbl := String(label_override) if label_override != null else copy_label({"label": String(src_add.get("label", ""))})
+		var placed := place_native_object(String(src_add["odf"]), position, int(src_add.get("team", 0)), next_lbl)
+		if placed >= 0:
+			var src_xf := object_transform(view)
+			object_addition(placed)["transform"] = Transform3D(src_xf.basis, position)
+		return placed
 	var template := object_template(view)
 	if template.is_empty():
 		fail("Missing native object template.")

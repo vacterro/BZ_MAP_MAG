@@ -230,10 +230,13 @@ static func build_block(source: PackedByteArray, entry: Dictionary, sequence: in
 	return result
 
 
-static func build_spawnpoint_block(sequence: int, transform: Transform3D, pointer_id: int, team: int = 0) -> PackedByteArray:
+static func build_spawnpoint_block(sequence: int, transform: Transform3D, pointer_id: int, team: int = 0, label: String = "") -> PackedByteArray:
 	var result := string_record("pspwn_1")
-	result.append_array(tag_record(4, u32(sequence | 0x800000)))
+	var seq := (sequence & ~0x800000) if not label.is_empty() else (sequence | 0x800000)
+	result.append_array(tag_record(4, u32(seq)))
 	result.append_array(tag_record(2, PackedByteArray([team & 0xff])))
+	if not label.is_empty():
+		result.append_array(string_record(label))
 	result.append_array(tag_record(1, PackedByteArray([0])))
 	result.append_array(tag_record(8, u32(pointer_id)))
 	var matrix := PackedByteArray()
@@ -257,6 +260,202 @@ static func build_spawnpoint_block(sequence: int, transform: Transform3D, pointe
 	spawn_tail[31] = 2
 	result.append_array(tag_record(2, spawn_tail))
 	return result
+
+
+## Strictly verified class-specific native BZN object builders for BZCC 2.0.185
+## binary layouts (1192 / 1196). Every entry's record structure and physics
+## parameters are derived from direct differential binary inspection of Stock
+## BZCC 2.0.185 maps (plgr.bzn 1192, st_dunes.bzn 1187, braveliltoaster.bzn 1196).
+## NEVER synthesize unverified classes with a generic blob.
+const VERIFIED_NATIVE_CLASSES := {
+	"pspwn_1": {
+		"odf": "pspwn_1",
+		"builder": "spawnpnt",
+		"classLabel": "spawnpnt",
+		"displayName": "Spawn Point",
+		"category": "Mission",
+		"faction": "Neutral",
+		"defaultTeam": 0,
+		"unitName": "Spawn",
+		"evidence": "Stock st_dunes.bzn / native 1192 Stock Strategy & Instant Playtest",
+	},
+	"uepool01": {
+		"odf": "uepool01",
+		"builder": "deposit_building",
+		"classLabel": "deposit",
+		"displayName": "Biometal Pool",
+		"category": "Resource",
+		"faction": "Neutral",
+		"defaultTeam": 0,
+		"unitName": "Biometal Pool",
+		"mass": 439800.0,
+		"inertia": 90890000.0,
+		"powerFlags": 0,
+		"evidence": "Stock st_dunes.bzn + Brave 1196 25-record Building/deposit tail",
+	},
+	"npscrx": {
+		"odf": "npscrx",
+		"builder": "scrap",
+		"classLabel": "scrap",
+		"displayName": "Loose Scrap",
+		"category": "Resource",
+		"faction": "Neutral",
+		"defaultTeam": 0,
+		"unitName": "Scrap",
+		"mass": 35.98,
+		"inertia": 8.543,
+		"evidence": "Stock st_dunes.bzn + Brave 1196 24-record Scrap tail",
+	},
+	"morock03": {
+		"odf": "morock03",
+		"builder": "i76building",
+		"classLabel": "I76Building",
+		"displayName": "Big Rock",
+		"category": "Prop",
+		"faction": "Neutral",
+		"defaultTeam": 0,
+		"unitName": "Big Rock",
+		"mass": 199800.0,
+		"inertia": 10490000.0,
+		"powerFlags": 0,
+		"evidence": "Stock st_dunes.bzn + Brave 1196 25-record I76Building tail",
+	},
+	"ibpgen": {
+		"odf": "ibpgen",
+		"builder": "powerplant_building",
+		"classLabel": "powerplant",
+		"displayName": "ISDF Power Generator",
+		"category": "Building",
+		"faction": "ISDF",
+		"defaultTeam": 1,
+		"unitName": "Power",
+		"mass": 2053000.0,
+		"inertia": 503000000.0,
+		"powerFlags": 1,
+		"evidence": "Stock plgr.bzn 1192 25-record powerplant Building tail",
+	},
+	"iblite": {
+		"odf": "iblite",
+		"builder": "i76sign_building",
+		"classLabel": "i76sign",
+		"displayName": "ISDF Light Post",
+		"category": "Prop",
+		"faction": "ISDF",
+		"defaultTeam": 0,
+		"unitName": "Light",
+		"mass": 741.9,
+		"inertia": 922.8,
+		"powerFlags": 0,
+		"evidence": "Stock plgr.bzn 1192 25-record i76sign Building tail",
+	},
+}
+
+
+static func f32(value: float) -> PackedByteArray:
+	var payload := PackedByteArray()
+	payload.resize(4)
+	payload.encode_float(0, value)
+	return payload
+
+
+static func native_class_spec(odf: String) -> Dictionary:
+	var stem := odf.strip_edges().get_file().to_lower()
+	if stem.ends_with(".odf"):
+		stem = stem.substr(0, stem.length() - 4)
+	return VERIFIED_NATIVE_CLASSES.get(stem, {})
+
+
+static func supports_native_new_class(odf: String, bzn_version: int) -> bool:
+	return bzn_version in [1192, 1196] and not native_class_spec(odf).is_empty()
+
+
+static func _build_common_header(odf: String, sequence: int, label: String, transform: Transform3D, pointer_id: int, team: int) -> PackedByteArray:
+	var result := string_record(odf)
+	var seq := (sequence & ~0x800000) if not label.is_empty() else (sequence | 0x800000)
+	result.append_array(tag_record(4, u32(seq)))
+	result.append_array(tag_record(2, PackedByteArray([clampi(team, 0, 15) & 0xff])))
+	if not label.is_empty():
+		result.append_array(string_record(label))
+	result.append_array(tag_record(1, PackedByteArray([0])))
+	result.append_array(tag_record(8, u32(pointer_id)))
+	var matrix := PackedByteArray()
+	matrix.resize(64)
+	matrix.encode_float(0, 1.0)
+	matrix.encode_float(20, 1.0)
+	matrix.encode_float(40, 1.0)
+	matrix.encode_float(60, 1.0)
+	write_transform(matrix, 0, 48, transform)
+	result.append(12)
+	result.append_array(u16(64))
+	result.append_array(matrix)
+	return result
+
+
+static func _build_gameobject_body_tail(unit_name: String, mass: float, inertia: float, power_flags: int, include_building_byte: bool, bzn_version: int) -> PackedByteArray:
+	var tail := PackedByteArray()
+	if include_building_byte:
+		tail.append_array(tag_record(2, PackedByteArray([0])))
+	var inv_mass := 1.0 / maxf(mass, 0.0001)
+	var inv_inertia := 1.0 / maxf(inertia, 0.0001)
+	tail.append_array(tag_record(5, f32(1.0)))
+	tail.append_array(tag_record(5, f32(mass)))
+	tail.append_array(tag_record(5, f32(inv_mass)))
+	tail.append_array(tag_record(5, f32(0.0)))
+	tail.append_array(tag_record(5, f32(1e30)))
+	tail.append_array(tag_record(5, f32(inertia)))
+	tail.append_array(tag_record(5, f32(inv_inertia)))
+	var zero_vec := PackedByteArray()
+	zero_vec.resize(12)
+	for _i in 3:
+		tail.append_array(tag_record(9, zero_vec))
+	tail.append_array(string_record(unit_name))
+	tail.append_array(tag_record(2, PackedByteArray([0x6c])))
+	tail.append_array(tag_record(3, PackedByteArray([0xff, 0xff])))
+	tail.append_array(tag_record(4, u32(65535)))
+	tail.append_array(tag_record(3, u16(power_flags)))
+	var trail_byte := 0x00 if bzn_version >= 1196 else 0xff
+	tail.append_array(tag_record(2, PackedByteArray([trail_byte])))
+	tail.append_array(tag_record(4, u32(0)))
+	tail.append_array(tag_record(2, PackedByteArray([0])))
+	tail.append_array(tag_record(4, u32(0)))
+	tail.append_array(tag_record(8, u32(0)))
+	tail.append_array(tag_record(4, u32(0)))
+	tail.append_array(tag_record(1, PackedByteArray([0])))
+	tail.append_array(tag_record(2, PackedByteArray([1])))
+	return tail
+
+
+static func build_native_class_block(odf: String, sequence: int, label: String, transform: Transform3D, pointer_id: int, team: int = 0, bzn_version: int = 1192) -> PackedByteArray:
+	if not supports_native_new_class(odf, bzn_version) or pointer_id <= 0:
+		return PackedByteArray()
+	var spec := native_class_spec(odf)
+	var builder := String(spec.get("builder", ""))
+	var canonical_odf := String(spec.get("odf", odf.strip_edges()))
+	if builder == "spawnpnt":
+		return build_spawnpoint_block(sequence, transform, pointer_id, team, label)
+	if builder in ["deposit_building", "i76building", "powerplant_building", "i76sign_building"]:
+		var out := _build_common_header(canonical_odf, sequence, label, transform, pointer_id, team)
+		out.append_array(_build_gameobject_body_tail(
+			String(spec["unitName"]),
+			float(spec["mass"]),
+			float(spec["inertia"]),
+			int(spec.get("powerFlags", 0)),
+			true,
+			bzn_version
+		))
+		return out
+	if builder == "scrap":
+		var out := _build_common_header(canonical_odf, sequence, label, transform, pointer_id, team)
+		out.append_array(_build_gameobject_body_tail(
+			String(spec["unitName"]),
+			float(spec["mass"]),
+			float(spec["inertia"]),
+			0,
+			false,
+			bzn_version
+		))
+		return out
+	return PackedByteArray()
 
 
 static func patch_mission_dll(source: PackedByteArray, insert_offset: int, table_start: int, new_dll: String) -> PackedByteArray:

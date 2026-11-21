@@ -157,9 +157,11 @@ func add_btn(parent: Control, text: String, action: Callable) -> Button:
 
 
 func add_spin(parent: Control, caption: String, box: SliderField, lo: float, hi: float, step_val: float, initial: float, unit: String = "", slider_lo: float = NAN, slider_hi: float = NAN) -> void:
+	var grp := HBoxContainer.new()
+	grp.add_theme_constant_override("separation", 3)
 	var lbl := Label.new()
 	lbl.text = caption
-	parent.add_child(lbl)
+	grp.add_child(lbl)
 	box.min_value = lo
 	box.max_value = hi
 	box.step = step_val
@@ -170,7 +172,8 @@ func add_spin(parent: Control, caption: String, box: SliderField, lo: float, hi:
 	box.value = initial
 	box.set_readout_width(44.0)
 	box.custom_minimum_size.x = 104
-	parent.add_child(box)
+	grp.add_child(box)
+	parent.add_child(grp)
 
 
 func current_profile_id() -> String:

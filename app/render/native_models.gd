@@ -6,6 +6,7 @@ var materials := {}
 var models := {}
 var instances := {}
 var specs := {}
+var specs_by_odf := {}
 var adapter := ""
 
 
@@ -32,7 +33,11 @@ func display(assets: Dictionary) -> int:
 		model.set_meta("native_pool", item["pool"])
 		add_child(model)
 		instances[item["index"]] = model
-		specs[item["index"]] = {"mesh": key, "scale": float(item["scale"]), "pool": item["pool"]}
+		var spec_entry := {"mesh": key, "scale": float(item["scale"]), "pool": item["pool"]}
+		specs[item["index"]] = spec_entry
+		var item_odf := String(item.get("odf", "")).to_lower()
+		if not item_odf.is_empty():
+			specs_by_odf[item_odf] = spec_entry
 		count += 1
 	return count
 
@@ -45,6 +50,7 @@ func clear_models() -> void:
 	instances.clear()
 	materials.clear()
 	specs.clear()
+	specs_by_odf.clear()
 
 
 func move_instance(index: int, position: Vector3) -> void:
@@ -74,7 +80,10 @@ func rebuild(document) -> void:
 		pool[key].append(node)
 	instances.clear()
 	for view in document.object_count():
-		var spec: Dictionary = specs.get(document.object_pool_reference(view), {})
+		var ref_idx: int = document.object_pool_reference(view)
+		var spec: Dictionary = specs.get(ref_idx, {}) if ref_idx >= 0 else {}
+		if spec.is_empty():
+			spec = specs_by_odf.get(document.object_odf(view).to_lower(), {})
 		if spec.is_empty() or not models.has(spec["mesh"]):
 			continue
 		var candidates: Array = pool.get(String(spec["mesh"]), [])

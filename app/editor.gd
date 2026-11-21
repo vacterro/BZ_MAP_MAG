@@ -23,6 +23,7 @@ const NewMapWizard := preload("res://tools/new_map_wizard.gd")
 const TargetProfileDialog := preload("res://tools/target_profile_dialog.gd")
 const WaterCommands := preload("res://tools/water_commands.gd")
 const MoveObject := preload("res://tools/move_object.gd")
+const ObjectBrowser := preload("res://tools/object_browser.gd")
 const SoundEditor := preload("res://tools/sound_editor.gd")
 const AutoSaveStore := preload("res://core/autosave_store.gd")
 const SETTINGS := "user://editor.cfg"
@@ -52,6 +53,9 @@ var selected_path_point := -1
 var brush_panel := BrushPanel.new()
 var camera_buttons: Array[Button] = []
 var objects_button: Button
+var object_browser_button: Button
+var object_browser := ObjectBrowser.new()
+var pending_place_spec: Dictionary = {}
 var move_objects_button: Button
 var object_tool := MoveObject.new()
 var water_button: Button
@@ -279,6 +283,7 @@ func _ready() -> void:
 			add_label(heading, "2D Map")
 			objects_button = add_button(heading, "Objects", toggle_objects, "Display supported native BZCC models in the 3D view")
 			objects_button.toggle_mode = true
+			object_browser_button = add_button(heading, "Object Browser", open_object_browser, "Browse active mod ODFs, inspect dependencies and place verified native objects onto terrain")
 			move_objects_button = add_button(heading, "Move Object", object_tool_changed, "Select and drag an object in either view. Shift snaps to the terrain grid. [ / ] rotate ±15° (Shift 1°), Ctrl+D duplicates, Delete removes. Esc cancels.")
 			move_objects_button.toggle_mode = true
 			object_label_button = add_button(heading, "Object Label", open_object_label_editor, "Edit the native BZN label of the selected object")
@@ -341,6 +346,10 @@ func _ready() -> void:
 	add_child(sound_editor)
 	sound_editor.updated.connect(func(value: String): sync_actions(); report(value))
 	sound_editor.sound_point_selected.connect(select_object_view)
+	add_child(object_browser)
+	object_browser.place_requested.connect(start_place_object)
+	object_browser.place_at_cursor_requested.connect(place_object_at_cursor)
+	object_browser.status_message.connect(report)
 	object_label_dialog.title = "Object Label Editor"
 	object_label_dialog.ok_button_text = "Apply Label"
 	object_label_dialog.dialog_hide_on_ok = false
@@ -554,6 +563,10 @@ func _shortcut_input(event: InputEvent) -> void:
 	var focused := get_viewport().gui_get_focus_owner()
 	if focused is LineEdit or focused is TextEdit:
 		return
+	if event.keycode == KEY_ESCAPE and not pending_place_spec.is_empty():
+		cancel_place_object(true)
+		get_viewport().set_input_as_handled()
+		return
 	if event.keycode == KEY_ESCAPE and (path_drag_view != null or object_tool.drag_view != null):
 		if object_tool.drag_view != null:
 			finish_object_drag(false)
@@ -641,7 +654,9 @@ func sync_actions() -> void:
 	move_path_button.disabled = locked or path_list.selected <= 0
 	mission_studio_button.disabled = locked
 	var thread_busy := object_thread != null and object_thread.is_started()
-	objects_button.disabled = locked or document.package.objects.is_empty() or thread_busy
+	objects_button.disabled = locked or document.object_count() == 0 or thread_busy
+	if object_browser_button != null:
+		object_browser_button.disabled = locked
 	move_objects_button.disabled = locked or document.object_count() == 0 or document.has_preview()
 	if object_label_button != null:
 		object_label_button.disabled = locked or document.object_count() == 0
@@ -893,6 +908,9 @@ func on_document_profile_changed() -> void:
 		mission_studio.refresh_all()
 	if target_profile_dialog.visible:
 		target_profile_dialog.refresh_all()
+	if object_browser.visible:
+		object_browser.refresh_catalog()
+	cancel_place_object(false)
 	sync_actions()
 
 
@@ -1163,7 +1181,13 @@ func start_asset_scan(kind: String, button: Button) -> void:
 	var task: Callable
 	if kind == "objects":
 		asset_worker = NativeAssets.new()
-		task = asset_worker.load_objects.bind(game, folder, adapter, document.package.objects, extra_roots, active_mod)
+		var scan_objects: Array = []
+		for v in document.object_count():
+			scan_objects.append({
+				"odf": document.object_odf(v),
+				"transform": document.object_transform(v),
+			})
+		task = asset_worker.load_objects.bind(game, folder, adapter, scan_objects, extra_roots, active_mod)
 	else:
 		tile_worker = TerrainTextures.new()
 		task = tile_worker.load_native.bind(game, folder, adapter, document.package.terrain, document.package.metadata["trn"].get("texture", {}), extra_roots, active_mod)
@@ -1301,7 +1325,7 @@ func all_dialogs() -> Array[Window]:
 		open_dialog, blank_dialog, flat_template_dialog, flat_output_dialog, save_dialog, export_dialog,
 		confirmation, keys_dialog, playtest_dialog, recover_dialog, game_picker, vrv_picker, autosave_picker,
 		asset_profile_picker, studio, path_inspector, mission_studio, terrain_tools, slope_studio, water_tools,
-		sound_editor, object_label_dialog, new_map_wizard, target_profile_dialog,
+		sound_editor, object_label_dialog, new_map_wizard, target_profile_dialog, object_browser,
 	]
 
 
@@ -1387,6 +1411,88 @@ func open_sound_editor() -> void:
 		return
 	var env := mod_registry.resolve_content_environment(document, game_path.text.strip_edges(), vrv_path.text.strip_edges())
 	sound_editor.begin(document, object_tool.selected, game_path.text.strip_edges(), vrv_path.text.strip_edges(), env["linkedFolders"] + env["modAssetRoots"])
+
+
+func open_object_browser() -> void:
+	if document == null:
+		return
+	var game := game_path.text.strip_edges()
+	var vrv := vrv_path.text.strip_edges()
+	if mod_registry.last_game_dir != game:
+		mod_registry.discover_installed(game, vrv)
+	object_browser.begin(document, mod_registry, game, vrv)
+
+
+func start_place_object(odf: String, team: int, template_view: int, is_native_new: bool) -> void:
+	if document == null:
+		return
+	leave_object_tool()
+	if path_drag_view != null:
+		finish_point_drag(false)
+	move_path_button.set_pressed_no_signal(false)
+	pending_place_spec = {
+		"odf": odf,
+		"team": team,
+		"template_view": template_view,
+		"is_native_new": is_native_new,
+	}
+	report("Place %s (Team %d): click in 2D or 3D view. Shift+click keeps placing. Esc cancels." % [odf, team])
+	sync_actions()
+
+
+func cancel_place_object(announce: bool = false) -> void:
+	if pending_place_spec.is_empty():
+		return
+	pending_place_spec.clear()
+	if announce:
+		report("Object placement cancelled.")
+	sync_actions()
+
+
+func place_object_at_cursor(odf: String, team: int, template_view: int, is_native_new: bool) -> void:
+	if document == null:
+		return
+	var terrain := document.package.terrain
+	var sample := last_cursor if last_cursor.x >= 0.0 else Vector2(terrain.dimensions) * 0.5
+	pending_place_spec = {
+		"odf": odf,
+		"team": team,
+		"template_view": template_view,
+		"is_native_new": is_native_new,
+	}
+	var placed := place_object_at_sample(sample)
+	pending_place_spec.clear()
+	if placed >= 0:
+		object_browser.refresh_catalog()
+
+
+func place_object_at_sample(sample: Vector2) -> int:
+	if document == null or pending_place_spec.is_empty() or sample.x < 0.0:
+		return -1
+	var world := scene_view.point_world(sample)
+	var odf := String(pending_place_spec["odf"])
+	var team := int(pending_place_spec["team"])
+	var is_new := bool(pending_place_spec["is_native_new"])
+	var view := -1
+	if is_new:
+		view = document.place_native_object(odf, world, team)
+	else:
+		view = document.duplicate_object(int(pending_place_spec["template_view"]), world)
+	if view < 0:
+		report(document.error)
+		return -1
+	top.objects_visible = true
+	top.queue_redraw()
+	object_tool.selected = view
+	object_tool.refresh_marker()
+	object_tool.update_anchors()
+	if objects_button.button_pressed and not (object_thread != null and object_thread.is_started()):
+		loaded_objects = null
+		start_asset_scan("objects", objects_button)
+	report("Placed %s (#%d, Team %d) at X %.1f, Y %.1f, Z %.1f%s" % [
+		odf, view, document.object_team(view), world.x, world.y, world.z, object_count_notice("Placed")])
+	sync_actions()
+	return view
 
 
 func validate_playtest_profile() -> Dictionary:
@@ -1783,6 +1889,15 @@ func view_input(event: InputEvent, panel: Control) -> void:
 							report(document.error)
 				elif not event.pressed and paint_view != null:
 					finish_water_stroke()
+				return
+			if not pending_place_spec.is_empty():
+				if event.pressed:
+					var place_pt: Vector2 = panel.sample_at(event.position)
+					if place_pt.x >= 0.0:
+						place_object_at_sample(place_pt)
+						if not event.shift_pressed:
+							pending_place_spec.clear()
+							sync_actions()
 				return
 			if object_tool.active:
 				if event.pressed and object_tool.drag_view == null:

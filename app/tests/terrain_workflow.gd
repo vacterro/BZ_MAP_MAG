@@ -2765,6 +2765,16 @@ func test_hold_ui_font_playtest(editor: Control, brave_source: String, blank_sou
 		check(root.get_texture().get_image().save_png(scratch.path_join("sound-editor.png")) == OK, "capture Sound Point Editor screenshot")
 	sedit.hide()
 
+	editor.open_object_browser()
+	var obrowser = editor.object_browser
+	check(obrowser.size.x <= 1100 and obrowser.size.y <= 620 and not obrowser.catalog_entries.is_empty(),
+		"Object Browser dialog fits compactly with populated catalog: size=%s count=%d" % [str(obrowser.size), obrowser.catalog_entries.size()])
+	if DisplayServer.get_name() != "headless":
+		await process_frame
+		await RenderingServer.frame_post_draw
+		check(root.get_texture().get_image().save_png(scratch.path_join("object-browser.png")) == OK, "capture Object Browser screenshot")
+	obrowser.hide()
+
 	# 3c. New Map Wizard with 22+ Workshop mods: ChoiceGroup overflow + compact summary + fits 640x540, 1120x690, 1280x720, 1920x1080, 2560x1440 (#1)
 	var many_reg := ModRegistry.new()
 	for i in 20:
@@ -2813,11 +2823,25 @@ func test_hold_ui_font_playtest(editor: Control, brave_source: String, blank_sou
 		Wintage.shrink_dialog(editor.slope_studio, 480)
 		check(editor.theme != null and editor.slope_studio.size.x >= 300 and editor.slope_studio.size.y < 520,
 			"Wintage theme '%s' sizes dialogs compactly without hardcoded theme drift" % slug)
+		if DisplayServer.get_name() != "headless" and slug != Wintage.DEFAULT_THEME:
+			await process_frame
+			await RenderingServer.frame_post_draw
+			check(root.get_texture().get_image().save_png(scratch.path_join("theme-%s.png" % slug)) == OK,
+				"capture Wintage theme '%s' screenshot" % slug)
+	editor.set_wintage_theme(Wintage.DEFAULT_THEME, false, false)
 	for res: Vector2 in [Vector2(640, 540), Vector2(1120, 690), Vector2(1280, 720), Vector2(1920, 1080), Vector2(2560, 1440)]:
 		editor.size = res
+		if DisplayServer.get_name() != "headless" and int(res.x) in [1280, 1920, 2560]:
+			root.size = Vector2i(int(res.x), int(res.y))
 		await process_frame
 		check(editor.scene_view.size.x > 100 and editor.top.size.x > 80,
 			"2D and 3D viewports retain usable workspace at %dx%d" % [int(res.x), int(res.y)])
+		if DisplayServer.get_name() != "headless" and int(res.x) in [1280, 1920, 2560]:
+			await RenderingServer.frame_post_draw
+			check(root.get_texture().get_image().save_png(scratch.path_join("editor-%dx%d.png" % [int(res.x), int(res.y)])) == OK,
+				"capture main editor at %dx%d" % [int(res.x), int(res.y)])
+	if DisplayServer.get_name() != "headless":
+		root.size = Vector2i(int(orig_editor_size.x), int(orig_editor_size.y))
 	for fsz in [10, 12, 16, 24]:
 		editor.ui_font_size = fsz
 		editor.set_wintage_theme(Wintage.DEFAULT_THEME, false, false)

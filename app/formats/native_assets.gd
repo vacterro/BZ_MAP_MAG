@@ -56,7 +56,7 @@ func load_objects(game: String, map_folder: String, adapter: String, objects: Ar
 		if mesh_path.is_empty() or geometry[mesh_path].is_empty():
 			missing[odf] = true
 		else:
-			instances.append({"index": index_in_map, "mesh": mesh_path, "transform": record["transform"], "scale": entry["scale"], "pool": pool})
+			instances.append({"index": index_in_map, "odf": String(record.get("odf", "")), "mesh": mesh_path, "transform": record["transform"], "scale": entry["scale"], "pool": pool})
 	return {"geometry": geometry, "instances": instances, "missing": missing, "pools": pools, "textures": index, "adapter": adapter}
 
 
