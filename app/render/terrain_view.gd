@@ -5,6 +5,11 @@ const Terrain := preload("res://formats/terrain_v5.gd")
 const NativeModels := preload("res://render/native_models.gd")
 const CHUNK := 64
 const STEP := 4
+const MIN_STEP := 1
+const MAX_STEP := 4
+const LOD_NEAR_SAMPLES := 160.0
+const LOD_MID_SAMPLES := 384.0
+const LOD_BUDGET_PER_MOVE := 16
 
 var document: Document
 var palette: Dictionary
@@ -28,6 +33,9 @@ var tile_material: ShaderMaterial
 var tile_maps := {}
 var textures_visible := false
 var meshes := {}
+var chunk_steps := {}
+var brush_focus := Vector2(-1, -1)
+var lod_rebuilds_last := 0
 var center := Vector3.ZERO
 var yaw := 0.55
 var pitch := 0.78
@@ -99,14 +107,117 @@ func bind(value: Document) -> void:
 		mesh.hide()
 		mesh.queue_free()
 	meshes.clear()
+	chunk_steps.clear()
+	brush_focus = Vector2(-1, -1)
 	var terrain := document.package.terrain
 	var size := terrain.dimensions - Vector2i.ONE
+	center = point_world(Vector2(size) * 0.5)
+	distance = maxf(size.x, size.y) * terrain.SPACING * 1.10
+	for z in range(0, size.y, CHUNK):
+		for x in range(0, size.x, CHUNK):
+			var start := Vector2i(x, z)
+			chunk_steps[start] = desired_lod_step(start)
 	for z in range(0, size.y, CHUNK):
 		for x in range(0, size.x, CHUNK):
 			build_chunk(Vector2i(x, z))
-	center = point_world(Vector2(size) * 0.5)
-	distance = maxf(size.x, size.y) * terrain.SPACING * 1.10
 	update_camera()
+
+
+func desired_lod_step(start: Vector2i) -> int:
+	if document == null or document.package == null or document.package.terrain == null:
+		return MAX_STEP
+	var terrain := document.package.terrain
+	var chunk_center := Vector2(start) + Vector2(CHUNK, CHUNK) * 0.5
+	var cam_sample := Vector2(center.x, center.z) / terrain.SPACING - Vector2(terrain.origin)
+	var dist := chunk_center.distance_to(cam_sample)
+	if brush_focus.x >= 0.0:
+		dist = minf(dist, chunk_center.distance_to(brush_focus))
+	if dist <= LOD_NEAR_SAMPLES:
+		return MIN_STEP
+	if dist <= LOD_MID_SAMPLES:
+		return 2
+	return MAX_STEP
+
+
+func effective_chunk_step(start: Vector2i) -> int:
+	if chunk_steps.has(start):
+		return int(chunk_steps[start])
+	return desired_lod_step(start)
+
+
+func _sample_height(heights: PackedFloat32Array, row: int, max_x: int, max_z: int, x: int, z: int) -> float:
+	return heights[clampi(z, 0, max_z) * row + clampi(x, 0, max_x)]
+
+
+func seam_snapped_height(x: int, z: int, start: Vector2i, end: Vector2i, my_step: int,
+		left_step: int, right_step: int, top_step: int, bottom_step: int,
+		heights: PackedFloat32Array, row: int) -> float:
+	var h := heights[z * row + x]
+	if x == start.x and left_step > my_step:
+		var z0 := start.y + ((z - start.y) / left_step) * left_step
+		var z1 := mini(z0 + left_step, end.y)
+		h = heights[z0 * row + x] if z0 == z1 else lerpf(heights[z0 * row + x], heights[z1 * row + x], float(z - z0) / float(z1 - z0))
+	elif x == end.x and right_step > my_step:
+		var z0 := start.y + ((z - start.y) / right_step) * right_step
+		var z1 := mini(z0 + right_step, end.y)
+		h = heights[z0 * row + x] if z0 == z1 else lerpf(heights[z0 * row + x], heights[z1 * row + x], float(z - z0) / float(z1 - z0))
+	if z == start.y and top_step > my_step:
+		var x0 := start.x + ((x - start.x) / top_step) * top_step
+		var x1 := mini(x0 + top_step, end.x)
+		h = heights[z * row + x0] if x0 == x1 else lerpf(heights[z * row + x0], heights[z * row + x1], float(x - x0) / float(x1 - x0))
+	elif z == end.y and bottom_step > my_step:
+		var x0 := start.x + ((x - start.x) / bottom_step) * bottom_step
+		var x1 := mini(x0 + bottom_step, end.x)
+		h = heights[z * row + x0] if x0 == x1 else lerpf(heights[z * row + x0], heights[z * row + x1], float(x - x0) / float(x1 - x0))
+	return h
+
+
+func exact_sample_info(sample: Vector2) -> Dictionary:
+	if document == null or sample.x < 0.0:
+		return {}
+	var terrain := document.package.terrain
+	var clamped := sample.clamp(Vector2.ZERO, Vector2(terrain.dimensions - Vector2i.ONE))
+	var ix := clampi(int(round(clamped.x)), 0, terrain.dimensions.x - 1)
+	var iz := clampi(int(round(clamped.y)), 0, terrain.dimensions.y - 1)
+	var chunk := (Vector2i(ix, iz).min(terrain.dimensions - Vector2i(2, 2)) / CHUNK) * CHUNK
+	var step := effective_chunk_step(chunk)
+	return {
+		"sample": Vector2i(ix, iz),
+		"height": terrain.heights[iz * terrain.dimensions.x + ix],
+		"step": step,
+		"resolution_m": step * int(terrain.SPACING),
+	}
+
+
+func update_lod(budget: int = LOD_BUDGET_PER_MOVE) -> int:
+	if document == null or meshes.is_empty():
+		return 0
+	var to_update: Array[Vector2i] = []
+	for start: Vector2i in meshes:
+		var wanted := desired_lod_step(start)
+		if int(chunk_steps.get(start, -1)) != wanted:
+			to_update.append(start)
+	if to_update.is_empty():
+		lod_rebuilds_last = 0
+		return 0
+	var cam_sample := Vector2(center.x, center.z) / document.package.terrain.SPACING - Vector2(document.package.terrain.origin)
+	to_update.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		return Vector2(a).distance_squared_to(cam_sample) < Vector2(b).distance_squared_to(cam_sample)
+	)
+	var count := mini(budget, to_update.size()) if budget > 0 else to_update.size()
+	var dirty_neighbors := {}
+	for i in count:
+		var start: Vector2i = to_update[i]
+		chunk_steps[start] = desired_lod_step(start)
+		dirty_neighbors[start] = true
+		for offset: Vector2i in [Vector2i(-CHUNK, 0), Vector2i(CHUNK, 0), Vector2i(0, -CHUNK), Vector2i(0, CHUNK)]:
+			var nb := start + offset
+			if meshes.has(nb):
+				dirty_neighbors[nb] = true
+	for start: Vector2i in dirty_neighbors:
+		build_chunk(start)
+	lod_rebuilds_last = dirty_neighbors.size()
+	return lod_rebuilds_last
 
 
 func point_world(point: Vector2) -> Vector3:
@@ -120,11 +231,25 @@ func point_world(point: Vector2) -> Vector3:
 	return Vector3((point.x + terrain.origin.x) * terrain.SPACING, lerpf(top, bottom, sample.y - lo.y), (point.y + terrain.origin.y) * terrain.SPACING)
 
 
-func build_chunk(start: Vector2i) -> void:
+func build_chunk(start: Vector2i, step_override: int = 0) -> void:
 	var terrain := document.package.terrain
-	var end := (start + Vector2i(CHUNK, CHUNK)).min(terrain.dimensions - Vector2i.ONE)
-	var nx := ceili(float(end.x - start.x) / STEP) + 1
-	var nz := ceili(float(end.y - start.y) / STEP) + 1
+	var heights := terrain.heights
+	var row := terrain.dimensions.x
+	var max_coord := terrain.dimensions - Vector2i.ONE
+	var max_x := max_coord.x
+	var max_z := max_coord.y
+	var spacing := terrain.SPACING
+	var ox := terrain.origin.x
+	var oz := terrain.origin.y
+	var end := (start + Vector2i(CHUNK, CHUNK)).min(max_coord)
+	var step := step_override if step_override > 0 else desired_lod_step(start)
+	chunk_steps[start] = step
+	var left_step := effective_chunk_step(start + Vector2i(-CHUNK, 0)) if start.x > 0 else step
+	var right_step := effective_chunk_step(start + Vector2i(CHUNK, 0)) if end.x < max_x else step
+	var top_step := effective_chunk_step(start + Vector2i(0, -CHUNK)) if start.y > 0 else step
+	var bottom_step := effective_chunk_step(start + Vector2i(0, CHUNK)) if end.y < max_z else step
+	var nx := ceili(float(end.x - start.x) / step) + 1
+	var nz := ceili(float(end.y - start.y) / step) + 1
 	var points := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var colors := PackedColorArray()
@@ -133,27 +258,51 @@ func build_chunk(start: Vector2i) -> void:
 	normals.resize(nx * nz)
 	colors.resize(nx * nz)
 	var amplitude := maxf(0.1, terrain.max_height - terrain.min_height)
+	var need_seam := (left_step > step) or (right_step > step) or (top_step > step) or (bottom_step > step)
+	var color_preview := graph_preview_layer == Terrain.Layer.COLOR or (graph_preview_layer < 0 and use_vertex_colors)
+	var tile_preview := graph_preview_layer == Terrain.Layer.TILES
+	var base_col: Color = palette["surface"]
+	var hi_col: Color = palette["textPrimary"]
+	var min_h := terrain.min_height
 	for j in nz:
-		var z := mini(start.y + j * STEP, end.y)
+		var z := mini(start.y + j * step, end.y)
+		var z_lo := maxi(z - step, 0)
+		var z_hi := mini(z + step, max_z)
+		var dz_world := float(z_hi - z_lo) * spacing
+		var z_row := z * row
+		var z_lo_row := z_lo * row
+		var z_hi_row := z_hi * row
 		for i in nx:
-			var x := mini(start.x + i * STEP, end.x)
-			var p := point_world(Vector2(x, z))
-			var dx := point_world(Vector2(x + STEP, z)) - point_world(Vector2(x - STEP, z))
-			var dz := point_world(Vector2(x, z + STEP)) - point_world(Vector2(x, z - STEP))
+			var x := mini(start.x + i * step, end.x)
+			var x_lo := maxi(x - step, 0)
+			var x_hi := mini(x + step, max_x)
+			var dx_world := float(x_hi - x_lo) * spacing
+			var py := seam_snapped_height(x, z, start, end, step, left_step, right_step, top_step, bottom_step, heights, row) if need_seam else heights[z_row + x]
+			var p := Vector3(float(x + ox) * spacing, py, float(z + oz) * spacing)
+			var dhy := heights[z_row + x_hi] - heights[z_row + x_lo]
+			var dhz := heights[z_hi_row + x] - heights[z_lo_row + x]
 			var index := j * nx + i
 			points[index] = p
-			normals[index] = dz.cross(dx).normalized()
-			var fraction := clampf((p.y - terrain.min_height) / amplitude, 0.0, 1.0)
-			colors[index] = palette["surface"].lerp(palette["textPrimary"], 0.25 + 0.69 * fraction)
-			if graph_preview_layer == Terrain.Layer.TILES:
+			normals[index] = Vector3(-dhy * dz_world, dx_world * dz_world, -dhz * dx_world).normalized()
+			var fraction := clampf((py - min_h) / amplitude, 0.0, 1.0)
+			colors[index] = base_col.lerp(hi_col, 0.25 + 0.69 * fraction)
+			if tile_preview:
 				var slot := terrain.material_value(Terrain.Layer.TILES, terrain.block_at(Vector2i(x, z))) & 15
-				colors[index] = palette["surface"].lerp(palette["textPrimary"], slot / 15.0)
-			elif graph_preview_layer == Terrain.Layer.COLOR or (graph_preview_layer < 0 and use_vertex_colors):
+				colors[index] = base_col.lerp(hi_col, slot / 15.0)
+			elif color_preview:
 				colors[index] = terrain.color_at(x, z)
+	indices.resize((nx - 1) * (nz - 1) * 6)
+	var k := 0
 	for j in nz - 1:
 		for i in nx - 1:
 			var a := j * nx + i
-			indices.append_array(PackedInt32Array([a, a + 1, a + nx, a + 1, a + nx + 1, a + nx]))
+			indices[k] = a
+			indices[k + 1] = a + 1
+			indices[k + 2] = a + nx
+			indices[k + 3] = a + 1
+			indices[k + 4] = a + nx + 1
+			indices[k + 5] = a + nx
+			k += 6
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = points
@@ -172,7 +321,7 @@ func build_chunk(start: Vector2i) -> void:
 
 func refresh(region: Rect2i) -> void:
 	var bounds := Rect2i(Vector2i.ZERO, document.package.terrain.dimensions - Vector2i.ONE)
-	var affected := region.grow(STEP + 1).intersection(bounds)
+	var affected := region.grow(MAX_STEP + 1).intersection(bounds)
 	if not affected.has_area():
 		return
 	var start := (affected.position / CHUNK) * CHUNK
@@ -187,6 +336,7 @@ func update_camera() -> void:
 	var offset := Vector3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch))
 	camera.position = center + offset * distance
 	camera.look_at(center)
+	update_lod()
 
 
 func orbit(relative: Vector2) -> void:
@@ -397,6 +547,11 @@ func sample_at(pixel: Vector2) -> Vector2:
 
 
 func show_cursor(point: Vector2) -> void:
+	if point.x >= 0.0:
+		var moved := brush_focus.distance_to(point) >= CHUNK * 0.5 or brush_focus.x < 0.0
+		brush_focus = point
+		if moved:
+			update_lod(8)
 	marker.visible = point.x >= 0
 	if not marker.visible:
 		return

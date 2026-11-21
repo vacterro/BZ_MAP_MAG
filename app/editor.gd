@@ -601,6 +601,8 @@ func create_flat_map(parent: String) -> void:
 
 
 func open_command_line(path: String) -> void:
+	if document != null:
+		return
 	if open_map(path):
 		print(title.text)
 	else:
@@ -617,12 +619,18 @@ func open_map(path: String) -> bool:
 	if document != null:
 		if studio.document != null:
 			studio.close_studio()
-		document.terrain_changed.disconnect(mark_refresh)
-		document.materials_changed.disconnect(mark_material_refresh)
-		document.paths_changed.disconnect(refresh_path_list)
-		document.object_moved.disconnect(object_position_changed)
-		document.objects_changed.disconnect(objects_topology_changed)
-		document.water_changed.disconnect(refresh_water)
+		if document.terrain_changed.is_connected(mark_refresh):
+			document.terrain_changed.disconnect(mark_refresh)
+		if document.materials_changed.is_connected(mark_material_refresh):
+			document.materials_changed.disconnect(mark_material_refresh)
+		if document.paths_changed.is_connected(refresh_path_list):
+			document.paths_changed.disconnect(refresh_path_list)
+		if document.object_moved.is_connected(object_position_changed):
+			document.object_moved.disconnect(object_position_changed)
+		if document.objects_changed.is_connected(objects_topology_changed):
+			document.objects_changed.disconnect(objects_topology_changed)
+		if document.water_changed.is_connected(refresh_water):
+			document.water_changed.disconnect(refresh_water)
 	water_tools.hide()
 	painting_water = false
 	document = next
@@ -1271,7 +1279,13 @@ func set_cursor(point: Vector2) -> void:
 	if point.x >= 0:
 		last_cursor = point
 		var world := scene_view.point_world(point)
-		coordinates.text = "X %.1f m   Z %.1f m   Elevation %.2f m" % [world.x, world.z, world.y]
+		var info: Dictionary = scene_view.exact_sample_info(point)
+		if not info.is_empty():
+			var samp: Vector2i = info["sample"]
+			coordinates.text = "X %.1f m   Z %.1f m   Elevation %.2f m   Sample (%d, %d) %.2f m   LOD %d m" % [
+				world.x, world.z, world.y, samp.x, samp.y, float(info["height"]), int(info["resolution_m"])]
+		else:
+			coordinates.text = "X %.1f m   Z %.1f m   Elevation %.2f m" % [world.x, world.z, world.y]
 	else:
 		coordinates.text = "Paint with left drag. Orbit with right drag. Pan with middle drag. Zoom with wheel."
 

@@ -177,6 +177,7 @@ func run() -> void:
 	test_slope_studio(editor, args[0], args[2])
 	test_slope_studio_safety(editor)
 	test_large_slope_preview()
+	await test_adaptive_terrain_lod()
 	await test_fly_autosave_symmetry(editor, args[0], args[2])
 	test_mission_studio(editor, args[0], args[2])
 	test_sound_point_labels(editor)
@@ -1424,6 +1425,7 @@ func test_large_slope_preview() -> void:
 	terrain.min_height = 100.0
 	terrain.max_height = 200.0
 	doc.package.terrain = terrain
+	doc.base_heights = terrain.heights.duplicate()
 	editor.document = doc
 	editor.top.document = doc
 	editor.scene_view.document = doc
@@ -1460,6 +1462,112 @@ func test_large_slope_preview() -> void:
 	print("4096 m slope preview: %d × %d dirty samples, %d tiles, %d meshes, %.1f ms" % [
 		dirty.size.x, dirty.size.y, editor.top.tiles.size(), editor.scene_view.meshes.size(), preview_ms])
 	# Dispose of the synthetic editor before its deferred command-line map open.
+	editor.free()
+
+
+func test_adaptive_terrain_lod() -> void:
+	var editor := EditorScene.instantiate()
+	editor.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	editor.size = Vector2(1120, 690)
+	root.add_child(editor)
+	var doc := Document.new()
+	doc.package = Package.new()
+	var terrain := Terrain.new()
+	terrain.dimensions = Vector2i(2048, 2048)
+	terrain.origin = Vector2i(-1024, -1024)
+	terrain.heights.resize(terrain.dimensions.x * terrain.dimensions.y)
+	terrain.heights.fill(100.0)
+	terrain.min_height = 100.0
+	terrain.max_height = 140.0
+	# Build five native 2 m features near chunk (1024, 1024) on the 4096 m map:
+	# 1) One-sample ridge at (1035, 1035)
+	terrain.heights[1035 * 2048 + 1035] = 118.0
+	# 2) Narrow 2 m trench along x = 1039, z = 1030..1040
+	for z in range(1030, 1041):
+		terrain.heights[z * 2048 + 1039] = 92.0
+	# 3) Sharp step for x >= 1045, z = 1030..1040
+	for z in range(1030, 1041):
+		for x in range(1045, 1052):
+			terrain.heights[z * 2048 + x] = 112.0
+	# 4) Two-metre-wide slope transition (1055 -> 1056)
+	for z in range(1030, 1041):
+		terrain.heights[z * 2048 + 1055] = 104.0
+		terrain.heights[z * 2048 + 1056] = 108.0
+	doc.package.terrain = terrain
+	doc.base_heights = terrain.heights.duplicate()
+	editor.document = doc
+	editor.top.document = doc
+	editor.scene_view.document = doc
+	doc.terrain_changed.connect(editor.mark_refresh)
+
+	var started := Time.get_ticks_usec()
+	editor.scene_view.bind(doc)
+	editor.scene_view.center = editor.scene_view.point_world(Vector2(1035, 1035))
+	editor.scene_view.distance = 120.0
+	editor.scene_view.update_camera()
+	editor.scene_view.update_lod(0)
+	var bind_ms := (Time.get_ticks_usec() - started) / 1000.0
+
+	var near := Vector2i(1024, 1024)
+	var mid := Vector2i(1024 + 256, 1024)
+	var far := Vector2i(0, 0)
+	check(editor.scene_view.effective_chunk_step(near) == 1, "near chunk uses 2 m native resolution (step 1)")
+	check(editor.scene_view.effective_chunk_step(mid) == 2, "mid-range chunk uses 4 m resolution (step 2)")
+	check(editor.scene_view.effective_chunk_step(far) == 4, "distant chunk uses 8 m resolution (step 4)")
+
+	# Verify exact native vertices exist in the near 2 m ArrayMesh
+	var near_inst: MeshInstance3D = editor.scene_view.meshes[near]
+	var arrays: Array = near_inst.mesh.surface_get_arrays(0)
+	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	check(verts.size() == 65 * 65, "near 2 m chunk has full 65x65 native vertex grid")
+	var ridge_v := verts[(1035 - 1024) * 65 + (1035 - 1024)]
+	var trench_v := verts[(1035 - 1024) * 65 + (1039 - 1024)]
+	var step_v := verts[(1035 - 1024) * 65 + (1046 - 1024)]
+	var trans_a := verts[(1035 - 1024) * 65 + (1055 - 1024)]
+	var trans_b := verts[(1035 - 1024) * 65 + (1056 - 1024)]
+	check(absf(ridge_v.y - 118.0) < 0.01 and absf(trench_v.y - 92.0) < 0.01
+		and absf(step_v.y - 112.0) < 0.01 and absf(trans_a.y - 104.0) < 0.01 and absf(trans_b.y - 108.0) < 0.01,
+		"near 3D preview geometry preserves 1-sample ridge, 2 m trench, sharp step and 2 m transition")
+
+	# 5) Ordinary 32 m ramp via SlopeShapes on top of the 4096 m LOD terrain (kept clear of (1035, 1035))
+	var ramp_ok := doc.preview_slope_shape({
+		"start": Vector2(-128.0, -128.0), "end": Vector2(-64.0, -128.0), "start_height": 100.0,
+		"mode": "angle", "angle_deg": 15.0, "width_m": 32.0, "falloff_m": 8.0,
+	})
+	check(ramp_ok, "32 m ramp previews on 4096 m adaptive LOD terrain")
+	doc.bake_preview()
+	editor._process(0.0)
+
+	# Seam continuity check between a step=1 chunk and an adjacent step=2 chunk
+	var fine_chunk := Vector2i(1152, 1024)
+	var coarse_chunk := Vector2i(1216, 1024)
+	editor.scene_view.chunk_steps[fine_chunk] = 1
+	editor.scene_view.chunk_steps[coarse_chunk] = 2
+	editor.scene_view.build_chunk(coarse_chunk, 2)
+	editor.scene_view.build_chunk(fine_chunk, 1)
+	var fine_inst: MeshInstance3D = editor.scene_view.meshes[fine_chunk]
+	var coarse_inst: MeshInstance3D = editor.scene_view.meshes[coarse_chunk]
+	var fine_verts: PackedVector3Array = fine_inst.mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	var coarse_verts: PackedVector3Array = coarse_inst.mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	# Check odd z=1 along x=1216 (right edge of fine_chunk = index 64) matches midpoint of z=0 and z=2 on coarse_chunk left edge
+	var y_mid_fine := fine_verts[1 * 65 + 64].y
+	var y_mid_expected := lerpf(coarse_verts[0 * 33 + 0].y, coarse_verts[1 * 33 + 0].y, 0.5)
+	check(absf(y_mid_fine - y_mid_expected) < 0.001, "neighbor LOD boundary seam snaps cleanly without cracks")
+
+	# Exact-height inspection and wireframe toggle
+	var info: Dictionary = editor.scene_view.exact_sample_info(Vector2(1035.0, 1035.0))
+	check(int(info["resolution_m"]) == 2 and absf(float(info["height"]) - 118.0) < 0.01,
+		"exact-height inspection reports 2 m LOD and exact native sample height")
+	editor.scene_view.set_wireframe(true)
+	check(editor.scene_view.viewport.debug_draw == Viewport.DEBUG_DRAW_WIREFRAME, "wireframe toggle activates")
+	editor.scene_view.set_wireframe(false)
+
+	var frame_started := Time.get_ticks_usec()
+	await process_frame
+	var frame_ms := (Time.get_ticks_usec() - frame_started) / 1000.0
+	var mem_mib := OS.get_static_memory_usage() / 1048576.0
+	print("4096 m adaptive LOD: bind+focus %.1f ms, frame %.1f ms, static mem %.1f MiB, viewport %s" % [
+		bind_ms, frame_ms, mem_mib, str(editor.scene_view.size)])
 	editor.free()
 
 
