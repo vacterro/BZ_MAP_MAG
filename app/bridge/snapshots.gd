@@ -139,15 +139,23 @@ func export_native(document: Document, target: String) -> bool:
 			return fail("BZN changed while preparing mission edits.")
 		suffix = source_bzn.slice(package.path_codec.table_end)
 		if document.has_object_file_edits():
-			if package.object_count_offset < 0 or package.object_insert_offset != package.path_codec.table_start - 7:
+			if package.object_count_offset < 0 or package.object_insert_offset <= package.object_count_offset or package.object_insert_offset >= package.path_codec.table_start - 7:
 				return fail("This BZN layout does not support native object edits yet.")
+			var pointer_counts := package.path_codec.pointer_counts(source_bzn)
+			var next_pointer_id := 1
+			for ptr_id: int in pointer_counts:
+				next_pointer_id = maxi(next_pointer_id, ptr_id + 1)
 			var blocks: Array = []
 			for addition: Dictionary in document.object_additions:
 				var template: Dictionary = package.objects[addition["template"]]
-				var block := BznObjects.build_block(source_bzn, template, int(addition["sequence"]), String(addition["label"]), addition["transform"])
+				var block := BznObjects.build_block(source_bzn, template, int(addition["sequence"]), String(addition["label"]), addition["transform"], next_pointer_id)
+				next_pointer_id += 1
 				blocks.append(block)
 			var removals: Array = []
 			for index: int in document.object_removals:
+				var ptr_id := int(package.objects[index]["flag8"])
+				if ptr_id > 0 and int(pointer_counts.get(ptr_id, 0)) > 1:
+					return fail("Cannot remove an object referenced by another mission record.")
 				removals.append(index)
 			var patch := BznObjects.patch_objects(source_bzn, package.objects, document.object_export_edits(),
 				removals, blocks, package.object_count_offset, package.object_insert_offset)

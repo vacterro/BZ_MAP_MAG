@@ -2,6 +2,7 @@ extends Control
 
 const Document := preload("res://core/map_document.gd")
 const Snapshots := preload("res://bridge/snapshots.gd")
+const Layouts := preload("res://formats/bzn_layouts.gd")
 const Wintage := preload("res://themes/wintage.gd")
 const TopView := preload("res://render/top_view.gd")
 const TerrainView := preload("res://render/terrain_view.gd")
@@ -801,14 +802,18 @@ func export_package(folder: String) -> void:
 		report(writer.error)
 
 
-## Honest engine-compatibility notice for object count edits. The verified
-## 2.0.185 loader rejected changed counts with SAVEGAME CORRUPT, so additions
-## and removals stay editor-verified; transform-only edits remain verified.
+## Engine-compatibility notice for object count edits. Verified 1192/1196 layouts
+## insert before the 640-byte groupTargets boundary with fresh pointer IDs; any
+## layout without verified count edits stays gated before Playtest.
 func object_count_notice(suffix: String) -> String:
 	if document == null or (document.object_additions.is_empty() and document.object_removals.is_empty()):
 		return " | " + suffix
-	return " | Adding %d and removing %d objects is EDITOR-ONLY: the verified 2.0.185 loader has rejected changed object counts with SAVEGAME CORRUPT. Transform-only edits remain engine-verified. %s" % [
-		document.object_additions.size(), document.object_removals.size(), suffix]
+	var status_label := Layouts.capability_status(document.package.layout_id, Layouts.EDIT_OBJECT_COUNT)
+	if status_label in ["NATIVE", "BAKED"]:
+		return " | Added %d and removed %d objects (%s on 2.0.185; %s)" % [
+			document.object_additions.size(), document.object_removals.size(), status_label, suffix]
+	return " | Adding %d and removing %d objects is %s: undo count edits before Playtest. %s" % [
+		document.object_additions.size(), document.object_removals.size(), status_label, suffix]
 
 
 func report(message: String) -> void:
@@ -996,7 +1001,7 @@ func store_playtest_settings() -> void:
 func playtest() -> void:
 	if launcher_pid > 0 or game_pid > 0 or document == null:
 		return
-	if not document.object_additions.is_empty() or not document.object_removals.is_empty():
+	if (not document.object_additions.is_empty() or not document.object_removals.is_empty()) and not (Layouts.capability_status(document.package.layout_id, Layouts.EDIT_OBJECT_COUNT) in ["NATIVE", "BAKED"]):
 		report(object_count_notice("Undo the object additions or removals before Playtest.").trim_prefix(" | "))
 		return
 	if not find_steam_game():

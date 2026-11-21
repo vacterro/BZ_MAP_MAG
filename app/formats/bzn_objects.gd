@@ -36,14 +36,27 @@ func read(data: PackedByteArray, version: int, stop: int) -> bool:
 		bytes = PackedByteArray()
 		records.clear()
 		return false
-	insert_offset = records[records.size() - 1].z - 3
+	# The GameObject stream ends immediately before the Mission section:
+	# [0, 640] groupTargets -> string(dllName) -> [4, 4] post-DLL int -> [4, 4] pathCount.
+	var mission_at := -1
+	for candidate in [records.size() - 5, records.size() - 4]:
+		if candidate > count_at and is_record(candidate, 0, 640) and is_record(records.size() - 2, 4, 4):
+			var dll := read_string(candidate + 1)
+			if dll.x >= 0 and dll.y == records.size() - 2:
+				mission_at = candidate
+				break
+	if mission_at < 0:
+		bytes = PackedByteArray()
+		records.clear()
+		return false
+	insert_offset = records[mission_at].z - 3
 	count_offset = records[count_at].z
 	object_count = bytes.decode_u32(count_offset)
 	if object_count > MAX_OBJECTS or insert_offset <= count_offset:
 		bytes = PackedByteArray()
 		records.clear()
 		return false
-	for index in range(count_at + 1, records.size()):
+	for index in range(count_at + 1, mission_at):
 		if objects.size() >= object_count:
 			break
 		var item := read_object(index)
@@ -186,7 +199,7 @@ static func write_transform(data: PackedByteArray, matrix_offset: int, origin_of
 	data.encode_float(origin_offset + 8, transform.origin.z)
 
 
-static func build_block(source: PackedByteArray, entry: Dictionary, sequence: int, label: String, transform: Transform3D) -> PackedByteArray:
+static func build_block(source: PackedByteArray, entry: Dictionary, sequence: int, label: String, transform: Transform3D, pointer_id: int = -1) -> PackedByteArray:
 	var result := string_record(entry["odf"])
 	result.append_array(tag_record(4, u32(sequence)))
 	var team: int = entry["team"]
@@ -194,13 +207,14 @@ static func build_block(source: PackedByteArray, entry: Dictionary, sequence: in
 		result.append_array(tag_record(2, PackedByteArray([team & 0xff])))
 	else:
 		result.append_array(tag_record(4, u32(team)))
-	if label != "":
+	if not (sequence & 0x800000):
 		result.append_array(string_record(label))
 	var flag1: PackedByteArray = PackedByteArray()
 	flag1.resize(1)
 	flag1[0] = entry["flag1"]
 	result.append_array(tag_record(1, flag1))
-	result.append_array(tag_record(8, u32(entry["flag8"])))
+	var ptr_id := pointer_id if pointer_id > 0 else int(entry["flag8"])
+	result.append_array(tag_record(8, u32(ptr_id)))
 	var matrix: PackedByteArray = source.slice(entry["matrix_offset"], entry["matrix_offset"] + 64)
 	write_transform(matrix, 0, 48, transform)
 	result.append(12)

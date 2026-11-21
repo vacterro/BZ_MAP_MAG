@@ -935,6 +935,17 @@ func test_object_tools(editor: Control, source: String, scratch: String) -> void
 		var suffix_source := FileAccess.get_file_as_bytes(source).slice(doc.package.path_codec.table_end)
 		var suffix_export := FileAccess.get_file_as_bytes(duplicate_target.path_join(doc.package.bzn_name)).slice(duplicated_map.package.path_codec.table_end)
 		check(suffix_source == suffix_export, "the untouched original trailer rides along after the resized path region")
+		check(duplicated_map.package.object_insert_offset < duplicated_map.package.path_codec.table_start - 7,
+			"the duplicated object inserts before the 640-byte groupTargets mission boundary")
+		var pointer_ids := {}
+		for obj in duplicated_map.package.objects:
+			var pid: int = obj["flag8"]
+			check(pid > 0 and not pointer_ids.has(pid), "object pointer ID %d is positive and unique" % pid)
+			pointer_ids[pid] = true
+		for path_item in duplicated_map.package.paths:
+			var pid: int = path_item["id"]
+			check(pid > 0 and not pointer_ids.has(pid), "path pointer ID %d stays distinct from object pointer IDs" % pid)
+			pointer_ids[pid] = true
 
 	var removed_view := doc.object_count() - 1
 	check(doc.remove_object(removed_view), "removing the appended duplicate reduces the count")

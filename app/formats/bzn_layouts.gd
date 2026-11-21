@@ -36,8 +36,8 @@ const PROFILES := {
 		"fixtures": ["map_references/blank_map1/duel_map_27_autosave_01.bzn"],
 		"capabilities": {READ: "NATIVE", INSPECT_PATHS: "NATIVE", EDIT_PATH_POINTS: "BAKED",
 			EDIT_PATH_STRUCTURE: "BAKED", INSPECT_OBJECTS: "NATIVE", EDIT_OBJECT_TRANSFORM: "BAKED",
-			EDIT_OBJECT_COUNT: "EDITOR_ONLY", ENGINE_PLAYTEST: "NATIVE", CONVERT_TO_185: "UNSUPPORTED"},
-		"evidence": "docs/COMPATIBILITY_MATRIX.md BZN 1192 row; blank snapshot reached MISSION/RUN under /startedit /noscript",
+			EDIT_OBJECT_COUNT: "BAKED", ENGINE_PLAYTEST: "NATIVE", CONVERT_TO_185: "UNSUPPORTED"},
+		"evidence": "docs/COMPATIBILITY_MATRIX.md BZN 1192 row; blank snapshot and duplicated-object 1192 export reached MISSION/RUN under /startedit /noscript",
 	},
 	"binary-1196": {
 		"version": 1196,
@@ -51,8 +51,8 @@ const PROFILES := {
 		"fixtures": ["map_references/Brave Lil Toaster/braveliltoaster.bzn"],
 		"capabilities": {READ: "NATIVE", INSPECT_PATHS: "NATIVE", EDIT_PATH_POINTS: "NATIVE",
 			EDIT_PATH_STRUCTURE: "BAKED", INSPECT_OBJECTS: "NATIVE", EDIT_OBJECT_TRANSFORM: "NATIVE",
-			EDIT_OBJECT_COUNT: "EDITOR_ONLY", ENGINE_PLAYTEST: "UNSUPPORTED", CONVERT_TO_185: "NATIVE"},
-		"evidence": "docs/COMPATIBILITY_MATRIX.md BZN 1196 rows; Brave path point and object transform edits reached MISSION/RUN on 2.0.185; the 185 loader rejects changed object counts with SAVEGAME CORRUPT, so count edits stay editor-only",
+			EDIT_OBJECT_COUNT: "NATIVE", ENGINE_PLAYTEST: "UNSUPPORTED", CONVERT_TO_185: "NATIVE"},
+		"evidence": "docs/COMPATIBILITY_MATRIX.md BZN 1196 rows; Brave path edits, object transforms, template-cloned object insertions and unreferenced removals reached MISSION/RUN on 2.0.185",
 	},
 	"binary-1197": {
 		"version": 1197,
