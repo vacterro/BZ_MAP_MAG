@@ -1037,7 +1037,11 @@ func tool_root() -> String:
 
 
 func asset_adapter() -> String:
-	return tool_root().path_join("build/object-preview/mesh-preview.exe") if OS.has_feature("editor") else tool_root().path_join("tools/mesh-preview.exe")
+	var built := tool_root().path_join("build/object-preview/mesh-preview.exe")
+	var bundled := tool_root().path_join("tools/mesh-preview.exe")
+	if OS.has_feature("editor"):
+		return built
+	return bundled if FileAccess.file_exists(bundled) else built
 
 
 func toggle_objects() -> void:

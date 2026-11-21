@@ -53,10 +53,17 @@ function Get-ValidatedPackage([string] $MissionPath) {
     $project = ''
     if (Test-Path -LiteralPath (Join-Path $app 'project.godot') -PathType Leaf) {
         if (-not $validator) {
-            $validator = (Get-Command godot.exe -ErrorAction SilentlyContinue).Source
+            $rootExe = Join-Path $root 'BZ_MAP_MAG.exe'
+            if ((Test-Path -LiteralPath $rootExe -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $root 'BZ_MAP_MAG.pck') -PathType Leaf)) {
+                $validator = $rootExe
+            } else {
+                $validator = (Get-Command godot.exe -ErrorAction SilentlyContinue).Source
+            }
         }
         if (-not $validator) { throw 'Pass -Godot with the Godot executable used by this checkout.' }
-        $project = "--path `"$app`""
+        if ((Split-Path -Leaf $validator) -ine 'BZ_MAP_MAG.exe') {
+            $project = "--path `"$app`""
+        }
     } elseif (-not $validator) {
         $validator = Join-Path $root 'BZ_MAP_MAG.exe'
     }
