@@ -16,6 +16,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Playtest-Assets.ps1')
+. (Join-Path $PSScriptRoot 'Run-Ownership.ps1')
 $preparedRuntime = $null
 $junctions = [System.Collections.Generic.List[string]]::new()
 
@@ -77,11 +78,13 @@ function Get-ValidatedPackage([string] $MissionPath) {
 }
 
 trap {
+    $failure = $_
     if ($ResultFile) {
-        @{ error = $_.Exception.Message } | ConvertTo-Json -Compress | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+        try { Write-BzmagJsonFile $ResultFile @{ error = $failure.Exception.Message } }
+        catch { Write-Warning "Could not write Playtest failure status. $($_.Exception.Message)" }
     }
     if (-not $gameProcess -or $gameProcess.HasExited) { Clear-PreparedRuntime }
-    throw $_
+    throw $failure
 }
 $Game = (Resolve-Path -LiteralPath $Game).Path
 $Mission = (Resolve-Path -LiteralPath $Mission).Path
@@ -243,9 +246,14 @@ $scriptMode = if ($WithoutMissionScript) { '/noscript' } else { '' }
 $arguments = "/win /nointro /binarymesh 0 /config bzmag.cfg /logconsole $mode $scriptMode `"$missionName`""
 $profile = Join-Path ([Environment]::GetFolderPath('MyDocuments')) "My Games/Battlezone Combat Commander/$session"
 $gameProcess = Start-Process -FilePath (Join-Path $clone 'battlezone2.exe') -WorkingDirectory $clone -ArgumentList $arguments -WindowStyle Normal -PassThru
+try {
+    $null = New-BzmagRunRecord (Split-Path -Parent $PSScriptRoot) $run $gameProcess
+} catch {
+    Write-Warning "Could not record Playtest process ownership for $session. $($_.Exception.Message)"
+}
 $result = [pscustomobject]@{ ProcessId = $gameProcess.Id; Run = $run; Profile = $profile; CommandLine = $arguments; AssetPlan = $assetPlan }
 if ($ResultFile) {
-    $result | ConvertTo-Json -Compress -Depth 5 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+    Write-BzmagJsonFile $ResultFile $result
 }
 $result
 if ($WaitForGame) {
@@ -254,6 +262,6 @@ if ($WaitForGame) {
     Clear-PreparedRuntime
     if ($ResultFile) {
         $result | Add-Member -NotePropertyName ExitCode -NotePropertyValue $exitCode
-        $result | ConvertTo-Json -Compress -Depth 5 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+        Write-BzmagJsonFile $ResultFile $result
     }
 }

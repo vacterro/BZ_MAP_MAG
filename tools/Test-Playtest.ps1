@@ -53,5 +53,8 @@ try {
     if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 25 }
 }
 if ($driver.ExitCode -ne 0) { throw 'Playtest did not return control to the editor.' }
+if (Select-String -LiteralPath $log -Pattern 'SCRIPT ERROR|^ERROR:' -Quiet) {
+    throw 'The editor logged an error while waiting for Playtest.'
+}
 if (Test-Path -LiteralPath $gameFolder) { throw 'Temporary native snapshot survived a normal exit.' }
 Get-Content -LiteralPath (Join-Path $run 'engine.log')

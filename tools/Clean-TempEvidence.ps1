@@ -1,171 +1,116 @@
 [CmdletBinding()]
 param(
-    [string] $TempRoot = 'V:\_TEMP_',
+    [string] $TempRoot = [IO.Path]::GetTempPath(),
     [ValidateRange(0, 5)] [int] $Keep = 1,
     [switch] $Apply
 )
 
-# Prunes test evidence folders under the temp root that this workspace owns,
-# with retention rules instead of broad wildcards:
-#   * Suite groups (bzmag-terrain-, bzmag-layout-, bzmag-autosave-) are known
-#     BZ_MAP_MAG runners by their name + 32-hex run id. Per group the newest
-#     PASS and the newest FAIL are always kept (a failure diagnosis must never
-#     be a deleted last copy) plus the -Keep newest runs overall.
-#   * One-off probe/scratch folders (water-*, *-probe*, bzm-<guid>) are
-#     removed only when their newest file is at least an hour old, nothing
-#     references them and their evidence is recorded in docs/EVIDENCE.md.
-# Live references are honored, dry-run is the default, and a repeated run is a
-# no-op once everything eligible is gone.
-
 $ErrorActionPreference = 'Stop'
-$suitePattern = '^(bzmag-terrain|bzmag-layout|bzmag-autosave)-[0-9a-f]{32}$'
-# Probe conventions this workspace generated. A generic '*-probe*' name is
-# NOT ownership: other tooling names temp folders the same way, so those
-# folders must still prove an internal workspace marker before removal.
-$ownedProbeNames = '^water-[0-9a-f][0-9a-f-]*$','^bzm-[0-9a-f]{32}$','^(native-route|bzn-conv)-probe$'
-function Test-ProbeOwned([System.IO.DirectoryInfo] $Folder) {
-    if ($Folder.Name -match ($ownedProbeNames -join '|')) { return $true }
-    $markers = Get-ChildItem -LiteralPath $Folder.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
-        Where-Object { $_.Length -lt 64KB } | Select-Object -First 200
-    foreach ($file in $markers) {
-        $name = $file.Name.ToLowerInvariant()
-        if ($name -match '^(braveliltoaster|duel_map_27_autosave_01|vsrterrace2|admemvolcvsr|stbolt)\.[a-z0-9]+$') { return $true }
-        if ($name -match '\.(log|txt|json|md|ps1|py|gd)$') {
-            if (Select-String -LiteralPath $file.FullName -Pattern 'BZ_MAP_MAG|res://tests|bzmag-' -Quiet -ErrorAction SilentlyContinue) { return $true }
+. (Join-Path $PSScriptRoot 'Run-Ownership.ps1')
+$workspace = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
+$parent = Get-Item -LiteralPath $TempRoot -Force -ErrorAction SilentlyContinue
+if (-not $parent -or -not $parent.PSIsContainer) { return }
+if ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Temp evidence root must be a local directory.' }
+$root = $parent.FullName
+$suite = '^(bzmag-terrain|bzmag-layout|bzmag-autosave)-[a-f0-9]{32}$'
+$probe = '-probe|^water-[a-f0-9-]+$|^bzm-[a-f0-9]{32}$'
+$evidence = @(Get-Content -LiteralPath (Join-Path $workspace 'docs/EVIDENCE.md') -ErrorAction SilentlyContinue)
+$state = Get-Content -LiteralPath (Join-Path $workspace '.saipen/STATE.md') -Raw -ErrorAction SilentlyContinue
+
+function Test-BzmagRecordedLog($Entry) {
+    $hash = [string]$Entry.Record.log_sha256
+    if ($hash -notmatch '^[a-f0-9]{64}$' -or $Entry.Record.verdict -notin 'PASS','FAIL') { return $false }
+    $name = [regex]::Escape($Entry.Folder.Name)
+    if (-not ($evidence | Where-Object { $_ -match $name -and $_ -match $hash } | Select-Object -First 1)) { return $false }
+    $log = Get-Item -LiteralPath (Join-Path $Entry.Folder.FullName 'godot.log') -Force -ErrorAction SilentlyContinue
+    return $log -and -not $log.PSIsContainer -and -not ($log.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+        (Get-BzmagFileSha256 $log.FullName) -eq $hash
+}
+
+function Test-BzmagRunInUse([string] $Run) {
+    if ($state -and $state.Contains((Split-Path -Leaf $Run))) { return $true }
+    foreach ($process in Get-CimInstance Win32_Process -ErrorAction Stop) {
+        if ((Test-BzmagPathReference $process.ExecutablePath $Run) -or
+            (Test-BzmagPathReference $process.CommandLine $Run)) { return $true }
+    }
+    return $false
+}
+
+function Get-BzmagPlainTreeSize([string] $Path) {
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($Path)
+    $size = 0L
+    while ($pending.Count) {
+        foreach ($entry in Get-ChildItem -LiteralPath $pending.Pop() -Force) {
+            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { return -1L }
+            if ($entry.PSIsContainer) { $pending.Push($entry.FullName) }
+            else { $size += $entry.Length }
         }
     }
-    return $false
+    return $size
 }
-if (-not (Test-Path -LiteralPath $TempRoot -PathType Container)) {
-    Write-Host "Temp root $TempRoot does not exist; nothing to prune."
-    return
-}
-$root = (Resolve-Path -LiteralPath $TempRoot).Path
 
-$liveReferences = [System.Collections.Generic.List[string]]::new()
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object {
-    foreach ($entry in @($_.ExecutablePath, $_.CommandLine)) {
-        if (-not $entry) { continue }
-        $index = $entry.IndexOf($root, [StringComparison]::OrdinalIgnoreCase)
-        if ($index -ge 0) { $liveReferences.Add($entry.Substring($index)) }
+$owned = foreach ($folder in Get-ChildItem -LiteralPath $root -Directory -Force) {
+    $group = if ($folder.Name -match $suite) { $Matches[1] } elseif ($folder.Name -match $probe) { 'probe' }
+    if (-not $group) { continue }
+    $record = Read-BzmagRunRecord $folder $workspace
+    if (-not $record) {
+        Write-Host "KEEP $($folder.Name) (unverified ownership)"
+        continue
     }
-}
-function Test-Referenced([string] $Folder) {
-    $prefix = $Folder.TrimEnd('\') + '\'
-    foreach ($path in $liveReferences) {
-        if ($path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
-    }
-    return $false
+    [pscustomobject]@{ Folder = $folder; Record = $record; Group = $group }
 }
 
-function Get-Verdict([string] $Folder) {
-    # PASS/FAIL from the suite log; UNKNOWN means keep the folder.
-    $log = Get-ChildItem -LiteralPath $Folder -Filter *.log -File -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-    if (-not $log) { return 'UNKNOWN' }
-    $match = Select-String -LiteralPath $log.FullName -Pattern '^FAILURES: ([0-9]+)' |
-        Select-Object -Last 1
-    if (-not $match) { return 'UNKNOWN' }
-    if ([int]$match.Matches[0].Groups[1].Value -eq 0) { return 'PASS' }
-    return 'FAIL'
-}
-
-$folders = @(Get-ChildItem -LiteralPath $root -Directory -Force | Where-Object {
-    -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
-})
-
-$dispositions = [System.Collections.Generic.List[object]]::new()
-
-function Add-Disposition([System.IO.DirectoryInfo] $Folder, [string] $Disposition) {
-    $script:dispositions.Add([pscustomobject]@{
-        Name = $Folder.Name
-        Disposition = $Disposition
-    }) | Out-Null
-}
-
-foreach ($prefix in 'bzmag-terrain-','bzmag-layout-','bzmag-autosave-') {
-    $group = @($folders | Where-Object { $_.Name -match ('^' + $prefix + '[0-9a-f]{32}$') } |
-        Sort-Object LastWriteTimeUtc -Descending)
-    if (-not $group.Count) { continue }
-    $retained = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($index in 0..([Math]::Min($Keep, $group.Count) - 1)) { [void]$retained.Add($group[$index].Name) }
-    $newestPass = @($group | Where-Object { (Get-Verdict $_.FullName) -eq 'PASS' } | Select-Object -First 1)
-    $newestFail = @($group | Where-Object { (Get-Verdict $_.FullName) -eq 'FAIL' } | Select-Object -First 1)
-    foreach ($entry in ($newestPass + $newestFail)) { [void]$retained.Add($entry.Name) }
-    foreach ($folder in $group) {
-        if ($retained.Contains($folder.Name)) {
-            Add-Disposition $folder ('KEEP newest-PASS/newest-FAIL/-Keep window ' + (Get-Verdict $folder.FullName))
-        } elseif ((Get-Verdict $folder.FullName) -eq 'UNKNOWN') {
-            # UNKNOWN is usually a killed or crashed run. Keep it while it is
-            # fresh enough to still be an open diagnosis, prune once it is
-            # more than a day old and its story is in docs/EVIDENCE.md.
-            if ($folder.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddHours(-24)) {
-                Add-Disposition $folder 'REMOVE unknown run older than a day'
-            } else {
-                Add-Disposition $folder 'KEEP unknown verdict'
+$removed = 0
+$bytes = 0L
+foreach ($group in $owned | Group-Object Group) {
+    $ordered = @($group.Group | Sort-Object { $_.Folder.LastWriteTimeUtc } -Descending)
+    $protected = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    if ($group.Name -ne 'probe') {
+        foreach ($verdict in 'PASS','FAIL') {
+            $newest = $ordered | Where-Object { $_.Record.verdict -eq $verdict } | Select-Object -First 1
+            if ($newest) { [void]$protected.Add($newest.Folder.Name) }
+        }
+        if ($Keep -gt 0) {
+            foreach ($extra in $ordered | Where-Object { -not $protected.Contains($_.Folder.Name) } | Select-Object -First $Keep) {
+                [void]$protected.Add($extra.Folder.Name)
             }
+        }
+    }
+    foreach ($entry in $ordered) {
+        $name = $entry.Folder.Name
+        if ($protected.Contains($name) -or ($group.Name -eq 'probe' -and $entry.Folder.LastWriteTimeUtc -gt [DateTime]::UtcNow.AddHours(-1))) {
+            Write-Host "KEEP $name (retention)"
+            continue
+        }
+        if (-not (Test-BzmagRecordedLog $entry)) {
+            Write-Host "KEEP $name (incomplete or unrecorded evidence)"
+            continue
+        }
+        $path = $entry.Folder.FullName
+        if (Test-BzmagRunInUse $path) {
+            Write-Host "KEEP $name (live reference)"
+            continue
+        }
+        $confirm = Get-Item -LiteralPath $path -Force
+        $current = Read-BzmagRunRecord $confirm $workspace
+        if ($confirm.Parent.FullName -ne $root -or -not $current -or
+            $current.log_sha256 -ne $entry.Record.log_sha256 -or $current.verdict -ne $entry.Record.verdict) {
+            throw "Could not reverify ownership of $path."
+        }
+        $size = Get-BzmagPlainTreeSize $path
+        if ($size -lt 0) {
+            Write-Host "KEEP $name (contains a link)"
+            continue
+        }
+        if ($Apply) {
+            Remove-Item -LiteralPath $confirm.FullName -Recurse -Force
+            $removed++
+            $bytes += $size
+            Write-Host "REMOVED $name"
         } else {
-            Add-Disposition $folder ('REMOVE older ' + (Get-Verdict $folder.FullName) + ' run')
+            Write-Host "REMOVE $name (dry run)"
         }
     }
 }
-
-foreach ($folder in $folders) {
-    if ($folder.Name -match $suitePattern) { continue }
-    # Foreign and unrelated folders never enter the tool's universe at all;
-    # only probe-like names are considered, and even those must prove ownership.
-    $candidate = ($folder.Name -match '-probe') -or ($folder.Name -match ($ownedProbeNames -join '|'))
-    if (-not $candidate) { continue }
-    if (-not (Test-ProbeOwned $folder)) {
-        Add-Disposition $folder 'KEEP unverified ownership'
-        continue
-    }
-    $newest = Get-ChildItem -LiteralPath $folder.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-    if (-not $newest) { Add-Disposition $folder 'REMOVE empty owned scratch folder' ; continue }
-    if ($newest.LastWriteTimeUtc -gt [DateTime]::UtcNow.AddHours(-1)) {
-        Add-Disposition $folder 'KEEP written within the last hour'
-    } else {
-        Add-Disposition $folder 'REMOVE owned one-off probe over an hour old'
-    }
-}
-
-if ($dispositions.Count -eq 0) {
-    Write-Host "No workspace-owned folders under $TempRoot."
-    return
-}
-
-$freedBytes = 0L
-$removedCount = 0
-foreach ($item in $dispositions) {
-    $folder = Get-Item -LiteralPath (Join-Path $root $item.Name) -Force -ErrorAction SilentlyContinue
-    if (-not $folder) { continue }
-    $size = [long]((Get-ChildItem -LiteralPath $folder.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
-        Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
-        Measure-Object Length -Sum).Sum)
-    Write-Host ("{0,-7} {1,10:N2} MiB  {2}" -f $item.Disposition.Substring(0, [Math]::Min(7, $item.Disposition.Length)), ($size / 1MB), $item.Name)
-    if (-not $item.Disposition.StartsWith('REMOVE')) { continue }
-    if (-not $Apply) { continue }
-    if (Test-Referenced $folder.FullName) {
-        Write-Warning "        skipped $($item.Name): a live process references it."
-        continue
-    }
-    $confirm = Get-Item -LiteralPath $folder.FullName -Force
-    if ($confirm.Parent.FullName -ne $root -or
-        ($confirm.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        throw "Refusing to remove a folder that moved or became a link: $($folder.FullName)"
-    }
-    try {
-        Remove-Item -LiteralPath $confirm.FullName -Recurse -Force
-        $freedBytes += $size
-        $removedCount++
-    } catch {
-        Write-Warning "        could not remove $($item.Name): $($_.Exception.Message)"
-    }
-}
-Write-Host ""
-if (-not $Apply) {
-    Write-Host "Dry run: re-run with -Apply to remove the listed folders once their evidence is recorded in docs/EVIDENCE.md."
-} else {
-    Write-Host ("Removed {0} folder(s), freed {1:N2} MiB." -f $removedCount, ($freedBytes / 1MB))
-}
+if ($Apply) { Write-Host ("Removed {0} folder(s), freed {1:N2} MiB." -f $removed, ($bytes / 1MB)) }

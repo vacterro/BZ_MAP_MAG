@@ -17,7 +17,7 @@ if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $pack -PathType Lea
 }
 Copy-Item -LiteralPath $WindowsReleaseTemplate -Destination (Join-Path $target 'BZ_MAP_MAG.exe')
 $tools = (New-Item -ItemType Directory -Path (Join-Path $target 'tools')).FullName
-foreach ($name in 'Start-Playtest.ps1','Playtest-Assets.ps1','Find-Bzcc.ps1','New-FlatTerrainSnapshot.ps1') {
+foreach ($name in 'Start-Playtest.ps1','Playtest-Assets.ps1','Run-Ownership.ps1','Find-Bzcc.ps1','New-FlatTerrainSnapshot.ps1') {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $tools
 }
 $meshPreview = Join-Path $repo 'build/object-preview/mesh-preview.exe'

@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Run-Ownership.ps1')
 $repo = Split-Path -Parent $PSScriptRoot
 $app = Join-Path $repo 'app'
 $fixtures = @(
@@ -20,13 +21,17 @@ $scratch = (New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPat
 $log = Join-Path $scratch 'godot.log'
 $arguments = "--headless --path `"$app`" --log-file `"$log`" --script res://tests/bzn_layout_profiles.gd -- " + (($fixtures | ForEach-Object { '"{0}"' -f $_ }) -join ' ') + " `"$scratch`""
 $process = Start-Process -FilePath $Godot -ArgumentList $arguments -WindowStyle Hidden -PassThru
+$record = New-BzmagRunRecord $repo $scratch $process
 if (-not $process.WaitForExit(90000)) {
     $process.Kill()
+    if ($process.WaitForExit(10000)) { Complete-BzmagRunRecord $record $log $false }
     throw "Godot layout test timed out. See $log"
 }
 Write-Output $scratch
 $lines = @(Get-Content -LiteralPath $log)
 $lines | Select-Object -First 60 | Write-Output
-if ($process.ExitCode -ne 0 -or ($lines -match 'SCRIPT ERROR|^ERROR:').Count -gt 0 -or -not ($lines -contains 'FAILURES: 0')) {
+$passed = $process.ExitCode -eq 0 -and ($lines -match 'SCRIPT ERROR|^ERROR:').Count -eq 0 -and $lines -contains 'FAILURES: 0'
+Complete-BzmagRunRecord $record $log $passed
+if (-not $passed) {
     throw "BZN layout profile test failed. See $log"
 }

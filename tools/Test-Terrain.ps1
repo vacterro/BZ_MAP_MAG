@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Run-Ownership.ps1')
 $repo = Split-Path -Parent $PSScriptRoot
 $app = Join-Path $repo 'app'
 $brave = Join-Path $repo 'map_references/Brave Lil Toaster/braveliltoaster.bzn'
@@ -14,14 +15,18 @@ $log = Join-Path $scratch 'godot.log'
 $mode = if ($WithGpu) { '--resolution 640x540' } else { '--headless' }
 $arguments = "$mode --path `"$app`" --log-file `"$log`" --script res://tests/terrain_workflow.gd -- `"$brave`" `"$blank`" `"$scratch`""
 $process = Start-Process -FilePath $Godot -ArgumentList $arguments -WindowStyle Hidden -PassThru
+$record = New-BzmagRunRecord $repo $scratch $process
 if (-not $process.WaitForExit(90000)) {
     $process.Kill()
+    if ($process.WaitForExit(10000)) { Complete-BzmagRunRecord $record $log $false }
     throw "Godot test timed out. See $log"
 }
 Write-Output $scratch
 $lines = @(Get-Content -LiteralPath $log)
 $lines | Select-Object -First 100 | Write-Output
-if ($process.ExitCode -ne 0 -or ($lines -match 'SCRIPT ERROR|^ERROR:').Count -gt 0 -or -not ($lines -contains 'FAILURES: 0')) {
+$passed = $process.ExitCode -eq 0 -and ($lines -match 'SCRIPT ERROR|^ERROR:').Count -eq 0 -and $lines -contains 'FAILURES: 0'
+Complete-BzmagRunRecord $record $log $passed
+if (-not $passed) {
     throw "Terrain workflow failed. See $log"
 }
 # The layout capability test runs the registry against every verified BZN fixture.

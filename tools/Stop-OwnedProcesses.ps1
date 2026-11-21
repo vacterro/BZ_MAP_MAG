@@ -1,93 +1,76 @@
 [CmdletBinding()]
 param(
     [string] $Root,
+    [string] $TempRoot = [IO.Path]::GetTempPath(),
+    [string[]] $RunToken,
     [switch] $Apply
 )
 
-# Stop only processes this workspace owns. Ownership is proven by location:
-# the executable runs from inside the repository, or a known tooling process
-# (shells, python, dotnet, Godot, the cloned game) carries a repository path in
-# its command line. Anything else — the user's own Battlezone session from the
-# Steam folder, unrelated Godot projects, editors and browsers that merely
-# mention a repo path — is never touched, and nothing is ever matched by name
-# alone. This tool and its ancestors are excluded so the invoking shell
-# survives. Dry-run by default; -Apply re-verifies each PID immediately before
-# stopping and reports every result.
-
 $ErrorActionPreference = 'Stop'
-if (-not $Root) { $Root = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) '.')).Path }
-$rootTrimmed = $Root.TrimEnd('\').TrimEnd('/')
-$rootPrefix = $rootTrimmed + '\'
-$rootSlash = $rootTrimmed + '/'
-$toolingNames = @('powershell.exe','pwsh.exe','cmd.exe','python.exe','py.exe','dotnet.exe','msbuild.exe','cl.exe','bash.exe','sh.exe','battlezone2.exe')
+. (Join-Path $PSScriptRoot 'Run-Ownership.ps1')
+if (-not $Root) { $Root = Split-Path -Parent $PSScriptRoot }
+$workspace = (Resolve-Path -LiteralPath $Root).Path
+if ($Apply -and -not $RunToken) { throw 'Pass the private -RunToken for each workflow child you intend to stop.' }
 
-function Test-ExeOwned([string] $Value) {
-    if (-not $Value) { return $false }
-    $trimmed = $Value.Trim('"')
-    return ($trimmed.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase) -or
-        $trimmed.StartsWith($rootSlash, [StringComparison]::OrdinalIgnoreCase))
-}
-
-function Test-CommandLineOwned([string] $ProcessName, [string] $CommandLine) {
-    if (-not $CommandLine -or -not $ProcessName) { return $false }
-    # A repository path anywhere in the command line, in either slash form and
-    # with or without a trailing separator, so bare path arguments match too.
-    $normalized = $CommandLine.Replace('/', '\')
-    $references = ($normalized.IndexOf($rootTrimmed, [StringComparison]::OrdinalIgnoreCase) -ge 0)
-    if (-not $references) { return $false }
-    $lower = $ProcessName.ToLowerInvariant()
-    return ($lower -match '^godot') -or ($toolingNames -contains $lower)
-}
-
-# The PID chain that must survive regardless of matches.
-$protected = [System.Collections.Generic.HashSet[int]]::new()
-$cursor = $PID
-while ($cursor -and $protected.Add($cursor)) {
-    $parent = Get-CimInstance Win32_Process -Filter "ProcessId = $cursor" -ErrorAction SilentlyContinue
-    $cursor = if ($parent) { [int]$parent.ParentProcessId } else { 0 }
-}
-
-$candidates = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    -not $protected.Contains([int]$_.ProcessId) -and
-    ((Test-ExeOwned $_.ExecutablePath) -or (Test-CommandLineOwned $_.Name $_.CommandLine))
-})
-
-if (-not $candidates.Count) {
-    Write-Host "No workspace-owned processes are running."
-    return
-}
-
-$report = foreach ($process in $candidates) {
-    [pscustomobject]@{
-        Id = $process.ProcessId
-        Name = $process.Name
-        StartedUtc = $process.CreationDate
-        Evidence = if (Test-ExeOwned $process.ExecutablePath) { $process.ExecutablePath } else { $process.CommandLine }
+function Get-BzmagOwnedProcess($Record) {
+    $childId = 0
+    if (-not [int]::TryParse([string]$Record.process_id, [ref]$childId) -or
+        $childId -le 0 -or $childId -eq $PID -or -not $Record.started -or -not $Record.executable) {
+        return
     }
-}
-$report | Sort-Object Id | Format-Table -AutoSize | Out-String | Write-Host
-
-if (-not $Apply) {
-    Write-Host ("Dry run: {0} workspace-owned process(es) listed; none were stopped. Re-run with -Apply to stop them." -f $candidates.Count)
-    return
-}
-
-$stopped = 0
-foreach ($entry in $report) {
+    $live = Get-CimInstance Win32_Process -Filter "ProcessId = $childId" -ErrorAction Stop
+    if (-not $live -or $live.ExecutablePath -ne $Record.executable -or
+        -not $live.CommandLine -or
+        -not (Test-BzmagPathReference $live.CommandLine $Record.run)) {
+        return
+    }
+    # Suite runners use an external Godot executable with --path in this
+    # workspace. Native Playtests use an executable in their private clone.
+    if (-not (Test-BzmagPathReference $live.CommandLine $workspace)) {
+        $runtime = Join-Path $Record.run 'game\battlezone2.exe'
+        if ($live.ExecutablePath -ne $runtime -or -not (Test-BzmagPathReference $runtime $workspace)) { return }
+    }
+    $target = Get-Process -Id $childId -ErrorAction SilentlyContinue
     try {
-        $target = Get-Process -Id $entry.Id -ErrorAction Stop
-        # Re-verify ownership immediately before stopping: PID reuse safety.
-        $live = Get-CimInstance Win32_Process -Filter "ProcessId = $($entry.Id)" -ErrorAction SilentlyContinue
-        if (-not $live -or -not ((Test-ExeOwned $live.ExecutablePath) -or (Test-CommandLineOwned $live.Name $live.CommandLine)) -or $protected.Contains([int]$entry.Id)) {
-            Write-Warning "Process $($entry.Id) no longer qualifies as workspace-owned; skipped."
-            continue
+        if ($target -and -not $target.HasExited -and $target.Path -eq $Record.executable -and
+            $target.StartTime.ToFileTimeUtc().ToString() -ceq $Record.started) {
+            return $target
         }
-        Stop-Process -Id $entry.Id -Force -ErrorAction Stop
-        $stopped++
-        Write-Host ("Stopped {0} {1} (started {2})." -f $entry.Id, $entry.Name, $entry.StartedUtc)
-    } catch {
-        Write-Warning ("Could not stop process {0}: {1}" -f $entry.Id, $_.Exception.Message)
+    } catch [InvalidOperationException] { }
+}
+
+$directories = @(
+    @{ Path = Join-Path $workspace 'build'; Pattern = '^BZMAG-[a-f0-9]{32}$' }
+    @{ Path = $TempRoot; Pattern = '^bzmag-(terrain|layout|autosave)-[a-f0-9]{32}$' }
+)
+$count = 0
+foreach ($group in $directories) {
+    $parent = Get-Item -LiteralPath $group.Path -Force -ErrorAction SilentlyContinue
+    if (-not $parent -or -not $parent.PSIsContainer -or
+        ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+    foreach ($folder in Get-ChildItem -LiteralPath $parent.FullName -Directory -Force) {
+        if ($folder.Name -notmatch $group.Pattern -or ($RunToken -and $folder.Name -notin $RunToken)) { continue }
+        $record = Read-BzmagRunRecord $folder $workspace
+        if (-not $record) { continue }
+        $target = Get-BzmagOwnedProcess $record
+        if (-not $target) { continue }
+        $count++
+        if ($Apply) {
+            # Hold the process handle and rebind the record immediately before
+            # stopping it. A process that reused the PID cannot pass this check.
+            [void]$target.Handle
+            $current = Read-BzmagRunRecord $folder $workspace
+            $checked = if ($current) { Get-BzmagOwnedProcess $current }
+            if (-not $checked -or $checked.Id -ne $target.Id -or $checked.StartTime -ne $target.StartTime) {
+                Write-Warning "Ownership changed for $($folder.Name)."
+                continue
+            }
+            $target.Kill()
+            if (-not $target.WaitForExit(10000)) { throw "PID $($target.Id) is still exiting." }
+            Write-Host "Stopped PID $($target.Id) in $($folder.Name)."
+        } else {
+            Write-Host "Owned PID $($target.Id) ($($target.ProcessName)) in $($folder.Name)."
+        }
     }
 }
-Write-Host ("Stopped {0} of {1} workspace-owned processes." -f $stopped, $candidates.Count)
-if ($stopped -lt $candidates.Count) { exit 1 }
+if ($count -eq 0) { Write-Host 'No live processes matched workspace run records.' }
