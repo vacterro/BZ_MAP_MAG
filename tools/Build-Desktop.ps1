@@ -2,10 +2,12 @@
 param(
     [Parameter(Mandatory)] [string] $Godot,
     [string] $WindowsReleaseTemplate,
-    [switch] $ToRoot
+    [switch] $ToRoot,
+    [switch] $SimulatePublishFailure
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Playtest-Assets.ps1')
 $repo = Split-Path -Parent $PSScriptRoot
 $app = Join-Path $repo 'app'
 if (-not $WindowsReleaseTemplate) {
@@ -18,25 +20,124 @@ if (-not $WindowsReleaseTemplate) {
 }
 $stage = (New-Item -ItemType Directory -Path (Join-Path $repo ('build/desktop-' + [guid]::NewGuid().ToString('N'))) -Force).FullName
 $pack = Join-Path $stage 'BZ_MAP_MAG.pck'
+$stageExe = Join-Path $stage 'BZ_MAP_MAG.exe'
+$manifestPath = Join-Path $stage 'BZ_MAP_MAG.manifest.json'
 $log = Join-Path $stage 'export.log'
+# Re-import project resources (including embedded Verdana_m1 bitmap strikes) before pack export.
+$importCmd = "--headless --path `"$app`" --import"
+$null = Start-Process -FilePath $Godot -ArgumentList $importCmd -WindowStyle Hidden -PassThru -Wait
 $command = "--headless --path `"$app`" --log-file `"$log`" --export-pack `"Windows Desktop`" `"$pack`""
 $process = Start-Process -FilePath $Godot -ArgumentList $command -WindowStyle Hidden -PassThru -Wait
 if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $pack -PathType Leaf)) {
     throw "Godot could not export the pack. See $log"
 }
+Copy-Item -LiteralPath $WindowsReleaseTemplate -Destination $stageExe -Force
+$gitHead = try { (& git -C $repo rev-parse HEAD 2>$null | Out-String).Trim() } catch { '' }
+$gitShort = if ($gitHead.Length -ge 7) { $gitHead.Substring(0, 7) } else { 'nogit' }
+$dirtyRaw = try { @(& git -C $repo status --porcelain 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) } catch { @() }
+$gitDirty = ($dirtyRaw.Count -gt 0)
+$godotVer = try { (& $Godot --version 2>$null | Out-String).Trim() } catch { '4.7.2.stable' }
+$srcDigest = Get-BzmagAppSourceDigest $app
+$impDigest = Get-BzmagImportDigest $app
+$pckHash = (Get-FileHash -LiteralPath $pack -Algorithm SHA256).Hash.ToLowerInvariant()
+$exeHash = (Get-FileHash -LiteralPath $stageExe -Algorithm SHA256).Hash.ToLowerInvariant()
+$stateTag = if ($gitDirty) { 'dirty' } else { 'clean' }
+$buildRev = "$gitShort-$($srcDigest.Substring(0, 12))-$stateTag"
+$manifest = [ordered]@{
+    schema = 'bzmag.build-manifest/2'
+    buildRevision = $buildRev
+    sourceDigest = $srcDigest
+    importDigest = $impDigest
+    pckSha256 = $pckHash
+    exeSha256 = $exeHash
+    gitHead = $gitHead
+    gitDirty = $gitDirty
+    gitDirtyCount = $dirtyRaw.Count
+    godotVersion = $godotVer
+    buildMode = 'release'
+    buildTarget = if ($ToRoot) { 'root-executable' } else { 'portable-desktop' }
+    builtAtUtc = [DateTime]::UtcNow.ToString('o')
+}
+[IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 4), [Text.Encoding]::UTF8)
+
+# Validate staged binary + pack before publishing
+$smokeLog = Join-Path $stage 'smoke.log'
+$smokeProc = Start-Process -FilePath $stageExe -ArgumentList "--headless --log-file `"$smokeLog`" --quit" -WorkingDirectory $stage -WindowStyle Hidden -PassThru -Wait
+if ($smokeProc.ExitCode -ne 0) {
+    throw "Staged desktop build failed headless startup verification (exit $($smokeProc.ExitCode)). See $smokeLog"
+}
+
 if ($ToRoot) {
+    $items = @(
+        @{ Name = 'BZ_MAP_MAG.pck'; Staged = $pack; Hash = $pckHash },
+        @{ Name = 'BZ_MAP_MAG.exe'; Staged = $stageExe; Hash = $exeHash },
+        @{ Name = 'BZ_MAP_MAG.manifest.json'; Staged = $manifestPath; Hash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() }
+    )
+    $hadExisting = @{}
     try {
-        Copy-Item -LiteralPath $pack -Destination (Join-Path $repo 'BZ_MAP_MAG.pck') -Force
-        Copy-Item -LiteralPath $WindowsReleaseTemplate -Destination (Join-Path $repo 'BZ_MAP_MAG.exe') -Force
+        foreach ($it in $items) {
+            $newPath = Join-Path $repo ($it.Name + '.new')
+            Copy-Item -LiteralPath $it.Staged -Destination $newPath -Force
+            if ((Get-FileHash -LiteralPath $newPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $it.Hash) {
+                throw "Staged root copy hash mismatch for $($it.Name)."
+            }
+        }
+        foreach ($it in $items) {
+            $livePath = Join-Path $repo $it.Name
+            $bakPath = Join-Path $repo ($it.Name + '.bak')
+            if (Test-Path -LiteralPath $bakPath) { Remove-Item -LiteralPath $bakPath -Force }
+            if (Test-Path -LiteralPath $livePath -PathType Leaf) {
+                Copy-Item -LiteralPath $livePath -Destination $bakPath -Force
+                $hadExisting[$it.Name] = $true
+            } else {
+                $hadExisting[$it.Name] = $false
+            }
+        }
+        $stepIdx = 0
+        foreach ($it in $items) {
+            $stepIdx++
+            if ($SimulatePublishFailure -and $stepIdx -eq 2) {
+                throw 'Simulated root deployment interruption after first file swap.'
+            }
+            $livePath = Join-Path $repo $it.Name
+            $newPath = Join-Path $repo ($it.Name + '.new')
+            if (Test-Path -LiteralPath $livePath) {
+                [IO.File]::Replace($newPath, $livePath, [NullString]::Value)
+            } else {
+                [IO.File]::Move($newPath, $livePath)
+            }
+        }
+        foreach ($it in $items) {
+            $livePath = Join-Path $repo $it.Name
+            if (-not (Test-Path -LiteralPath $livePath -PathType Leaf) -or
+                (Get-FileHash -LiteralPath $livePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $it.Hash) {
+                throw "Post-publish verification failed for $($it.Name)."
+            }
+        }
+        foreach ($it in $items) {
+            $bakPath = Join-Path $repo ($it.Name + '.bak')
+            if (Test-Path -LiteralPath $bakPath) { Remove-Item -LiteralPath $bakPath -Force -ErrorAction SilentlyContinue }
+        }
+    } catch {
+        $publishErr = $_
+        foreach ($it in $items) {
+            $livePath = Join-Path $repo $it.Name
+            $newPath = Join-Path $repo ($it.Name + '.new')
+            $bakPath = Join-Path $repo ($it.Name + '.bak')
+            if (Test-Path -LiteralPath $newPath) { Remove-Item -LiteralPath $newPath -Force -ErrorAction SilentlyContinue }
+            if ($hadExisting[$it.Name] -and (Test-Path -LiteralPath $bakPath -PathType Leaf)) {
+                Move-Item -LiteralPath $bakPath -Destination $livePath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        throw $publishErr
     } finally {
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     }
-    Get-Item -LiteralPath (Join-Path $repo 'BZ_MAP_MAG.exe'), (Join-Path $repo 'BZ_MAP_MAG.pck') | Select-Object Name,Length
+    Get-Item -LiteralPath (Join-Path $repo 'BZ_MAP_MAG.exe'), (Join-Path $repo 'BZ_MAP_MAG.pck'), (Join-Path $repo 'BZ_MAP_MAG.manifest.json') | Select-Object Name,Length
     $repo
     return
 }
 $target = $stage
-Copy-Item -LiteralPath $WindowsReleaseTemplate -Destination (Join-Path $target 'BZ_MAP_MAG.exe')
 $tools = (New-Item -ItemType Directory -Path (Join-Path $target 'tools')).FullName
 foreach ($name in 'Start-Playtest.ps1','Playtest-Assets.ps1','Run-Ownership.ps1','Find-Bzcc.ps1','New-FlatTerrainSnapshot.ps1') {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $tools

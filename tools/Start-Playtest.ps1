@@ -63,6 +63,21 @@ function Get-ValidatedPackage([string] $MissionPath) {
         if (-not $validator) { throw 'Pass -Godot with the Godot executable used by this checkout.' }
         if ((Split-Path -Leaf $validator) -ine 'BZ_MAP_MAG.exe') {
             $project = "--path `"$app`""
+        } else {
+            $valDir = Split-Path -Parent (Resolve-Path -LiteralPath $validator).Path
+            $pckFile = Join-Path $valDir 'BZ_MAP_MAG.pck'
+            $manifestFile = Join-Path $valDir 'BZ_MAP_MAG.manifest.json'
+            if (-not (Test-Path -LiteralPath $pckFile -PathType Leaf) -or -not (Test-Path -LiteralPath $manifestFile -PathType Leaf)) {
+                throw 'Stale or unverified packaged validator: BZ_MAP_MAG.manifest.json is missing. Rebuild with tools/Build-Desktop.ps1 -ToRoot or pass -Godot.'
+            }
+            $manifest = Get-Content -LiteralPath $manifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            $liveDigest = Get-BzmagAppSourceDigest $app
+            $livePckHash = (Get-FileHash -LiteralPath $pckFile -Algorithm SHA256).Hash.ToLowerInvariant()
+            $liveExeHash = (Get-FileHash -LiteralPath $validator -Algorithm SHA256).Hash.ToLowerInvariant()
+            $exeMismatch = ($manifest.PSObject.Properties.Name -contains 'exeSha256') -and $manifest.exeSha256 -and ($manifest.exeSha256 -ne $liveExeHash)
+            if ($manifest.sourceDigest -ne $liveDigest -or $manifest.pckSha256 -ne $livePckHash -or $exeMismatch) {
+                throw 'Stale or unverified packaged validator: BZ_MAP_MAG.pck or BZ_MAP_MAG.exe does not match live app/ sources. Rebuild with tools/Build-Desktop.ps1 -ToRoot or pass -Godot.'
+            }
         }
     } elseif (-not $validator) {
         $validator = Join-Path $root 'BZ_MAP_MAG.exe'

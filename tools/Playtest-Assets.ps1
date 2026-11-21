@@ -1,5 +1,38 @@
 $script:PlaytestAssetIndexMemoryCache = @{}
 
+function Get-BzmagAppSourceDigest([string] $AppDir) {
+    if (-not (Test-Path -LiteralPath $AppDir -PathType Container)) { return '' }
+    $resolvedApp = (Resolve-Path -LiteralPath $AppDir).Path.TrimEnd('\','/')
+    $allowedExts = @('.gd','.tscn','.gdshader','.godot','.cfg','.ttf','.import')
+    $files = Get-ChildItem -LiteralPath $resolvedApp -Recurse -File | Where-Object {
+        $rel = $_.FullName.Substring($resolvedApp.Length + 1).Replace('\','/')
+        (-not $rel.StartsWith('.godot/')) -and (-not $rel.StartsWith('tests/')) -and ($_.Extension.ToLowerInvariant() -in $allowedExts)
+    } | Sort-Object { $_.FullName.Substring($resolvedApp.Length + 1).Replace('\','/') }
+    $parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($f in $files) {
+        $rel = $f.FullName.Substring($resolvedApp.Length + 1).Replace('\','/')
+        $hash = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $parts.Add("${rel}:${hash}")
+    }
+    return Get-StringSha256 ($parts -join "`n")
+}
+
+function Get-BzmagImportDigest([string] $AppDir) {
+    if (-not (Test-Path -LiteralPath $AppDir -PathType Container)) { return '' }
+    $resolvedApp = (Resolve-Path -LiteralPath $AppDir).Path.TrimEnd('\','/')
+    $files = Get-ChildItem -LiteralPath $resolvedApp -Recurse -File -Filter '*.import' | Where-Object {
+        $rel = $_.FullName.Substring($resolvedApp.Length + 1).Replace('\','/')
+        -not $rel.StartsWith('.godot/')
+    } | Sort-Object { $_.FullName.Substring($resolvedApp.Length + 1).Replace('\','/') }
+    $parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($f in $files) {
+        $rel = $f.FullName.Substring($resolvedApp.Length + 1).Replace('\','/')
+        $hash = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $parts.Add("${rel}:${hash}")
+    }
+    return Get-StringSha256 ($parts -join "`n")
+}
+
 function Get-LinkedAssetFolders([string] $AssetProfile) {
     if (-not $AssetProfile) { return }
     $profileFile = Get-Item -LiteralPath $AssetProfile
@@ -111,7 +144,7 @@ function Get-PlaytestAssetConfiguration([string] $Game, [string] $Mission, [stri
     if ($ModProfile) {
         if ($ModProfile -ine 'stock') {
             $modFolders = @(Get-WorkshopAssetFolders $Game $ModProfile)
-            if ($ModProfile -ieq 'vrv' -and $modFolders.Count -eq 0 -and $VrvSource) {
+            if ($ModProfile -in 'vsr','vrv' -and $modFolders.Count -eq 0 -and $VrvSource) {
                 $vrv = @(Get-VrvAssetFolders $Game $VrvSource)
             }
         }

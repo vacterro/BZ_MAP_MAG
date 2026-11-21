@@ -112,6 +112,25 @@ $pakPlan = Get-PlaytestAssetPlan $Game $synthMission '' '' $true @($pakRoot) @('
 if ($pakPlan.ResolvedOdfs['packed_unit.odf'] -ne "${pakPath}::packed_unit.odf") {
     throw 'Packed DOCP .pak ODF resource was not resolved without a false refusal.'
 }
+# Stale-PCK refusal check: when -Godot is omitted or points to BZ_MAP_MAG.exe with a mismatched manifest, Start-Playtest refuses stale packaged code.
+$manifestFile = Join-Path $repo 'BZ_MAP_MAG.manifest.json'
+$hadManifest = Test-Path -LiteralPath $manifestFile -PathType Leaf
+$savedManifestBytes = if ($hadManifest) { [IO.File]::ReadAllBytes($manifestFile) } else { $null }
+if ((Test-Path -LiteralPath (Join-Path $repo 'BZ_MAP_MAG.exe') -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $repo 'BZ_MAP_MAG.pck') -PathType Leaf)) {
+    try {
+        [IO.File]::WriteAllText($manifestFile, '{"schema":"bzmag.build-manifest/1","sourceDigest":"stale000","pckSha256":"stale000"}', [Text.Encoding]::UTF8)
+        Expect-Refusal 'Stale or unverified packaged validator' {
+            & $launcher -Game $Game -VrvSource $VrvSource -Mission $source -ValidateOnly
+        }
+    } finally {
+        if ($hadManifest) {
+            [IO.File]::WriteAllBytes($manifestFile, $savedManifestBytes)
+        } else {
+            Remove-Item -LiteralPath $manifestFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 $nativeBytes = [IO.File]::ReadAllBytes($flat)
 [IO.File]::WriteAllBytes($flat, [byte[]]($nativeBytes[0..20]))
 Expect-Refusal 'BZN header is malformed' { & $launcher @common -Mission $flat -ValidateOnly }
