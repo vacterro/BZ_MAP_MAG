@@ -1192,8 +1192,14 @@ func preview_slope_shape(params: Dictionary, batch := {}) -> bool:
 		return fail("Finish the stroke before shaping terrain.")
 	clear_preview()
 	var terrain := package.terrain
+	var limit := minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0)
+	var checked_params := params.duplicate()
+	checked_params["max_abs_height"] = limit
+	var built := SlopeShapes.instances_checked(checked_params, batch)
+	if not String(built["error"]).is_empty():
+		return fail(String(built["error"]))
 	var values := {}
-	for instance in SlopeShapes.instances(params, batch):
+	for instance: Dictionary in built["instances"]:
 		var shaped: Dictionary = SlopeShapes.evaluate(instance, terrain.dimensions, terrain.origin, terrain.heights)
 		if not String(shaped["error"]).is_empty():
 			return fail(shaped["error"])
@@ -1201,7 +1207,6 @@ func preview_slope_shape(params: Dictionary, batch := {}) -> bool:
 			values[index] = shaped["values"][index]
 	if values.is_empty():
 		return fail("The shape covers no terrain samples. Check start, end, width and masks.")
-	var limit := minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0)
 	var native_sample := PackedFloat32Array([0.0])
 	for index in values:
 		var value := float(values[index])

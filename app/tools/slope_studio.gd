@@ -57,7 +57,9 @@ func _ready() -> void:
 		profile.add_item(name)
 	fields.add_child(profile)
 	add_pair(fields, "Width (m)", width, 2048.0)
+	width.min_value = Shapes.SPACING
 	add_pair(fields, "Edge falloff (m)", falloff, 1024.0)
+	falloff.min_value = 0.0
 	add_pair(fields, "Target height (m)", target_height, 100000.0)
 	add_pair(fields, "Angle (degrees)", angle, 90.0)
 	# The snap grid must start on the minimum (AGENTS.md gotcha): with step 0.5
@@ -66,6 +68,7 @@ func _ready() -> void:
 	angle.max_value = 90.0
 	angle.step = 0.5
 	add_pair(fields, "Amplitude (m)", amplitude, 100000.0)
+	amplitude.min_value = 0.0
 	add_pair(fields, "Terrace levels", terrace_levels, 64.0)
 	fields.add_child(separator("Masks (blank = off)"))
 	add_mask(fields, "Height minimum (m)", mask_min)
@@ -76,7 +79,9 @@ func _ready() -> void:
 		batch_mode.add_item(name)
 	fields.add_child(batch_mode)
 	add_pair(fields, "Instance count", batch_count, 16.0)
+	batch_count.min_value = 1.0
 	add_pair(fields, "Instance spacing (m)", batch_spacing, 2048.0)
+	batch_spacing.min_value = Shapes.SPACING
 	mirror_x.text = "Mirror X"
 	fields.add_child(mirror_x)
 	mirror_z.text = "Mirror Z"

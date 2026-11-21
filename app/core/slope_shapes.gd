@@ -6,8 +6,92 @@ extends RefCounted
 ## single height per X/Z sample, no overhangs.
 
 const SPACING := 2.0
+const MAX_ANGLE_DEG := 89.9
+const MAX_ABS_HEIGHT := 100000.0
+const MAX_BATCH_COUNT := 64
 
 const PROFILES := ["flat", "rounded", "soft", "terrace", "cliff", "plateau", "berm", "ridge", "valley", "trench", "excavation"]
+
+
+static func _is_valid_number(value: Variant) -> bool:
+	return (value is float or value is int) and is_finite(float(value))
+
+
+## Validates shape and batch parameters before any instance materialization or
+## terrain evaluation. Returns an empty string on valid input.
+static func validate(params: Dictionary, batch: Dictionary = {}) -> String:
+	var raw_start: Variant = params.get("start")
+	var raw_end: Variant = params.get("end")
+	if not raw_start is Vector2 or not (raw_start as Vector2).is_finite() or not raw_end is Vector2 or not (raw_end as Vector2).is_finite():
+		return "Start and end coordinates must be finite."
+	var start: Vector2 = raw_start
+	var finish: Vector2 = raw_end
+	var axis := finish - start
+	var length := axis.length()
+	if not is_finite(length) or length < SPACING:
+		return "The shape needs a span of at least one terrain sample."
+	var max_abs_height := MAX_ABS_HEIGHT
+	if params.has("max_abs_height"):
+		var raw_limit: Variant = params["max_abs_height"]
+		if not _is_valid_number(raw_limit) or float(raw_limit) <= 0.0:
+			return "Height limit must be positive and finite."
+		max_abs_height = float(raw_limit)
+	if not params.has("start_height") or not _is_valid_number(params["start_height"]):
+		return "The shape needs finite heights."
+	var start_height := float(params["start_height"])
+	if absf(start_height) > max_abs_height:
+		return "The shape exceeds the terrain height range."
+	var mode := String(params.get("mode", "elevation"))
+	if mode == "angle":
+		var raw_angle: Variant = params.get("angle_deg", 0.0)
+		if not _is_valid_number(raw_angle):
+			return "Angle must be finite."
+		var angle_deg := float(raw_angle)
+		if absf(angle_deg) >= MAX_ANGLE_DEG:
+			return "Angle must stay strictly between -90 and 90 degrees."
+		var target := start_height + length * tan(deg_to_rad(angle_deg))
+		if not is_finite(target) or absf(target) > max_abs_height:
+			return "The shape exceeds the terrain height range."
+	else:
+		var raw_target: Variant = params.get("target_height", start_height)
+		if not _is_valid_number(raw_target):
+			return "The shape needs finite heights."
+		var target := float(raw_target)
+		if absf(target) > max_abs_height:
+			return "The shape exceeds the terrain height range."
+	var raw_width: Variant = params.get("width_m", 8.0)
+	if not _is_valid_number(raw_width) or float(raw_width) <= 0.0:
+		return "Width must be positive and finite."
+	var raw_falloff: Variant = params.get("falloff_m", 0.0)
+	if not _is_valid_number(raw_falloff) or float(raw_falloff) < 0.0:
+		return "Edge falloff must be non-negative and finite."
+	var raw_amplitude: Variant = params.get("amplitude_m", 10.0)
+	if not _is_valid_number(raw_amplitude) or float(raw_amplitude) < 0.0:
+		return "Amplitude must be non-negative and finite."
+	var raw_levels: Variant = params.get("terrace_levels", 4)
+	if not _is_valid_number(raw_levels) or int(raw_levels) < 1:
+		return "Terrace levels must be at least 1."
+	var raw_granularity: Variant = params.get("granularity", 0.1)
+	if not _is_valid_number(raw_granularity) or float(raw_granularity) <= 0.0:
+		return "Granularity must be positive and finite."
+	if params.has("height_min") and not _is_valid_number(params["height_min"]):
+		return "Height minimum mask must be finite."
+	if params.has("height_max") and not _is_valid_number(params["height_max"]):
+		return "Height maximum mask must be finite."
+	if params.has("slope_max_percent") and (not _is_valid_number(params["slope_max_percent"]) or float(params["slope_max_percent"]) < 0.0):
+		return "Maximum slope mask must be non-negative and finite."
+	var raw_count: Variant = batch.get("count", 1)
+	if not _is_valid_number(raw_count) or int(raw_count) < 1 or int(raw_count) > MAX_BATCH_COUNT:
+		return "Instance count must be between 1 and %d." % MAX_BATCH_COUNT
+	var raw_spacing: Variant = batch.get("spacing_m", 32.0)
+	if not _is_valid_number(raw_spacing) or float(raw_spacing) <= 0.0:
+		return "Instance spacing must be positive and finite."
+	if batch.has("symmetry_origin"):
+		var raw_origin: Variant = batch["symmetry_origin"]
+		if not raw_origin is Vector2 or not (raw_origin as Vector2).is_finite():
+			return "Symmetry origin must be finite."
+	return ""
+
 
 ## Evaluates one shape instance against the current terrain heights.
 ## params keys: start (Vector2, world m), end (Vector2), start_height (float),
@@ -16,6 +100,9 @@ const PROFILES := ["flat", "rounded", "soft", "terrace", "cliff", "plateau", "be
 ## angle_deg, height_min/height_max (optional masks), slope_max_percent
 ## (optional mask). Returns { "values": {index: float}, "region": Rect2i }.
 static func evaluate(params: Dictionary, dimensions: Vector2i, origin: Vector2i, heights: PackedFloat32Array) -> Dictionary:
+	var error := validate(params)
+	if not error.is_empty():
+		return {"values": {}, "region": Rect2i(), "error": error}
 	var values := {}
 	var bounds := Rect2i(Vector2i.ZERO, dimensions)
 	var profile := String(params.get("profile", "flat"))
@@ -176,20 +263,26 @@ static func exceeds_slope(heights: PackedFloat32Array, dimensions: Vector2i, x: 
 	return steepest / SPACING * 100.0 > limit_percent
 
 
-## Batch arrangement: returns the instance parameter list for one base shape.
-## batch keys: mode ("single"|"linear"|"radial"), count, spacing_m,
-## mirror_x, mirror_z, symmetry_origin (Vector2 world m).
-static func instances(params: Dictionary, batch: Dictionary) -> Array[Dictionary]:
+## Batch arrangement: returns the validated instance list plus any error before
+## materialization.
+static func instances_checked(params: Dictionary, batch: Dictionary = {}) -> Dictionary:
 	var result: Array[Dictionary] = []
+	var error := validate(params, batch)
+	if not error.is_empty():
+		return {"instances": result, "error": error}
 	var mode := String(batch.get("mode", "single"))
-	var count: int = maxi(int(batch.get("count", 1)), 1)
-	if mode == "single" and not bool(batch.get("mirror_x", false)) and not bool(batch.get("mirror_z", false)):
+	var count := int(batch.get("count", 1))
+	var mirror_x := bool(batch.get("mirror_x", false))
+	var mirror_z := bool(batch.get("mirror_z", false))
+	if mode == "single" and not mirror_x and not mirror_z:
 		result.append(params)
-		return result
+		return {"instances": result, "error": ""}
 	var start: Vector2 = params["start"]
 	var finish: Vector2 = params["end"]
 	var axis := finish - start
 	var length := axis.length()
+	if not is_finite(length) or length < SPACING:
+		return {"instances": result, "error": "The shape needs a span of at least one terrain sample."}
 	var unit := axis / length
 	var side := Vector2(-unit.y, unit.x)
 	var spacing := maxf(float(batch.get("spacing_m", 32.0)), SPACING)
@@ -208,16 +301,32 @@ static func instances(params: Dictionary, batch: Dictionary) -> Array[Dictionary
 			var offset_side := float(i - (count - 1) * 0.5) * spacing
 			copies.append(shaped(params, start + side * offset_side, finish + side * offset_side))
 	for copy in copies:
+		if not (copy["start"] as Vector2).is_finite() or not (copy["end"] as Vector2).is_finite():
+			return {"instances": [], "error": "Batch instance coordinates must remain finite."}
 		result.append(copy)
-		if bool(batch.get("mirror_x", false)):
+		if mirror_x:
 			var center: Vector2 = batch.get("symmetry_origin", Vector2(start.x, 0.0))
-			result.append(shaped(params, Vector2(2.0 * center.x - copy["start"].x, copy["start"].y),
-				Vector2(2.0 * center.x - copy["end"].x, copy["end"].y), true))
-		if bool(batch.get("mirror_z", false)):
+			var mx_start := Vector2(2.0 * center.x - copy["start"].x, copy["start"].y)
+			var mx_end := Vector2(2.0 * center.x - copy["end"].x, copy["end"].y)
+			if not mx_start.is_finite() or not mx_end.is_finite():
+				return {"instances": [], "error": "Mirrored coordinates must remain finite."}
+			result.append(shaped(params, mx_start, mx_end, true))
+		if mirror_z:
 			var center_z: Vector2 = batch.get("symmetry_origin", Vector2(0.0, start.y))
-			result.append(shaped(params, Vector2(copy["start"].x, 2.0 * center_z.y - copy["start"].y),
-				Vector2(copy["end"].x, 2.0 * center_z.y - copy["end"].y), false, true))
-	return result
+			var mz_start := Vector2(copy["start"].x, 2.0 * center_z.y - copy["start"].y)
+			var mz_end := Vector2(copy["end"].x, 2.0 * center_z.y - copy["end"].y)
+			if not mz_start.is_finite() or not mz_end.is_finite():
+				return {"instances": [], "error": "Mirrored coordinates must remain finite."}
+			result.append(shaped(params, mz_start, mz_end, false, true))
+	return {"instances": result, "error": ""}
+
+
+## Batch arrangement: returns the instance parameter list for one base shape.
+## batch keys: mode ("single"|"linear"|"radial"), count, spacing_m,
+## mirror_x, mirror_z, symmetry_origin (Vector2 world m).
+static func instances(params: Dictionary, batch: Dictionary) -> Array[Dictionary]:
+	var checked := instances_checked(params, batch)
+	return checked["instances"]
 
 
 static func shaped(params: Dictionary, start: Vector2, finish: Vector2, mirror_x := false, mirror_z := false) -> Dictionary:

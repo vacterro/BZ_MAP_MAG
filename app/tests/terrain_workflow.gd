@@ -174,6 +174,7 @@ func run() -> void:
 	await test_object_tools(editor, args[0], args[2])
 	await test_water_tools(editor, args[0], args[2])
 	test_slope_studio(editor, args[0], args[2])
+	test_slope_studio_safety(editor)
 	test_large_slope_preview()
 	await test_fly_autosave_symmetry(editor, args[0], args[2])
 	test_sound_point_labels(editor)
@@ -1331,6 +1332,70 @@ func test_slope_studio(editor: Control, source: String, scratch: String) -> void
 		"the independent decoder counts the same changed samples (%d): %s" % [changed_count, report])
 	studio.batch_mode.select(0)
 	studio.batch_count.value = 1.0
+
+
+func test_slope_studio_safety(editor: Control) -> void:
+	var doc: Document = editor.document
+	var terrain := doc.package.terrain
+	var heights_before := terrain.heights.duplicate()
+	var edits_before := doc.edits.size()
+	var undo_before := doc.undo_stack.size()
+	var valid := {
+		"start": Vector2(0.0, 0.0),
+		"end": Vector2(64.0, 0.0),
+		"start_height": 100.0,
+		"mode": "elevation",
+		"target_height": 110.0,
+		"width_m": 16.0,
+		"falloff_m": 4.0,
+	}
+	var cases := [
+		["start equals end", {"start": Vector2(10.0, 10.0), "end": Vector2(10.0, 10.0)}, {}],
+		["sub-grid segment", {"start": Vector2(10.0, 10.0), "end": Vector2(11.0, 10.0)}, {}],
+		["NaN position", {"start": Vector2(NAN, 0.0)}, {}],
+		["infinite input", {"end": Vector2(INF, 0.0)}, {}],
+		["infinite height", {"start_height": INF}, {}],
+		["negative width", {"width_m": -8.0}, {}],
+		["negative falloff", {"falloff_m": -2.0}, {}],
+		["90 degree angle", {"mode": "angle", "angle_deg": 90.0}, {}],
+		["-90 degree angle", {"mode": "angle", "angle_deg": -90.0}, {}],
+		["excessive height angle", {"mode": "angle", "angle_deg": 89.5, "end": Vector2(1000.0, 0.0)}, {}],
+		["excessive batch count", {}, {"mode": "linear", "count": 999999}],
+		["mirror X degenerate", {"start": Vector2(10.0, 10.0), "end": Vector2(10.0, 10.0)}, {"mode": "single", "mirror_x": true}],
+		["mirror Z degenerate", {"start": Vector2(10.0, 10.0), "end": Vector2(11.0, 10.0)}, {"mode": "single", "mirror_z": true}],
+		["radial fan zero-length base", {"start": Vector2(10.0, 10.0), "end": Vector2(10.0, 10.0)}, {"mode": "radial", "count": 4}],
+	]
+	for entry in cases:
+		var case_name: String = entry[0]
+		var params: Dictionary = valid.duplicate()
+		for k in (entry[1] as Dictionary):
+			params[k] = entry[1][k]
+		var batch: Dictionary = entry[2]
+		var checked := Shapes.instances_checked(params, batch)
+		check(not String(checked["error"]).is_empty() and (checked["instances"] as Array).is_empty(),
+			"Shapes rejects %s before materialization" % case_name)
+		check(Shapes.instances(params, batch).is_empty(), "Shapes.instances returns empty for %s" % case_name)
+		if batch.is_empty():
+			var evaluated := Shapes.evaluate(params, terrain.dimensions, terrain.origin, terrain.heights)
+			check(not String(evaluated["error"]).is_empty() and (evaluated["values"] as Dictionary).is_empty(),
+				"Shapes.evaluate rejects %s cleanly" % case_name)
+		check(not doc.preview_slope_shape(params, batch) and not doc.error.is_empty() and not doc.has_preview(),
+			"document preview rejects %s with actionable error" % case_name)
+	check(terrain.heights == heights_before and doc.edits.size() == edits_before and doc.undo_stack.size() == undo_before,
+		"rejected slope studio inputs leave terrain, edits and undo stack unchanged")
+	# Valid preview followed by cancel via dialog must also leave zero committed changes.
+	var studio = editor.slope_studio
+	studio.begin(doc, Vector2(0.0, 0.0))
+	studio.to_x.value = studio.from_x.value + 32.0
+	studio.to_z.value = studio.from_z.value
+	studio.mode_choice.select(1)
+	studio.angle.value = 15.0
+	check(studio.preview_shape() and doc.has_preview(), "valid studio preview activates before cancel")
+	studio.canceled.emit()
+	studio.hide()
+	check(not doc.has_preview() and terrain.heights == heights_before and doc.edits.size() == edits_before and doc.undo_stack.size() == undo_before,
+		"canceling slope studio preview restores heights and commits nothing")
+	print("Slope Studio safety checks verified.")
 
 
 func test_large_slope_preview() -> void:
