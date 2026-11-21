@@ -1192,10 +1192,9 @@ func preview_slope_shape(params: Dictionary, batch := {}) -> bool:
 		return fail("Finish the stroke before shaping terrain.")
 	clear_preview()
 	var terrain := package.terrain
-	var snapshot := terrain.heights.duplicate()
 	var values := {}
 	for instance in SlopeShapes.instances(params, batch):
-		var shaped: Dictionary = SlopeShapes.evaluate(instance, terrain.dimensions, terrain.origin, snapshot)
+		var shaped: Dictionary = SlopeShapes.evaluate(instance, terrain.dimensions, terrain.origin, terrain.heights)
 		if not String(shaped["error"]).is_empty():
 			return fail(shaped["error"])
 		for index in shaped["values"]:

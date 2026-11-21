@@ -10,6 +10,7 @@ const BznObjects := preload("res://formats/bzn_objects.gd")
 const AutoSaveStore := preload("res://core/autosave_store.gd")
 const Shapes := preload("res://core/slope_shapes.gd")
 const TerrainView := preload("res://render/terrain_view.gd")
+const Package := preload("res://formats/map_package.gd")
 
 var failures := 0
 
@@ -173,6 +174,7 @@ func run() -> void:
 	await test_object_tools(editor, args[0], args[2])
 	await test_water_tools(editor, args[0], args[2])
 	test_slope_studio(editor, args[0], args[2])
+	test_large_slope_preview()
 	await test_fly_autosave_symmetry(editor, args[0], args[2])
 	test_sound_point_labels(editor)
 	print("Native height at (0,0): %.4f -> %.4f, changed samples: %d" % [baseline, intended, document.edits.size()])
@@ -1329,6 +1331,58 @@ func test_slope_studio(editor: Control, source: String, scratch: String) -> void
 		"the independent decoder counts the same changed samples (%d): %s" % [changed_count, report])
 	studio.batch_mode.select(0)
 	studio.batch_count.value = 1.0
+
+
+func test_large_slope_preview() -> void:
+	var editor := EditorScene.instantiate()
+	root.add_child(editor)
+	var doc := Document.new()
+	doc.package = Package.new()
+	var terrain := Terrain.new()
+	terrain.dimensions = Vector2i(2048, 2048)
+	terrain.origin = Vector2i(-1024, -1024)
+	terrain.heights.resize(terrain.dimensions.x * terrain.dimensions.y)
+	terrain.heights.fill(100.0)
+	terrain.min_height = 100.0
+	terrain.max_height = 200.0
+	doc.package.terrain = terrain
+	editor.document = doc
+	editor.top.document = doc
+	editor.scene_view.document = doc
+	doc.terrain_changed.connect(editor.mark_refresh)
+
+	# Prime one nearby chunk and one distant chunk. A full rebuild would
+	# populate the rest of the cache and replace the distant 3D mesh.
+	var near := Vector2i(1024, 1024)
+	var far := Vector2i.ZERO
+	editor.scene_view.build_chunk(near)
+	editor.scene_view.build_chunk(far)
+	editor.top.update_tile(far)
+	var near_mesh: Mesh = editor.scene_view.meshes[near].mesh
+	var far_mesh: Mesh = editor.scene_view.meshes[far].mesh
+	var started := Time.get_ticks_usec()
+	var accepted := doc.preview_slope_shape({
+		"start": Vector2.ZERO, "end": Vector2(200.0, 0.0), "start_height": 100.0,
+		"mode": "angle", "angle_deg": 15.0, "width_m": 32.0, "falloff_m": 8.0,
+	})
+	check(accepted and doc.has_preview(), "4096 m terrain accepts the local slope preview")
+	var dirty: Rect2i = editor.pending_refresh
+	check(dirty.has_area() and dirty.get_area() < 4096, "the preview emits a bounded refresh on the 2048-sample grid")
+	editor._process(0.0)
+	check(editor.top.tiles.has(near) and editor.top.tiles.size() < 16, "2D refresh updates only the affected tiles")
+	check(editor.scene_view.meshes[near].mesh != near_mesh and editor.scene_view.meshes[far].mesh == far_mesh
+		and editor.scene_view.meshes.size() < 16, "3D refresh rebuilds near meshes and keeps the distant mesh")
+	var preview_ms := (Time.get_ticks_usec() - started) / 1000.0
+	var peak := 1024 * terrain.dimensions.x + 1124
+	check(terrain.heights[peak] > 150.0, "the large-map preview changes the ramp end")
+	doc.clear_preview()
+	editor._process(0.0)
+	check(not doc.has_preview() and terrain.heights[peak] == 100.0 and doc.edits.is_empty()
+		and doc.undo_stack.is_empty(), "cancel restores the large terrain without a committed edit")
+	print("4096 m slope preview: %d × %d dirty samples, %d tiles, %d meshes, %.1f ms" % [
+		dirty.size.x, dirty.size.y, editor.top.tiles.size(), editor.scene_view.meshes.size(), preview_ms])
+	# Dispose of the synthetic editor before its deferred command-line map open.
+	editor.free()
 
 
 func test_sound_point_labels(editor: Control) -> void:
