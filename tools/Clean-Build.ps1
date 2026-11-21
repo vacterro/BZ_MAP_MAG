@@ -4,6 +4,13 @@ param(
     [ValidateRange(0, 5)] [int] $Keep = 0
 )
 
+# Uniform keep contract for every generated group:
+#   -Keep 0  remove every safely removable generated run folder,
+#   -Keep N  keep the N newest folders of each group and remove older ones.
+# There are no per-group policy exceptions; evidence runs are kept by passing
+# an explicit -Keep, not through a hidden branch. The 0..5 range cap keeps a
+# mistyped -Keep from silently hoarding everything.
+
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 $root = Join-Path $repo 'build'
@@ -34,7 +41,7 @@ $known = Get-ChildItem -LiteralPath $root -Directory -Force |
     }
 $expired = foreach ($group in $known | Group-Object { $_.Name -replace '-[0-9a-f]{32}$', '' }) {
     $ordered = $group.Group | Sort-Object LastWriteTimeUtc -Descending
-    if ($group.Name -in 'BZMAG','bzn-185','sdk' -or $Keep -eq 0) { $ordered }
+    if ($Keep -eq 0) { $ordered }
     else { $ordered | Select-Object -Skip $Keep }
 }
 $livePaths = @(Get-Process | ForEach-Object Path | Where-Object { $_ })
