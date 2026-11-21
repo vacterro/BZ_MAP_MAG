@@ -58,6 +58,14 @@ The 2026-11-21 log `08.24.58.9406` records the mixed material graph export loadi
 
 The object workflow moved Brave entity 15, `morock03`, in a private export. BZNTools independently found one translation change across 76 entities. The editor byte comparison verified the orientation, IDs and opaque suffix. The independent asset test confirmed that loading native models after an edit uses the saved position and responds to Undo. The 2026-11-21 BZCC log `08.33.39.750` records the object export entering MISSION / RUN and exiting normally. BZNTools reads the untouched-layout export. VRV's 185 adapter removed one Craft field from the runtime copy, and restoring that field reproduced the original export SHA-256 `2df4daf2896b8e0a88e21c680942fbf1e531b85f226625a9c9545299bd04875e`.
 
+## Object rotation, duplication and removal
+
+The object-tools suite additions run against Brave in the same terrain suite (`Test-Terrain.ps1`, `FAILURES: 0`): the `]` and Shift+`[` hotkeys rotate the selection in exact float math about the engine's world up axis, undo steps re-apply each rotation independently, Ctrl+D appends a full record copy with a fresh sequence, a labeled template gains a `_2` label, Delete removes an ordered base or appended record, every edit survives the BZMAG project round trip, and the zero-edit export is byte-identical to the source BZN. The count record, the rebuilt spawn headers and the insert boundary before the path count are covered by the export re-import assertion for each object's class, label, sequence and transform.
+
+Independent probes: the public `bzn_compat.py` inspect reads the duplicate export as 77 entities and refuses a contradictory count declaration; the patch representation keeps the 8031-byte trailer and the 23-path table intact.
+
+Engine playtests on 2026-11-21 with the standard conversion profile: the byte-identity export (`09.08.43`) and the `-14°` rotation export (`09.12.14`) both enter COCKPIT and MISSION / RUN with zero corruption lines. Control runs show the loader's limits: raw unconverted Brave reports the known `SAVEGAME CORRUPT AT OFFSET 411` (GBD_PUBLIC185_PORT), and the counted duplicate save aborts at the loader's spawner record with `SAVEGAME CORRUPT AT OFFSET 20976` and returns to the shell. Position, orientation and identity are therefore engine-verified; count-changing edits stay editor- and converter-verified with that limitation recorded in ENGINE_LIMITATIONS.md.
+
 ## Initial engine spike
 
 In-process Godot loads and displays 2048 m Brave in about 1.2 s and 4096 m Workshop BZTC Total Coop `coop_bztcbd01` in 4.3 s on this machine. These are observed headless client startup measurements with OS caching uncontrolled.
