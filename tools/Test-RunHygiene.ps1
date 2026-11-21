@@ -58,15 +58,16 @@ foreach ($keep in 0, 1, 2) {
         if ($index -lt 6) { "$($record.token) $($record.log_sha256)" | Add-Content -LiteralPath $evidence }
         [pscustomobject]@{ Path = $path; Token = $record.token; Hash = $record.log_sha256 }
     }
-    $dry = @(& $cleanTemp -TempRoot $temp -Keep $keep 6>&1 | ForEach-Object ToString)
+    $tempArg = if ($keep -eq 1) { $temp + '\' } else { $temp }
+    $dry = @(& $cleanTemp -TempRoot $tempArg -Keep $keep 6>&1 | ForEach-Object ToString)
     Assert-Hygiene (@($dry -match '^REMOVE ').Count -eq (4 - $keep)) "Wrong temp retention for Keep $keep."
     Assert-Hygiene (@(Get-ChildItem -LiteralPath $temp -Directory).Count -eq 8) 'Temp dry-run deleted a fixture.'
-    $null = & $cleanTemp -TempRoot $temp -Keep $keep -Apply 6>&1
+    $null = & $cleanTemp -TempRoot $tempArg -Keep $keep -Apply 6>&1
     Assert-Hygiene (@(Get-ChildItem -LiteralPath $temp -Directory).Count -eq (4 + $keep)) "Wrong temp removal for Keep $keep."
     foreach ($path in $foreign,$entries[0].Path,$entries[1].Path,$entries[6].Path) {
         Assert-Hygiene (Test-Path -LiteralPath $path -PathType Container) 'Cleanup deleted a protected run.'
     }
-    $repeat = @(& $cleanTemp -TempRoot $temp -Keep $keep 6>&1 | ForEach-Object ToString)
+    $repeat = @(& $cleanTemp -TempRoot $tempArg -Keep $keep 6>&1 | ForEach-Object ToString)
     Assert-Hygiene (@($repeat -match '^REMOVE ').Count -eq 0) 'Temp cleanup is not idempotent.'
 }
 

@@ -11,7 +11,13 @@ $workspace = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 $parent = Get-Item -LiteralPath $TempRoot -Force -ErrorAction SilentlyContinue
 if (-not $parent -or -not $parent.PSIsContainer) { return }
 if ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Temp evidence root must be a local directory.' }
-$root = $parent.FullName
+function Normalize-BzmagDirPath([string] $Path) {
+    $trimmed = $Path.TrimEnd('\', '/')
+    if ($trimmed -match '^[A-Za-z]:$') { return $trimmed + '\' }
+    return $trimmed
+}
+
+$root = Normalize-BzmagDirPath $parent.FullName
 $suite = '^(bzmag-terrain|bzmag-layout|bzmag-autosave)-[a-f0-9]{32}$'
 $probe = '-probe|^water-[a-f0-9-]+$|^bzm-[a-f0-9]{32}$'
 $evidence = @(Get-Content -LiteralPath (Join-Path $workspace 'docs/EVIDENCE.md') -ErrorAction SilentlyContinue)
@@ -94,7 +100,7 @@ foreach ($group in $owned | Group-Object Group) {
         }
         $confirm = Get-Item -LiteralPath $path -Force
         $current = Read-BzmagRunRecord $confirm $workspace
-        if ($confirm.Parent.FullName -ne $root -or -not $current -or
+        if ((Normalize-BzmagDirPath $confirm.Parent.FullName) -ne $root -or -not $current -or
             $current.log_sha256 -ne $entry.Record.log_sha256 -or $current.verdict -ne $entry.Record.verdict) {
             throw "Could not reverify ownership of $path."
         }
