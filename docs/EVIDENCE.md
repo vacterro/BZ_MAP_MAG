@@ -214,3 +214,19 @@ The matrix is therefore: two engine-verified launch routes (native 1192, adapter
 - The Windows desktop export resolved its built-in headless validator and admitted the verified 1192 fixture. A separate ordinary desktop startup smoke test exited cleanly.
 - The installed 2.0.185 ran the unchanged flat 1192 BZN and the adapter-converted 1196 Brave ramp into MISSION and RUN. Both shut down normally with zero `SAVEGAME CORRUPT` entries. Native log `Battlezone 2026-11-21 13.27.14.5234.log` has SHA-256 `b6c2b5e56f57484ce164218b8cd9b95899dbaba6901aa05f60abe494afa7c4e4`. Converted log `Battlezone 2026-11-21 13.25.46.7406.log` has SHA-256 `63c967b9adca74cc61df784dbc5316f7a72deef09f7cadeb75ede6f6c3ba4ed6`.
 - SAIPEN suite record `a8473ac2e2a0b12f-20261121T112838546207Z.json` recorded three `FAILURES: 0` stages with identical before/after subjects. The original 1192 and 1196 packages were independently read as 1/76 objects and 23 paths each. The editor continues to permit native export of EDITOR_ONLY object-count changes and refuses to playtest them from a document with those edits.
+
+## 4096 m Slope Studio preview (T-11 recovery, 2026-11-21)
+
+- On `4b1b494`, the synthetic 4096 m terrain test exercised the editor's real refresh pipeline. The 200 m ramp at 15° with 32 m width and 8 m falloff dirtied 103 × 23 native samples. The 2D and 3D caches held five tiles and seven meshes including their distant controls. The nearby mesh changed and the distant mesh retained its identity. Cancelling restored the sampled height without an edit or undo entry.
+- The preview and refresh took 34.9 ms headless and 33.4 ms on the RTX 3060 in these runs. Both suites ended with three `FAILURES: 0` results. The headless suite receipt is `a8473ac2e2a0b12f-20261121T113424785342Z.json`. The headless terrain log in `bzmag-terrain-6a6ffe0f57b64530912910ce17d3c9f0` has SHA-256 `247c4285c4f2d51ce3e9726b5ba7f8be1884630d58fed53ecb9dc0b76f2ebb46`. The GPU terrain log in `bzmag-terrain-72438ab78f394cfb8067e8317ed2327a` has SHA-256 `6eec5feb9c69a34fe71c51c934fb300c687c19ca2095f45eee22a28daac775e5`.
+- The real Brave ramp still reopens from BZMAG and exports TER with SHA-256 `108b5b36f1089f0cb1a695eee3c504b3f9e2aa4e05e19768a7977846489fe37c`, identical to the earlier export. The independent decoder counted 9,085 changed height samples with the remaining layers byte-identical.
+
+## Verified 2.0.185 launch matrix (T-12 recovery, 2026-11-21)
+
+Both runtime checks and all refusal probes ran on clean commit `4b1b494ce3a035c8c19c6293822984f03a367fd4`. The saved report is `V:/_TEMP_/bzmag-terrain-6a6ffe0f57b64530912910ce17d3c9f0/launch-matrix/launch-matrix.json`.
+
+| Route | Result | Engine log SHA-256 |
+| --- | --- | --- |
+| Native 1192, freshly generated flat snapshot | Loaded the blank map in engine editor mode, reached MISSION and RUN, then shut down normally. Zero `SAVEGAME CORRUPT`. Source and runtime BZN SHA-256 both `89a14d196a06f6520c0d7c6b214b69056306556a8ea98e1826fb7902484da1e3`. Runtime TER equals the flat template export. | `Battlezone 2026-11-21 13.36.12.3125.log` · `3b5281aa9bc7af2725c52224e842f6d8efaa4751cd6f2573f6b5b1c35cf088ef` |
+| Adapter-converted 1196, Slope Studio Brave export | Loaded Brave, reached MISSION and RUN, then shut down normally. Zero `SAVEGAME CORRUPT`. Runtime BZN SHA-256 `1ad84f9e0a0dde381c978fa4666e4e18c0647079d7a10e9c2c2613fb1b2cb450`. Runtime TER equals the independent decoder's ramp export. | `Battlezone 2026-11-21 13.36.30.1578.log` · `a0aa5b45f122994bbd1a3abaa08ca3bd38cc9972e6fd4a45768b9f1121ac20b5` |
+| VSR binary 1197, Bolt text 1200 and a private Brave copy with version 1199 | Each returned a version-specific refusal in `-ValidateOnly`. No runtime was launched for these samples. | — |
