@@ -57,7 +57,7 @@ Clean them as part of finishing any session, and opportunistically during long o
   `-ValidateOnly` prints the classified launch route without launching.
   Success = `[Main] Entering run code [MISSION]` + `[Mission] Entering run code [RUN]`
   and zero `SAVEGAME CORRUPT` lines in the newest log under
-  `C:\Users\vac34\Documents\My Games\Battlezone Combat Commissioner\` (session-profile
+  `C:\Users\vac34\Documents\My Games\Battlezone Combat Commander\` (private session-profile
   subfolders may hold their own logs).
 - Game install: `V:/__STORE_V/_SOFT/Steam/steamapps/common/BZ2R`.
 - VRV reference source: `V:/___VAC/__K/__CODE/_MISC/_BZDECOMP/vrv`.
