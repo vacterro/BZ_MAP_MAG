@@ -15,6 +15,8 @@ var marker := MeshInstance3D.new()
 var path_mesh := MeshInstance3D.new()
 var object_models := NativeModels.new()
 var object_cursor := MeshInstance3D.new()
+var object_anchors := MeshInstance3D.new()
+var anchor_material := StandardMaterial3D.new()
 var water_mesh := MeshInstance3D.new()
 var use_vertex_colors := false
 var graph_preview_layer := -1
@@ -61,11 +63,16 @@ func _ready() -> void:
 	world.add_child(path_mesh)
 	world.add_child(object_models)
 	world.add_child(object_cursor)
+	world.add_child(object_anchors)
 	world.add_child(water_mesh)
 	water_mesh.hide()
 	path_mesh.hide()
 	marker.hide()
 	object_cursor.hide()
+	anchor_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	anchor_material.albedo_color = palette["borderHighlight"]
+	anchor_material.use_point_size = true
+	anchor_material.point_size = 6.0
 	var outline := BoxMesh.new()
 	outline.size = Vector3(3, 3, 3)
 	var accent := StandardMaterial3D.new()
@@ -79,6 +86,7 @@ func bind(value: Document) -> void:
 	document = value
 	object_models.clear_models()
 	object_cursor.hide()
+	object_anchors.mesh = null
 	textures_visible = false
 	graph_preview_layer = -1
 	tile_material = null
@@ -231,6 +239,18 @@ func show_textures(enabled: bool) -> void:
 	textures_visible = enabled and tile_material != null
 	for instance: MeshInstance3D in meshes.values():
 		instance.mesh.surface_set_material(0, active_terrain_material())
+
+
+func show_object_anchors(points: PackedVector3Array) -> void:
+	if points.is_empty():
+		object_anchors.mesh = null
+		return
+	var mesh := ImmediateMesh.new()
+	mesh.surface_begin(Mesh.PRIMITIVE_POINTS, anchor_material)
+	for point in points:
+		mesh.surface_add_vertex(point)
+	mesh.surface_end()
+	object_anchors.mesh = mesh
 
 
 func refresh_material(region: Rect2i, layer: int) -> void:

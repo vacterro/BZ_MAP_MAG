@@ -15,6 +15,7 @@ g++ -O2 -std=c++17 -static-libgcc -static-libstdc++ -I "$vrv/src/shared" tools/t
 ./build/terrain_oracle.exe 'map_references/Brave Lil Toaster/braveliltoaster.TER' "$run/terrain-edit/braveliltoaster.TER"
 ./build/terrain_oracle.exe 'map_references/Brave Lil Toaster/braveliltoaster.TER' "$run/material-graph/braveliltoaster.TER" --graph
 ./tools/Test-BznTools.ps1 -Dotnet 'path/to/dotnet.exe'
+./tools/Test-BznObjectMove.ps1 -Parser 'build/<BZNTools run>/out/BZNParser.dll' -Source 'map_references/Brave Lil Toaster/braveliltoaster.bzn' -Export "$run/object-move/braveliltoaster.bzn" -Index 15
 ```
 
 The internal suite rejects truncated TER, unsupported versions, bad bounds, and nonfinite heights. It checks exact no-op export, changed-source and destination collision handling, shared 2D/3D projection, 3D input, native path overlays, all three brush modes, undo/redo, project save/reopen, and edited TER reimport. Graph coverage includes port validation, cycles, deterministic two-layer output, preview isolation, undoable bake, and graph export/reimport. The suite also checks actual Verdana on the editor, node window and file dialog in Windows.
@@ -54,6 +55,8 @@ The blank TRN and VRV template share a 2048 m square and nominal 100 m height. T
 Engine log identifiers on this machine are `01.12.42.9156` (brush), `01.24.24.750` (graph), and `01.28.18.5640` (blank), all on 2026-11-21. The app's Playtest action was also exercised using `res://tests/playtest_session.gd`. It generated an isolated snapshot, started the helper and confirmed the launched process. Its game log `01.31.11.7984` records MISSION / RUN and normal shutdown.
 
 The 2026-11-21 log `08.24.58.9406` records the mixed material graph export loading with VSR's `Strategy02.dll`, entering MISSION / RUN and shutting down normally. The private runtime TER matched the exported SHA-256 `ed5f391e49981a635d6c565100191038f5cc94cbdc32d13a8f3361c979a37782`. The helper removed the private game directory after exit.
+
+The object workflow moved Brave entity 15, `morock03`, in a private export. BZNTools independently found one translation change across 76 entities. The editor byte comparison verified the orientation, IDs and opaque suffix. The independent asset test confirmed that loading native models after an edit uses the saved position and responds to Undo. The 2026-11-21 BZCC log `08.33.39.750` records the object export entering MISSION / RUN and exiting normally. BZNTools reads the untouched-layout export. VRV's 185 adapter removed one Craft field from the runtime copy, and restoring that field reproduced the original export SHA-256 `2df4daf2896b8e0a88e21c680942fbf1e531b85f226625a9c9545299bd04875e`.
 
 ## Initial engine spike
 

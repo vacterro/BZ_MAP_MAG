@@ -30,6 +30,7 @@ func set_active(value: bool) -> void:
 	active = value
 	top.move_objects = value
 	refresh_marker()
+	update_anchors()
 
 
 func start(panel: Control, pixel: Vector2) -> void:
@@ -39,9 +40,7 @@ func start(panel: Control, pixel: Vector2) -> void:
 		var position := document.object_position(i)
 		var anchor := top.path_point_pixel(Vector2(position.x, position.z))
 		if panel == scene:
-			var model: MeshInstance3D = scene.object_models.instances.get(i)
-			if model and model.is_visible_in_tree():
-				position = model.to_global(model.get_aabb().get_center())
+			position = pick_anchor(i)
 			if scene.camera.is_position_behind(position):
 				continue
 			anchor = scene.camera.unproject_position(position)
@@ -50,6 +49,7 @@ func start(panel: Control, pixel: Vector2) -> void:
 			distance = current
 			selected = i
 	refresh_marker()
+	update_anchors()
 	if selected < 0:
 		return
 	var sample: Vector2 = panel.sample_at(pixel)
@@ -93,6 +93,25 @@ func finish(commit: bool) -> bool:
 func position_changed(index: int) -> void:
 	scene.object_models.move_instance(index, document.object_position(index))
 	refresh_marker()
+	if active:
+		update_anchors()
+
+
+func pick_anchor(index: int) -> Vector3:
+	var model: MeshInstance3D = scene.object_models.instances.get(index)
+	if model and model.is_visible_in_tree():
+		return model.to_global(model.get_aabb().get_center())
+	return document.object_position(index) + Vector3.UP * 2.0
+
+
+func update_anchors() -> void:
+	var points := PackedVector3Array()
+	if active:
+		for index in document.package.objects.size():
+			var model: MeshInstance3D = scene.object_models.instances.get(index)
+			if index != selected and (not model or not model.is_visible_in_tree()):
+				points.append(pick_anchor(index))
+	scene.show_object_anchors(points)
 
 
 func refresh_marker() -> void:

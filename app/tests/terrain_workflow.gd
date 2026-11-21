@@ -165,6 +165,7 @@ func run() -> void:
 	await test_studio(editor)
 	test_shape_tools(editor, args[2])
 	await test_graph_materials(editor, args[0], args[2])
+	await test_object_move(editor, args[0], args[2])
 	print("Native height at (0,0): %.4f -> %.4f, changed samples: %d" % [baseline, intended, document.edits.size()])
 	print("FAILURES: %d" % failures)
 	quit(0 if failures == 0 else 1)
@@ -754,3 +755,108 @@ func wait_for_graph(studio: Window) -> void:
 	while studio.worker.is_started() and Time.get_ticks_msec() < deadline:
 		await process_frame
 	check(not studio.worker.is_started(), "graph preview worker finishes")
+
+
+func test_object_move(editor: Control, source: String, scratch: String) -> void:
+	if not editor.open_map(source):
+		check(false, "load native object move fixture")
+		return
+	var doc: Document = editor.document
+	var index := 15
+	var entry: Dictionary = doc.package.objects[index]
+	check(entry["odf"] == "morock03", "select a decorative Brave rock for the private snapshot")
+	var original: Transform3D = entry["transform"]
+	var model := MeshInstance3D.new()
+	model.mesh = BoxMesh.new()
+	editor.scene_view.object_models.add_child(model)
+	model.transform = original
+	editor.scene_view.object_models.instances[index] = model
+	editor.move_objects_button.set_pressed_no_signal(true)
+	editor.move_objects_button.pressed.emit()
+	check(editor.top.move_objects and editor.scene_view.object_anchors.mesh != null, "object mode shows selectable placement markers in both views")
+
+	var top_anchor: Vector2 = editor.top.path_point_pixel(Vector2(original.origin.x, original.origin.z))
+	object_mouse_button(editor, editor.top, top_anchor, true)
+	check(editor.object_tool.selected == index and editor.top.selected_object == index
+		and editor.status.text.contains("morock03") and editor.status.text.contains("Team"), "2D pick selects and describes the native object")
+	object_mouse_drag(editor, editor.top, top_anchor + Vector2(-8, 5), false)
+	check(doc.object_edits.is_empty() and model.position != original.origin and editor.top.object_preview == model.position,
+		"2D drag previews the same transform without committing")
+	var escape := InputEventKey.new()
+	escape.keycode = KEY_ESCAPE
+	escape.pressed = true
+	editor._shortcut_input(escape)
+	check(editor.object_tool.drag_view == null and model.position == original.origin and doc.object_edits.is_empty(),
+		"Escape restores the native model and leaves history unchanged")
+
+	var view: Control = editor.scene_view
+	editor.scene_view.center = original.origin
+	editor.scene_view.distance = 100.0
+	editor.scene_view.update_camera()
+	await process_frame
+	var model_pixel: Vector2 = editor.scene_view.camera.unproject_position(model.global_position)
+	object_mouse_button(editor, view, model_pixel, true)
+	check(editor.object_tool.selected == index and editor.object_tool.drag_view == view and editor.scene_view.object_cursor.visible,
+		"3D pick selects the same native object")
+	var destination_pixel := model_pixel + Vector2(23, 15)
+	object_mouse_drag(editor, view, destination_pixel, true)
+	var draft: Vector3 = editor.object_tool.draft
+	object_mouse_button(editor, view, destination_pixel, false)
+	var moved := doc.object_position(index)
+	check(draft.is_finite() and moved == draft and moved != original.origin and model.position == moved and model.basis == original.basis,
+		"3D drag commits the selected transform while preserving orientation")
+	check(fposmod(moved.x, Terrain.SPACING) == 0.0 and fposmod(moved.z, Terrain.SPACING) == 0.0, "Shift snaps placement to the native grid")
+	check(editor.has_unsaved_changes(), "native position edits mark the linked project dirty")
+	check_object_shortcut(editor.undo_button, KEY_Z)
+	check(not editor.has_unsaved_changes() and doc.object_edits.is_empty() and model.position == original.origin, "Ctrl+Z restores both object views")
+	check_object_shortcut(editor.redo_button, KEY_Y)
+	check(doc.object_position(index) == moved and model.position == moved, "Ctrl+Y reapplies the native placement")
+
+	var project := scratch.path_join("object-move.bzmag")
+	editor.save_project(project)
+	check(not editor.has_unsaved_changes(), "Save Project marks the current object placement saved")
+	check(editor.open_map(project) and editor.document.object_position(index) == moved, "reopen the committed object placement")
+	var writer := Snapshots.new()
+	var target := scratch.path_join("object-move")
+	check(writer.export_native(editor.document, target), writer.error)
+	var exported := target.path_join(doc.package.bzn_name)
+	var reopened := Document.new()
+	if reopened.open(exported):
+		var placement: Transform3D = reopened.package.objects[index]["transform"]
+		check(placement.origin == moved and placement.basis == original.basis, "native BZN reimport preserves moved position and original basis")
+		var expected := FileAccess.get_file_as_bytes(source)
+		var offset: int = entry["position_offset"]
+		expected.encode_float(offset, moved.x)
+		expected.encode_float(offset + 4, moved.y)
+		expected.encode_float(offset + 8, moved.z)
+		check(FileAccess.get_file_as_bytes(exported) == expected, "only the three native translation floats can change, including exact suffix preservation")
+		check(doc.package.check_sources(), "object editing preserves the original native map hashes")
+		print("Object %d %s: (%.6f, %.6f, %.6f) -> (%.6f, %.6f, %.6f)" % [
+			index, entry["odf"], original.origin.x, original.origin.y, original.origin.z, moved.x, moved.y, moved.z])
+	else:
+		check(false, "read exported object position: " + reopened.error)
+
+
+func object_mouse_button(editor: Control, view: Control, pixel: Vector2, down: bool) -> void:
+	var button := InputEventMouseButton.new()
+	button.position = pixel
+	button.button_index = MOUSE_BUTTON_LEFT
+	button.pressed = down
+	editor.view_input(button, view)
+
+
+func object_mouse_drag(editor: Control, view: Control, pixel: Vector2, snap: bool) -> void:
+	var motion := InputEventMouseMotion.new()
+	motion.position = pixel
+	motion.button_mask = MOUSE_BUTTON_MASK_LEFT
+	motion.shift_pressed = snap
+	editor.view_input(motion, view)
+
+
+func check_object_shortcut(button: Button, key: Key) -> void:
+	var event := InputEventKey.new()
+	event.keycode = key
+	event.ctrl_pressed = true
+	event.pressed = true
+	check(button.shortcut.matches_event(event) and not button.disabled, "object history shortcut is enabled")
+	button.pressed.emit()

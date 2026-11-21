@@ -24,6 +24,12 @@ func run() -> void:
 	editor.game_path.text = args[1]
 	var document: Document = editor.document
 	var models: Models = editor.scene_view.object_models
+	var rock := 15
+	var initial := document.object_position(rock)
+	var edited := initial + Vector3(4, 0, 2)
+	if document.package.objects[rock]["odf"] != "morock03" or not document.move_object(rock, edited):
+		quit(1)
+		return
 	editor.objects_button.set_pressed_no_signal(true)
 	editor.toggle_objects()
 	await wait_for_assets(editor)
@@ -42,6 +48,17 @@ func run() -> void:
 			shown_pools += 1
 	print("Rendered instances: %d. Rendered native scrap pools: %d." % [displayed, shown_pools])
 	if displayed == 0 or not editor.top.objects_visible or editor.top.object_marks.size() != displayed:
+		quit(1)
+		return
+	var native_rock: MeshInstance3D = models.instances.get(rock)
+	if not native_rock or native_rock.position != edited:
+		printerr("Native model loaded with a stale source position.")
+		quit(1)
+		return
+	var fixed_basis := native_rock.basis
+	document.undo()
+	if native_rock.position != initial or native_rock.basis != fixed_basis:
+		printerr("Undo failed to restore the rendered native placement.")
 		quit(1)
 		return
 	editor.texture_button.set_pressed_no_signal(true)

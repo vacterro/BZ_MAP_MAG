@@ -12,6 +12,7 @@ const NativeAssets := preload("res://formats/native_assets.gd")
 const TerrainTextures := preload("res://render/terrain_textures.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
 const TerrainCommands := preload("res://tools/terrain_commands.gd")
+const MoveObject := preload("res://tools/move_object.gd")
 const SETTINGS := "user://editor.cfg"
 
 var document: Document
@@ -31,6 +32,8 @@ var selected_path_point := -1
 var brush_panel := BrushPanel.new()
 var camera_buttons: Array[Button] = []
 var objects_button: Button
+var move_objects_button: Button
+var object_tool := MoveObject.new()
 var water_button: Button
 var color_button: Button
 var texture_button: Button
@@ -82,6 +85,7 @@ var pending_path := ""
 var saved_edits := {}
 var saved_layers: Array = []
 var saved_path_edits := {}
+var saved_object_edits := {}
 var saved_asset_profile := ""
 var saved_colors := {}
 var saved_tiles := {}
@@ -173,6 +177,8 @@ func _ready() -> void:
 			add_label(heading, "2D Map")
 			objects_button = add_button(heading, "Objects", toggle_objects, "Display supported native BZCC models in the 3D view")
 			objects_button.toggle_mode = true
+			move_objects_button = add_button(heading, "Move Object", object_tool_changed, "Select and drag an object in either view. Shift snaps to the terrain grid. Esc cancels.")
+			move_objects_button.toggle_mode = true
 			water_button = add_button(heading, "Water", toggle_water, "Preview decoded native water layers in both views")
 			water_button.toggle_mode = true
 		panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -206,7 +212,7 @@ func _ready() -> void:
 	add_child(confirmation)
 	confirmation.confirmed.connect(func(): open_map(pending_path))
 	keys_dialog.title = "Editor Hotkeys"
-	keys_dialog.dialog_text = "Shift+1–6  Brush size\nShift+Q/W/E/R  Square / Circle / Cone / Bell\nShift+Z/X/C/V  Pressure 10 / 20 / 50 / 100%\nShift+A/S/D/F/G  Paint / Spray / Raise / Blend / Pick\nAlt+H  Height brush\nF5  Playtest\nCtrl+O/S/Z/Y  Open / Save Project / Undo / Redo\n\nMove Points tool\nDrag  Move a point\nShift+click  Append a point\nDelete  Remove selected point\nEsc  Cancel drag"
+	keys_dialog.dialog_text = "Shift+1–6  Brush size\nShift+Q/W/E/R  Square / Circle / Cone / Bell\nShift+Z/X/C/V  Pressure 10 / 20 / 50 / 100%\nShift+A/S/D/F/G  Paint / Spray / Raise / Blend / Pick\nAlt+H  Height brush\nF5  Playtest\nCtrl+O/S/Z/Y  Open / Save Project / Undo / Redo\n\nMove Points tool\nDrag  Move a point\nShift+click  Append a point\nDelete  Remove selected point\nEsc  Cancel drag\n\nMove Object tool\nDrag  Move an object\nShift+drag  Snap to terrain grid\nEsc  Cancel drag"
 	add_child(keys_dialog)
 	studio.hide()
 	add_child(studio)
@@ -339,6 +345,8 @@ func update_brush_cursor() -> void:
 	if layer != top.preview_layer or (layer == Terrain.Layer.TILES and lane != top.preview_tile_lane):
 		finish_stroke()
 	move_path_button.set_pressed_no_signal(false)
+	if object_tool.active:
+		leave_object_tool()
 	top.radius_m = brush_panel.radius_m
 	scene_view.radius_m = brush_panel.radius_m
 	top.square_brush = brush_panel.shape == Document.BrushShape.SQUARE
@@ -372,11 +380,14 @@ func _shortcut_input(event: InputEvent) -> void:
 	var focused := get_viewport().gui_get_focus_owner()
 	if focused is LineEdit or focused is TextEdit:
 		return
-	if event.keycode == KEY_ESCAPE and path_drag_view != null:
-		finish_point_drag(false)
+	if event.keycode == KEY_ESCAPE and (path_drag_view != null or object_tool.drag_view != null):
+		if object_tool.drag_view != null:
+			finish_object_drag(false)
+		else:
+			finish_point_drag(false)
 		get_viewport().set_input_as_handled()
 		return
-	if path_drag_view != null:
+	if path_drag_view != null or object_tool.drag_view != null:
 		return
 	if event.keycode == KEY_DELETE and move_path_button.button_pressed and selected_path_point >= 0:
 		delete_path_point()
@@ -384,6 +395,7 @@ func _shortcut_input(event: InputEvent) -> void:
 		return
 	var key: Key = event.physical_keycode if event.physical_keycode != KEY_NONE else event.keycode
 	if event.alt_pressed and key == KEY_H:
+		leave_object_tool()
 		move_path_button.set_pressed_no_signal(false)
 		path_tool_changed()
 		get_viewport().set_input_as_handled()
@@ -400,7 +412,7 @@ func _shortcut_input(event: InputEvent) -> void:
 
 
 func sync_actions() -> void:
-	var locked := document == null or document.stroke_active or path_drag_view != null
+	var locked := document == null or document.stroke_active or path_drag_view != null or object_tool.drag_view != null
 	undo_button.disabled = locked or document.undo_stack.is_empty()
 	redo_button.disabled = locked or document.redo_stack.is_empty()
 	save_button.disabled = locked
@@ -415,6 +427,7 @@ func sync_actions() -> void:
 	edit_path_button.disabled = locked or path_list.selected <= 0
 	move_path_button.disabled = locked or path_list.selected <= 0
 	objects_button.disabled = locked or document.package.objects.is_empty() or object_thread.is_started()
+	move_objects_button.disabled = locked or document.package.objects.is_empty() or document.has_preview()
 	water_button.disabled = locked or document.package.water == null
 	color_button.disabled = locked or texture_button.button_pressed
 	texture_button.disabled = locked or object_thread.is_started()
@@ -427,6 +440,7 @@ func sync_actions() -> void:
 func has_unsaved_changes() -> bool:
 	return document != null and (document.edits != saved_edits or document.layers != saved_layers
 		or document.path_edits != saved_path_edits or document.asset_profile != saved_asset_profile
+		or document.object_edits != saved_object_edits
 		or document.package.terrain.color_edits != saved_colors or document.package.terrain.tile_edits != saved_tiles)
 
 
@@ -434,6 +448,7 @@ func remember_saved_changes() -> void:
 	saved_edits = document.edits.duplicate()
 	saved_layers = document.layers.duplicate(true)
 	saved_path_edits = document.path_edits.duplicate(true)
+	saved_object_edits = document.object_edits.duplicate()
 	saved_asset_profile = document.asset_profile
 	saved_colors = document.package.terrain.color_edits.duplicate()
 	saved_tiles = document.package.terrain.tile_edits.duplicate()
@@ -497,6 +512,7 @@ func open_map(path: String) -> bool:
 		document.terrain_changed.disconnect(mark_refresh)
 		document.materials_changed.disconnect(mark_material_refresh)
 		document.paths_changed.disconnect(refresh_path_list)
+		document.object_moved.disconnect(object_position_changed)
 	document = next
 	loaded_objects = null
 	objects_button.set_pressed_no_signal(false)
@@ -507,6 +523,7 @@ func open_map(path: String) -> bool:
 	top.water_visible = false
 	last_cursor = Vector2(-1, -1)
 	move_path_button.set_pressed_no_signal(false)
+	move_objects_button.set_pressed_no_signal(false)
 	remember_saved_changes()
 	asset_profile_path.text = document.asset_profile
 	asset_profile_path.editable = true
@@ -516,8 +533,10 @@ func open_map(path: String) -> bool:
 	document.terrain_changed.connect(mark_refresh)
 	document.materials_changed.connect(mark_material_refresh)
 	document.paths_changed.connect(refresh_path_list)
+	document.object_moved.connect(object_position_changed)
 	top.bind(document)
 	scene_view.bind(document)
+	object_tool.bind(document, top, scene_view)
 	refresh_path_list(true)
 	set_cursor(Vector2(-1, -1))
 	sync_actions()
@@ -594,6 +613,8 @@ func inspect_path() -> void:
 
 
 func path_tool_changed(announce := true) -> void:
+	if move_path_button.button_pressed:
+		leave_object_tool()
 	set_cursor(cursor)
 	if announce:
 		report("Drag a path point. Shift+click appends a point. Delete removes the selected point." if move_path_button.button_pressed else "Height brush ready.")
@@ -697,11 +718,13 @@ func toggle_objects() -> void:
 	if not objects_button.button_pressed:
 		scene_view.object_models.hide()
 		top.objects_visible = false
+		object_tool.update_anchors()
 		top.queue_redraw()
 		return
 	if loaded_objects == document:
 		scene_view.object_models.show()
 		top.objects_visible = true
+		object_tool.update_anchors()
 		top.queue_redraw()
 		return
 	start_asset_scan("objects", objects_button)
@@ -751,10 +774,13 @@ func poll_objects() -> void:
 	asset_worker = null
 	if document == active_object_scan and result is Dictionary and asset_kind == "objects":
 		var count := scene_view.object_models.display(result)
+		for index: int in document.object_edits:
+			scene_view.object_models.move_instance(index, document.object_position(index))
 		loaded_objects = document
 		scene_view.object_models.show()
 		top.object_marks = result["instances"]
 		top.objects_visible = true
+		object_tool.update_anchors()
 		top.queue_redraw()
 		report("Native models %d / %d · %d verified pool definitions · %d unresolved ODFs" % [
 			count, document.package.objects.size(), result["pools"], result["missing"].size()])
@@ -981,7 +1007,7 @@ func set_cursor(point: Vector2) -> void:
 	if document == null:
 		return
 	cursor = point
-	var brush_point := Vector2(-1, -1) if move_path_button.button_pressed else point
+	var brush_point := Vector2(-1, -1) if move_path_button.button_pressed or object_tool.active else point
 	top.cursor = brush_point
 	top.queue_redraw()
 	scene_view.show_cursor(brush_point)
@@ -1003,7 +1029,10 @@ func view_input(event: InputEvent, panel: Control) -> void:
 			scene_view.pan(event.relative)
 		var point: Vector2 = panel.sample_at(event.position)
 		set_cursor(point)
-		if path_drag_view == panel:
+		if object_tool.drag_view == panel:
+			object_tool.preview(event.position, point, event.shift_pressed)
+			report(object_tool.description())
+		elif path_drag_view == panel:
 			preview_path_point(point)
 		if paint_view == panel:
 			paint(point)
@@ -1012,6 +1041,14 @@ func view_input(event: InputEvent, panel: Control) -> void:
 			scene_view.zoom(0.87 if event.button_index == MOUSE_BUTTON_WHEEL_UP else 1.15)
 			set_cursor(scene_view.sample_at(event.position))
 		if event.button_index == MOUSE_BUTTON_LEFT:
+			if object_tool.active:
+				if event.pressed and object_tool.drag_view == null:
+					object_tool.start(panel, event.position)
+					report(object_tool.description() if object_tool.selected >= 0 else "Select an object in either view.")
+					sync_actions()
+				elif not event.pressed and object_tool.drag_view != null:
+					finish_object_drag(true)
+				return
 			if move_path_button.button_pressed and path_list.selected > 0:
 				if event.pressed and path_drag_view == null:
 					start_point_drag(panel, event.position, event.shift_pressed)
@@ -1052,6 +1089,41 @@ func paint(point: Vector2) -> void:
 		for i in range(1, segments + 1):
 			brush_panel.apply_dab(document, anchor.lerp(point, float(i) / segments))
 	anchor = point
+
+
+func object_tool_changed() -> void:
+	if move_objects_button.button_pressed:
+		if path_drag_view != null:
+			finish_point_drag(false)
+		move_path_button.set_pressed_no_signal(false)
+		object_tool.set_active(true)
+		report("Drag an object in either view. Shift snaps to the terrain grid. Esc cancels.")
+	else:
+		leave_object_tool()
+		report("Terrain brush ready.")
+	set_cursor(cursor)
+	sync_actions()
+
+
+func leave_object_tool() -> void:
+	if object_tool.drag_view != null:
+		finish_object_drag(false)
+	move_objects_button.set_pressed_no_signal(false)
+	if object_tool.active:
+		object_tool.set_active(false)
+
+
+func finish_object_drag(commit: bool) -> void:
+	var applied := object_tool.finish(commit)
+	report(object_tool.description() if applied else document.error)
+	sync_actions()
+
+
+func object_position_changed(index: int) -> void:
+	object_tool.position_changed(index)
+	if object_tool.active and object_tool.selected == index:
+		report(object_tool.description())
+	sync_actions()
 
 
 func finish_stroke() -> void:
