@@ -14,6 +14,8 @@ const TerrainTextures := preload("res://render/terrain_textures.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
 const TerrainCommands := preload("res://tools/terrain_commands.gd")
 const SlopeStudio := preload("res://tools/slope_studio.gd")
+const MissionStudio := preload("res://tools/mission_studio.gd")
+const MissionProfiles := preload("res://core/mission_profiles.gd")
 const WaterCommands := preload("res://tools/water_commands.gd")
 const MoveObject := preload("res://tools/move_object.gd")
 const AutoSaveStore := preload("res://core/autosave_store.gd")
@@ -28,7 +30,11 @@ var path_list := OptionButton.new()
 var new_path_button: Button
 var edit_path_button: Button
 var move_path_button: Button
+var mission_studio_button: Button
 var path_inspector := PathInspector.new()
+var mission_studio := MissionStudio.new()
+var snap_path_drag := false
+var selected_extra_paths: Array[int] = []
 var path_drag_view: Control
 var path_draft := {}
 var selected_path_point := -1
@@ -128,7 +134,7 @@ func _ready() -> void:
 	theme = Wintage.make(colors)
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	for window in [open_dialog, blank_dialog, flat_template_dialog, flat_output_dialog, save_dialog, export_dialog,
-		confirmation, keys_dialog, playtest_dialog, recover_dialog, game_picker, vrv_picker, autosave_picker, asset_profile_picker, studio, path_inspector, terrain_tools, slope_studio]:
+		confirmation, keys_dialog, playtest_dialog, recover_dialog, game_picker, vrv_picker, autosave_picker, asset_profile_picker, studio, path_inspector, mission_studio, terrain_tools, slope_studio]:
 		window.theme = theme
 	var backdrop := ColorRect.new()
 	backdrop.color = colors["background"]
@@ -175,9 +181,15 @@ func _ready() -> void:
 	edit_path_button = add_button(map_info, "Edit Path", inspect_path, "Edit the selected path's name, type and points")
 	move_path_button = add_button(map_info, "Move Points", path_tool_changed, "Drag points in either view. Shift+click appends a point. Delete removes the selected point.")
 	move_path_button.toggle_mode = true
+	mission_studio_button = add_button(map_info, "Mission Studio", open_mission_studio, "Browse mission profiles, generate AI paths, transform/mirror/clone/resample and validate readiness")
 	add_child(path_inspector)
+	add_child(mission_studio)
 	path_inspector.path_created.connect(select_created_path)
 	path_inspector.path_removed.connect(func(label: String): report("Removed path %s." % label))
+	mission_studio.paths_selection_changed.connect(set_extra_path_selection)
+	mission_studio.path_focused.connect(select_created_path)
+	mission_studio.snap_toggled.connect(func(on: bool): snap_path_drag = on)
+	mission_studio.status_message.connect(report)
 	var work_area := HBoxContainer.new()
 	work_area.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	layout.add_child(work_area)
@@ -513,6 +525,7 @@ func sync_actions() -> void:
 	new_path_button.disabled = locked or not document.package.path_codec.can_resize
 	edit_path_button.disabled = locked or path_list.selected <= 0
 	move_path_button.disabled = locked or path_list.selected <= 0
+	mission_studio_button.disabled = locked
 	objects_button.disabled = locked or document.package.objects.is_empty() or object_thread.is_started()
 	move_objects_button.disabled = locked or document.object_count() == 0 or document.has_preview()
 	water_button.disabled = locked or document.package.water == null
@@ -621,6 +634,9 @@ func open_map(path: String) -> bool:
 	water_button.set_pressed_no_signal(false)
 	top.water_visible = false
 	last_cursor = Vector2(-1, -1)
+	selected_extra_paths.clear()
+	top.extra_paths.clear()
+	scene_view.extra_paths.clear()
 	move_path_button.set_pressed_no_signal(false)
 	move_objects_button.set_pressed_no_signal(false)
 	remember_saved_changes()
@@ -662,11 +678,35 @@ func select_path(index: int) -> void:
 
 
 func draw_path(path: Dictionary) -> void:
+	var primary_index := path_index_for_item(path_list.selected)
+	var extras: Array[Dictionary] = []
+	for idx in selected_extra_paths:
+		if idx != primary_index:
+			var extra := document.path_at(idx)
+			if not extra.is_empty():
+				extras.append(extra)
 	top.selected_path_point = selected_path_point
 	scene_view.selected_path_point = selected_path_point
+	top.extra_paths = extras
+	scene_view.extra_paths = extras
 	top.path_overlay = path
 	top.queue_redraw()
 	scene_view.show_path(path)
+
+
+func set_extra_path_selection(indices: Array[int]) -> void:
+	selected_extra_paths = indices.duplicate()
+	if document != null:
+		draw_path(document.path_at(path_index_for_item(path_list.selected)))
+
+
+func open_mission_studio() -> void:
+	if document == null:
+		return
+	var terrain := document.package.terrain
+	var target := last_cursor if last_cursor.x >= 0 else Vector2(terrain.dimensions) * 0.5
+	var world := scene_view.point_world(target)
+	mission_studio.begin(document, Vector2(world.x, world.z))
 
 
 func refresh_path_list(reset := false) -> void:
@@ -688,6 +728,8 @@ func refresh_path_list(reset := false) -> void:
 		var path := document.path_at(slot)
 		selected_path_point = mini(point, path["points"].size() - 1)
 		draw_path(path)
+	if mission_studio.visible:
+		mission_studio.refresh_all()
 
 
 func path_index_for_item(item: int) -> int:
@@ -752,7 +794,10 @@ func preview_path_point(sample: Vector2) -> void:
 	if sample.x < 0:
 		return
 	var point := scene_view.point_world(sample)
-	path_draft["points"][selected_path_point] = Vector2(point.x, point.z)
+	var xz := Vector2(point.x, point.z)
+	if snap_path_drag:
+		xz = MissionProfiles.snap_point(xz, document.package.terrain)
+	path_draft["points"][selected_path_point] = xz
 	draw_path(path_draft)
 
 

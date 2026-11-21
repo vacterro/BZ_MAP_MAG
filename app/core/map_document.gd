@@ -346,6 +346,14 @@ func apply_history(change: Dictionary, direction: String) -> void:
 	edit_revision += 1
 	if change.has("path"):
 		set_path_edit(change["path"], change[direction])
+	elif change.has("path_batch"):
+		var batch: Array = change["path_batch"]
+		var ordered := batch.duplicate()
+		if direction == "before":
+			ordered.reverse()
+		for item: Dictionary in ordered:
+			set_path_edit_silent(int(item["index"]), item[direction])
+		paths_changed.emit()
 	elif change.has("object"):
 		apply_object_transform(change["object"], change[direction])
 	elif change.has("object_add") or change.has("object_add_removed"):
@@ -520,12 +528,130 @@ func unique_path_name(index: int, label: String) -> bool:
 	return true
 
 
-func set_path_edit(index: int, data: Dictionary) -> void:
+func set_path_edit_silent(index: int, data: Dictionary) -> void:
 	if same_path_fields(source_path_at(index), data):
 		path_edits.erase(index)
 	else:
 		path_edits[index] = data
+
+
+func set_path_edit(index: int, data: Dictionary) -> void:
+	set_path_edit_silent(index, data)
 	paths_changed.emit()
+
+
+func allocate_path_id() -> int:
+	var ids := path_pointer_counts().duplicate()
+	var id := 1
+	for record in package.paths:
+		id = maxi(id, int(record["id"]) + 1)
+	if id > 4294967295:
+		id = 1
+	for slot in path_indices():
+		ids[path_at(slot)["id"]] = true
+	while ids.has(id):
+		id = 1 if id == 4294967295 else id + 1
+	return id
+
+
+func create_paths_batch(specs: Array[Dictionary]) -> Array[int]:
+	var created: Array[int] = []
+	if stroke_active or has_preview():
+		fail("Finish the current terrain edit first.")
+		return created
+	if not package.path_codec.can_resize or path_indices().size() + specs.size() > PathCodec.MAX_PATHS:
+		fail("This native path table cannot accept that many paths.")
+		return created
+	var batch: Array[Dictionary] = []
+	var next_index := package.paths.size()
+	var taken_names := {}
+	for slot in path_indices():
+		taken_names[String(path_at(slot)["name"]).to_lower()] = true
+	var used_ids := path_pointer_counts().duplicate()
+	for slot in path_indices():
+		used_ids[path_at(slot)["id"]] = true
+	var next_id := allocate_path_id()
+	for spec: Dictionary in specs:
+		var label := String(spec.get("name", ""))
+		var points: PackedVector2Array = spec.get("points", PackedVector2Array())
+		var kind := int(spec.get("type", 0))
+		if not valid_path_fields(label, points, kind, {}) or taken_names.has(label.to_lower()):
+			return []
+		taken_names[label.to_lower()] = true
+		while path_edits.has(next_index):
+			next_index += 1
+		while used_ids.has(next_id):
+			next_id = 1 if next_id == 4294967295 else next_id + 1
+		used_ids[next_id] = true
+		var data := {"id": next_id, "name": label, "points": points.duplicate(), "type": kind}
+		batch.append({"index": next_index, "before": {}, "after": data})
+		created.append(next_index)
+		next_index += 1
+	if batch.is_empty():
+		return created
+	push_history({"path_batch": batch})
+	for item: Dictionary in batch:
+		set_path_edit_silent(int(item["index"]), item["after"])
+	paths_changed.emit()
+	return created
+
+
+func edit_paths_batch(changes: Array[Dictionary]) -> bool:
+	if stroke_active or has_preview():
+		return fail("Finish the current terrain edit first.")
+	var batch: Array[Dictionary] = []
+	for item: Dictionary in changes:
+		var index := int(item["index"])
+		var before := path_at(index)
+		if before.is_empty():
+			return fail("Select a supported native path.")
+		var label := String(item["name"])
+		var points: PackedVector2Array = item["points"]
+		var kind := int(item["type"])
+		var base := source_path_at(index)
+		if not valid_path_fields(label, points, kind, base) or not unique_path_name(index, label):
+			return false
+		var after := {"id": before["id"], "name": label, "points": points.duplicate(), "type": kind}
+		if not same_path_fields(after, before):
+			batch.append({"index": index, "before": before, "after": after})
+	if batch.is_empty():
+		return true
+	push_history({"path_batch": batch})
+	for item: Dictionary in batch:
+		set_path_edit_silent(int(item["index"]), item["after"])
+	paths_changed.emit()
+	return true
+
+
+func clone_path(index: int, offset := Vector2(32.0, 32.0)) -> int:
+	var source := path_at(index)
+	if source.is_empty():
+		fail("Select a path to clone.")
+		return -1
+	var base_name := String(source["name"])
+	var candidate := ""
+	for suffix in range(2, 999):
+		var try_name := "%s_%d" % [base_name, suffix]
+		if try_name.length() > 64:
+			try_name = base_name.substr(0, maxi(1, 64 - str(suffix).length() - 1)) + "_" + str(suffix)
+		var taken := false
+		for other in path_indices():
+			if try_name.nocasecmp_to(String(path_at(other)["name"])) == 0:
+				taken = true
+				break
+		if not taken:
+			candidate = try_name
+			break
+	if candidate.is_empty():
+		fail("No unique clone path name available.")
+		return -1
+	var terrain := package.terrain
+	var rect := Rect2(Vector2(terrain.origin) * Terrain.SPACING, Vector2((terrain.dimensions - Vector2i.ONE).maxi(1)) * Terrain.SPACING)
+	var pts := PackedVector2Array()
+	for pt: Vector2 in source["points"]:
+		var shifted := pt + offset
+		pts.append(Vector2(clampf(shifted.x, rect.position.x, rect.end.x), clampf(shifted.y, rect.position.y, rect.end.y)))
+	return create_path(candidate, pts, int(source["type"]))
 
 
 static func same_path_fields(left: Dictionary, right: Dictionary) -> bool:

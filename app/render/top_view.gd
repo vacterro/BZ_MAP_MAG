@@ -12,6 +12,7 @@ var radius_m := 32.0
 var square_brush := false
 var palette: Dictionary
 var path_overlay := {}
+var extra_paths: Array[Dictionary] = []
 var selected_path_point := -1
 var water_visible := false
 var object_marks: Array = []
@@ -133,6 +134,16 @@ func _draw() -> void:
 				var pool := pools.has(document.object_pool_reference(index))
 				var radius := 6.0 if selected else (4.0 if pool else 1.5)
 				draw_circle(pixel, radius, palette["accentTeal"] if selected else palette["borderHighlight"], not pool and not selected)
+	for secondary: Dictionary in extra_paths:
+		var spts := PackedVector2Array()
+		for pt: Vector2 in secondary["points"]:
+			var px := path_point_pixel(pt)
+			spts.append(px)
+			draw_circle(px, 2.5, palette["accentTeal"])
+		if spts.size() > 1:
+			if int(secondary["type"]) == 2:
+				spts.append(spts[0])
+			draw_polyline(spts, palette["accentTeal"], 1.0)
 	if not path_overlay.is_empty():
 		var terrain := document.package.terrain
 		var points := PackedVector2Array()

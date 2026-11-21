@@ -9,6 +9,7 @@ const Water := preload("res://formats/water_v5.gd")
 const BznObjects := preload("res://formats/bzn_objects.gd")
 const AutoSaveStore := preload("res://core/autosave_store.gd")
 const Shapes := preload("res://core/slope_shapes.gd")
+const MissionProfiles := preload("res://core/mission_profiles.gd")
 const TerrainView := preload("res://render/terrain_view.gd")
 const Package := preload("res://formats/map_package.gd")
 
@@ -177,6 +178,7 @@ func run() -> void:
 	test_slope_studio_safety(editor)
 	test_large_slope_preview()
 	await test_fly_autosave_symmetry(editor, args[0], args[2])
+	test_mission_studio(editor, args[0], args[2])
 	test_sound_point_labels(editor)
 	print("Native height at (0,0): %.4f -> %.4f, changed samples: %d" % [baseline, intended, document.edits.size()])
 	print("FAILURES: %d" % failures)
@@ -1477,3 +1479,80 @@ func test_sound_point_labels(editor: Control) -> void:
 		"the object status renders sound settings")
 	check(editor.object_tool.label_suffix("sp_farm") == " · sp_farm", "ordinary labels keep their plain rendering")
 	print("VRV sound point inspection verified.")
+
+
+func test_mission_studio(editor: Control, source: String, scratch: String) -> void:
+	check(editor.open_map(source), "reopen Brave for Mission Studio vertical slice")
+	var doc: Document = editor.document
+	var writer := Snapshots.new()
+	var studio = editor.mission_studio
+	editor.mission_studio_button.pressed.emit()
+	check(studio.visible, "Mission Studio opens from toolbar")
+	# 1. Select VRV/VSR profile and check validation on Brave (missing 11Patrol2? No, VRV required list has Player_1, Enemy_11, edge_path, 11Patrol1, attack1, hold1, 11MLay1).
+	var vrv_idx := MissionProfiles.PROFILE_ORDER.find("vrv_vsr")
+	studio.profile_select.select(vrv_idx)
+	studio.refresh_all()
+	var val_brave: Dictionary = MissionProfiles.validate(doc, "vrv_vsr")
+	check(val_brave.has("missing_required") and val_brave.has("warnings"), "Mission validation returns structured profile checks")
+	# 2. Create a missing preset (e.g., Stage1 or unique custom preset) + propose edge_path + clone + multi-select transform + resample + snap.
+	var base_count := doc.path_indices().size()
+	var stage_idx := MissionProfiles.PRESET_ORDER.find("Stage1")
+	if not doc.path_indices().any(func(i: int): return String(doc.path_at(i)["name"]).nocasecmp_to("Stage1") == 0):
+		studio.preset_list.select(stage_idx)
+		studio.create_selected_preset()
+	else:
+		studio.create_proposed_edge_path()
+	var after_create := doc.path_indices().size()
+	check(after_create >= base_count, "Mission Studio creates or updates preset path on native AiPath stream")
+	# Multi-select two paths, transform (translate + rotate) in 1 undo step, and verify 2D/3D extra_paths render.
+	studio.refresh_all()
+	check(studio.path_list.item_count >= 2, "Mission Studio lists map paths")
+	studio.path_list.select(0, true)
+	studio.path_list.select(1, false)
+	studio.emit_selection()
+	check(editor.top.extra_paths.size() >= 1 and editor.scene_view.extra_paths.size() >= 1,
+		"multi-selected secondary path renders in both 2D and 3D views")
+	var first_idx: int = studio.selected_path_indices()[0]
+	var pts_before: PackedVector2Array = doc.path_at(first_idx)["points"].duplicate()
+	var stack_before := doc.undo_stack.size()
+	studio.delta_x.value = 16.0
+	studio.delta_z.value = -8.0
+	studio.rotate_deg.value = 15.0
+	studio.apply_transform()
+	check(doc.undo_stack.size() == stack_before + 1, "multi-path transform commits as one undo step")
+	check(doc.path_at(first_idx)["points"] != pts_before, "multi-path transform updates points")
+	doc.undo()
+	check(doc.path_at(first_idx)["points"] == pts_before, "undo restores pre-transform path points")
+	doc.redo()
+	check(doc.path_at(first_idx)["points"] != pts_before, "redo re-applies multi-path transform")
+	# Mirror, clone, resample, snap
+	studio.apply_mirror(true, false)
+	studio.clone_selected_path()
+	var cloned_count := doc.path_indices().size()
+	check(cloned_count == after_create + 1, "cloning selected path adds a unique native AiPath")
+	studio.spacing_m.value = 48.0
+	studio.apply_resample()
+	studio.apply_snap_grid()
+	var snapped_pts: PackedVector2Array = doc.path_at(first_idx)["points"]
+	for pt in snapped_pts:
+		check(absf(pt.x - snappedf(pt.x, 2.0)) < 0.001 and absf(pt.y - snappedf(pt.y, 2.0)) < 0.001,
+			"2 m grid snap aligns path coordinates")
+		break
+	# Validation catches missing spawns & team mismatch on a synthetic blank-paths check
+	var duel_idx := MissionProfiles.PROFILE_ORDER.find("duel")
+	var duel_val: Dictionary = MissionProfiles.validate(doc, MissionProfiles.PROFILE_ORDER[duel_idx])
+	check(not duel_val["ok"] and not (duel_val["missing_required"] as Array).is_empty(),
+		"Duel profile reports missing Player_2 spawn on Strategy map")
+	# BZMAG save/reopen + native export + independent reimport
+	var proj := scratch.path_join("mission-studio.bzmag")
+	check(writer.save_project(doc, proj), "save Mission Studio project")
+	var reopened := Document.new()
+	check(reopened.open(proj) and reopened.path_indices().size() == cloned_count,
+		"reopen Mission Studio project with identical path count")
+	var exp_dir := scratch.path_join("mission-studio-export")
+	check(writer.export_native(reopened, exp_dir), "export Mission Studio BZN: " + writer.error)
+	var reimported := Document.new()
+	check(reimported.open(exp_dir.path_join(reopened.package.bzn_name)) and reimported.path_indices().size() == cloned_count,
+		"independently reimport exported Mission Studio BZN")
+	studio.hide()
+	print("Mission & Path Studio vertical slice verified (%d paths)." % cloned_count)

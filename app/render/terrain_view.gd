@@ -21,6 +21,7 @@ var water_mesh := MeshInstance3D.new()
 var use_vertex_colors := false
 var graph_preview_layer := -1
 var path_overlay := {}
+var extra_paths: Array[Dictionary] = []
 var selected_path_point := -1
 var terrain_material := StandardMaterial3D.new()
 var tile_material: ShaderMaterial
@@ -178,7 +179,7 @@ func refresh(region: Rect2i) -> void:
 	for z in range(start.y, affected.end.y, CHUNK):
 		for x in range(start.x, affected.end.x, CHUNK):
 			build_chunk(Vector2i(x, z))
-	if not path_overlay.is_empty():
+	if not path_overlay.is_empty() or not extra_paths.is_empty():
 		show_path(path_overlay)
 
 
@@ -417,31 +418,46 @@ func show_cursor(point: Vector2) -> void:
 
 func show_path(path: Dictionary) -> void:
 	path_overlay = path
-	path_mesh.visible = not path.is_empty()
+	path_mesh.visible = not path.is_empty() or not extra_paths.is_empty()
 	if not path_mesh.visible:
 		return
-	var points := PackedVector3Array()
-	for point: Vector2 in path["points"]:
-		points.append(path_point_world(point))
 	var mesh := ImmediateMesh.new()
-	var ink := StandardMaterial3D.new()
-	ink.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	ink.albedo_color = palette["borderHighlight"]
-	if points.size() > 1:
-		mesh.surface_begin(Mesh.PRIMITIVE_LINE_STRIP, ink)
-		for point in points:
-			mesh.surface_add_vertex(point)
-		if path["type"] == 2:
-			mesh.surface_add_vertex(points[0])
+	var sec_ink := StandardMaterial3D.new()
+	sec_ink.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	sec_ink.albedo_color = palette["accentTeal"]
+	for secondary: Dictionary in extra_paths:
+		var spts := PackedVector3Array()
+		for pt: Vector2 in secondary["points"]:
+			spts.append(path_point_world(pt))
+		if spts.size() > 1:
+			mesh.surface_begin(Mesh.PRIMITIVE_LINE_STRIP, sec_ink)
+			for pt in spts:
+				mesh.surface_add_vertex(pt)
+			if int(secondary["type"]) == 2:
+				mesh.surface_add_vertex(spts[0])
+			mesh.surface_end()
+	if not path.is_empty():
+		var points := PackedVector3Array()
+		for point: Vector2 in path["points"]:
+			points.append(path_point_world(point))
+		var ink := StandardMaterial3D.new()
+		ink.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		ink.albedo_color = palette["borderHighlight"]
+		if points.size() > 1:
+			mesh.surface_begin(Mesh.PRIMITIVE_LINE_STRIP, ink)
+			for point in points:
+				mesh.surface_add_vertex(point)
+			if path["type"] == 2:
+				mesh.surface_add_vertex(points[0])
+			mesh.surface_end()
+		mesh.surface_begin(Mesh.PRIMITIVE_LINES, ink)
+		for i in points.size():
+			var point := points[i]
+			for axis in [Vector3.RIGHT, Vector3.FORWARD, Vector3.UP]:
+				var radius := 14.0 if i == selected_path_point else 8.0
+				mesh.surface_add_vertex(point - axis * radius)
+				mesh.surface_add_vertex(point + axis * radius)
 		mesh.surface_end()
-	mesh.surface_begin(Mesh.PRIMITIVE_LINES, ink)
-	for i in points.size():
-		var point := points[i]
-		for axis in [Vector3.RIGHT, Vector3.FORWARD, Vector3.UP]:
-			var radius := 14.0 if i == selected_path_point else 8.0
-			mesh.surface_add_vertex(point - axis * radius)
-			mesh.surface_add_vertex(point + axis * radius)
-	mesh.surface_end()
 	path_mesh.mesh = mesh
 
 
