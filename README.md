@@ -4,7 +4,7 @@ Windows x64 terrain editor for Battlezone Combat Commander. The first working sl
 
 ## Run
 
-Open `BZ_MAP_MAG.exe` from a desktop build, or run the project with Godot 4.7.2. Supply an absolute BZN path or use **Open**.
+Double-click `BZ_MAP_MAG.exe` or `BZ_MAP_MAG.cmd` in the repository root (drag-and-drop a `.bzn`/`.bzmag` onto `BZ_MAP_MAG.cmd`, pass `--dev` to launch directly from `app/` via Godot 4.7.2, or rebuild the root binary with `./tools/Build-Desktop.ps1 -Godot $godot -ToRoot`). You can also run the project directly with Godot 4.7.2:
 
 ```powershell
 $godot = 'V:/__STORE_V/_SOFT/Godot/4.7.2-stable/Godot_v4.7.2-stable_win64.exe'
@@ -32,6 +32,7 @@ $map = (Resolve-Path 'map_references/Brave Lil Toaster/braveliltoaster.bzn').Pat
 ./tools/Test-Terrain.ps1 -Godot $godot -WithGpu
 ./tools/Build-ObjectPreview.ps1 -VrvSource 'path/to/vrv'
 ./tools/Test-ObjectPreview.ps1 -Godot $godot -Game 'path/to/BZ2R' -WithGpu
+./tools/Build-Desktop.ps1 -Godot $godot -ToRoot
 ./tools/Build-Desktop.ps1 -Godot $godot -WindowsReleaseTemplate 'path/to/windows_release_x86_64.exe'
 ./tools/Clean-Build.ps1 -Apply
 ```
