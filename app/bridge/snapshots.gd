@@ -60,11 +60,12 @@ func create_native_flat_map(source_bzn: String, target: String, size_m: int = 20
 			inf_name = fname
 		elif ext in ["bzn", "lua", "sky", "des"]:
 			extra_files.append(fname)
-	if trn_name.is_empty() or inf_name.is_empty():
-		return fail("Source blank map must include same-stem .trn and .inf companions.")
+	if trn_name.is_empty():
+		return fail("Source blank map must include a same-stem .trn companion.")
 	var ter_bytes := PackedByteArray()
 	var half := samples / 2
 	var origin := Vector2i(-half, -half)
+	var dims := Vector2i(samples, samples)
 	if not template_ter.strip_edges().is_empty():
 		if not FileAccess.file_exists(template_ter):
 			return fail("Selected TER template file was not found.")
@@ -73,11 +74,12 @@ func create_native_flat_map(source_bzn: String, target: String, size_m: int = 20
 		if not check_ter.decode(ter_bytes):
 			return fail("Invalid TER template: " + check_ter.error)
 		origin = check_ter.origin
-		samples = check_ter.dimensions.x
+		dims = check_ter.dimensions
+		samples = dims.x
 		size_m = samples * int(Terrain.SPACING)
 		height = check_ter.min_height
 	else:
-		ter_bytes = Terrain.create_flat(origin, Vector2i(samples, samples), height, 0)
+		ter_bytes = Terrain.create_flat(origin, dims, height, 0)
 		if ter_bytes.is_empty():
 			return fail("Could not generate native flat TER v5 data.")
 	var stage := target.get_base_dir().path_join(".bzmag-new-" + nonce())
@@ -88,10 +90,17 @@ func create_native_flat_map(source_bzn: String, target: String, size_m: int = 20
 		if DirAccess.copy_absolute(src_dir.path_join(fname), stage.path_join(fname)) != OK:
 			return rollback(stage, written, "Could not copy " + fname)
 		written.append(fname)
-	if DirAccess.copy_absolute(src_dir.path_join(inf_name), stage.path_join(inf_name)) != OK:
-		return rollback(stage, written, "Could not copy " + inf_name)
-	written.append(inf_name)
-	var trn_text := _rewrite_trn_size(FileAccess.get_file_as_string(src_dir.path_join(trn_name)), origin, Vector2i(samples, samples), height)
+	if inf_name.is_empty():
+		var synth_inf := stem + ".inf"
+		var synth_text := "[DESCRIPTION]\r\nmissionName = \"%s\"\r\n" % stem
+		if not write_bytes(stage.path_join(synth_inf), synth_text.to_utf8_buffer()):
+			return rollback(stage, written, "Could not write " + synth_inf)
+		written.append(synth_inf)
+	else:
+		if DirAccess.copy_absolute(src_dir.path_join(inf_name), stage.path_join(inf_name)) != OK:
+			return rollback(stage, written, "Could not copy " + inf_name)
+		written.append(inf_name)
+	var trn_text := _rewrite_trn_size(FileAccess.get_file_as_string(src_dir.path_join(trn_name)), origin, dims, height)
 	var trn_bytes := trn_text.to_utf8_buffer()
 	if not write_bytes(stage.path_join(trn_name), trn_bytes):
 		return rollback(stage, written, "Could not write " + trn_name)

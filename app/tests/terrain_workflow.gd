@@ -2206,6 +2206,36 @@ func test_universal_mod_architecture(editor: Control, brave_source: String, blan
 	check(stock_doc.open(stock_bzn) and stock_doc.package.terrain.dimensions == Vector2i(512, 512),
 		"native-generated flat map opens and validates cleanly")
 
+	# 3b. Missing .inf stock template synthesizes valid .inf, and non-square TER preserves Width and Depth in TRN (T-18)
+	var no_inf_src := scratch.path_join("no-inf-template")
+	DirAccess.make_dir_recursive_absolute(no_inf_src)
+	var blank_stem := blank_source.get_file().get_basename()
+	var blank_dir := blank_source.get_base_dir()
+	for fn in DirAccess.get_files_at(blank_dir):
+		if fn.to_lower().get_basename() == blank_stem.to_lower() and fn.get_extension().to_lower() in ["bzn", "trn"]:
+			DirAccess.copy_absolute(blank_dir.path_join(fn), no_inf_src.path_join(fn))
+	var no_inf_out := scratch.path_join("stock-no-inf-out")
+	check(writer.create_native_flat_map(no_inf_src.path_join(blank_source.get_file()), no_inf_out, 1024, 100.0),
+		"create_native_flat_map synthesizes missing .inf for stock templates: " + writer.error)
+	var synth_inf_text := FileAccess.get_file_as_string(no_inf_out.path_join(blank_stem + ".inf"))
+	var no_inf_doc := Document.new()
+	check(synth_inf_text.contains("[DESCRIPTION]") and no_inf_doc.open(no_inf_out.path_join(blank_source.get_file()))
+		and no_inf_doc.package.terrain.dimensions == Vector2i(512, 512),
+		"synthesized .inf map opens and validates cleanly")
+	var rect_ter_path := scratch.path_join("rect-template.ter")
+	var rf := FileAccess.open(rect_ter_path, FileAccess.WRITE)
+	rf.store_buffer(Terrain.create_flat(Vector2i(-128, -64), Vector2i(256, 128), 50.0, 0))
+	rf.close()
+	var rect_out := scratch.path_join("rect-ter-out")
+	check(writer.create_native_flat_map(blank_source, rect_out, 2048, 100.0, rect_ter_path),
+		"create_native_flat_map accepts non-square TER template: " + writer.error)
+	var rect_trn_text := FileAccess.get_file_as_string(rect_out.path_join(blank_stem + ".trn"))
+	var rect_doc := Document.new()
+	check(rect_trn_text.contains("Width = 512") and rect_trn_text.contains("Depth = 256")
+		and rect_doc.open(rect_out.path_join(blank_source.get_file()))
+		and rect_doc.package.terrain.dimensions == Vector2i(256, 128),
+		"non-square TER template preserves exact Width and Depth in TRN and reopens cleanly")
+
 	# 4. Open-map auto-detection: Stock-only 0-object map detects 'stock' (NEVER VRV!), Brave detects VSR/Strategy02
 	check(stock_doc.remove_object(0), "remove VSR craft to form a clean Stock-only map")
 	var pure_stock_dir := scratch.path_join("pure-stock-map")
