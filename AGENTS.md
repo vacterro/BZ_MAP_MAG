@@ -50,15 +50,16 @@ Clean them as part of finishing any session, and opportunistically during long o
   can be killed with `tools/Stop-OwnedProcesses.ps1 -Apply -RunToken <private-run-name>`; parse errors abort
   before any checks.
 - Playtest (Steam must be running; **never pass `-KeepBznLayout`** — it is now a
-  hard refusal for anything but the verified native 1192 layout; the launcher
-  only runs 1192 natively or 1196 through the verified `bzn_compat` conversion
-  and aborts every other version with an explanation instead of launching):
-  `powershell -File tools/Start-Playtest.ps1 -Godot <godot> -Game <BZ2R> -VrvSource <vrv> -Mission <bzn>`
-  `-ValidateOnly` prints the classified launch route without launching.
+  hard refusal for anything but the verified native 1192 layout; Stock 1192 maps
+  launch natively with `-ModProfile stock` and **do not require `-VrvSource`**;
+  only 1196 maps require `-Converter` / `-VrvSource` for `bzn_compat.py`
+  conversion; every other version aborts before launching):
+  - Stock 1192: `powershell -File tools/Start-Playtest.ps1 -Godot <godot> -Game <BZ2R> -ModProfile stock -Mission <bzn>`
+  - 1196 VRV/VSR: `powershell -File tools/Start-Playtest.ps1 -Godot <godot> -Game <BZ2R> -VrvSource <vrv> -Mission <bzn>`
+  `-ValidateOnly` emits the unified `bzmag.compatibility-result/1` contract and launch route without launching.
   Success = `[Main] Entering run code [MISSION]` + `[Mission] Entering run code [RUN]`
   and zero `SAVEGAME CORRUPT` lines in the newest log under
-  `C:\Users\vac34\Documents\My Games\Battlezone Combat Commander\` (private session-profile
-  subfolders may hold their own logs).
+  `C:\Users\vac34\Documents\My Games\Battlezone Combat Commander\` (prefer normal window close `QUIT requested` + `System shutdown normally` -> non-`Crashed` `Battlezone ...log`).
 - Game install: `V:/__STORE_V/_SOFT/Steam/steamapps/common/BZ2R`.
 - VRV reference source: `V:/___VAC/__K/__CODE/_MISC/_BZDECOMP/vrv`.
 - Python probes: use `py -3.11` (plain `python` heredocs can hang in this shell).
