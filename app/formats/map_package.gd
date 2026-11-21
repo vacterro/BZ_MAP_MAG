@@ -22,6 +22,8 @@ var paths: Array[Dictionary] = []
 var objects: Array[Dictionary] = []
 var object_count_offset := -1
 var object_insert_offset := -1
+var water_name := ""
+var water_bytes := PackedByteArray()
 var path_codec := BznPaths.new()
 
 
@@ -94,8 +96,11 @@ func open(path: String) -> bool:
 		return fail(terrain.error)
 	if roles.has("wat"):
 		var preview := Water.new()
-		if preview.decode(FileAccess.get_file_as_bytes(folder.path_join(roles["wat"])), terrain):
+		var water_path := folder.path_join(roles["wat"])
+		water_bytes = FileAccess.get_file_as_bytes(water_path)
+		if preview.decode(water_bytes, terrain):
 			water = preview
+			water_name = roles["wat"]
 	return true
 
 

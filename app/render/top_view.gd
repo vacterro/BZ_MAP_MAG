@@ -117,7 +117,7 @@ func _draw() -> void:
 	if water_visible and document.package.water:
 		var water := document.package.water
 		var tile_size := rect.size / Vector2(water.width, water.depth)
-		for layer: Dictionary in water.layers:
+		for layer: Dictionary in document.water_layers_effective():
 			for tile: Vector2 in layer["tiles"]:
 				draw_rect(Rect2(rect.position + tile * tile_size, tile_size), palette["accentTeal"])
 	if objects_visible or move_objects:

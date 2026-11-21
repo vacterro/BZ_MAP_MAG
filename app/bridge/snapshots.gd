@@ -4,6 +4,7 @@ const Package := preload("res://formats/map_package.gd")
 const Document := preload("res://core/map_document.gd")
 const BznObjects := preload("res://formats/bzn_objects.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
+const Water := preload("res://formats/water_v5.gd")
 
 var error := ""
 
@@ -63,9 +64,20 @@ func save_project(document: Document, target: String) -> bool:
 		object_inserts.append({"template": addition["template"], "id": addition["id"], "label": addition["label"],
 			"sequence": addition["sequence"], "position": [addition["transform"].origin.x, addition["transform"].origin.y, addition["transform"].origin.z],
 			"basis": basis_array(addition["transform"].basis)})
+	var water_records := {}
+	for layer: int in document.water_heights:
+		water_records[str(layer)] = {"height": float(document.water_heights[layer])}
+	for layer: int in document.water_edits:
+		var cover := {}
+		for block: int in document.water_edits[layer]:
+			cover[str(block)] = bool(document.water_edits[layer][block])
+		if water_records.has(str(layer)):
+			water_records[str(layer)]["cover"] = cover
+		else:
+			water_records[str(layer)] = {"cover": cover}
 	var record := {"schema": 1, "source": document.package.source_path, "files": document.package.files, "edits": edits,
 		"layers": document.layers, "pathEdits": path_edits, "objectEdits": object_edits,
-		"objectRemovals": object_removals, "objectInserts": object_inserts}
+		"objectRemovals": object_removals, "objectInserts": object_inserts, "waterEdits": water_records}
 	if not document.asset_profile.is_empty():
 		record["assetProfile"] = document.asset_profile
 	var terrain := document.package.terrain
@@ -114,6 +126,11 @@ func export_native(document: Document, target: String) -> bool:
 	var bzn := PackedByteArray()
 	var suffix := PackedByteArray()
 	var object_shift := 0
+	var wat := PackedByteArray()
+	if document.has_water_file_edits():
+		wat = Water.encode(package.water_bytes, document.water_edits, document.water_heights)
+		if wat.is_empty():
+			return fail("The native water edits could not be applied to this map.")
 	if not document.path_edits.is_empty() or not document.object_edits.is_empty() or not document.object_removals.is_empty() or not document.object_additions.is_empty():
 		var source_bzn := FileAccess.get_file_as_bytes(package.source_path.get_base_dir().path_join(package.bzn_name))
 		var digest := HashingContext.new()
@@ -160,6 +177,10 @@ func export_native(document: Document, target: String) -> bool:
 			if not write_bytes(output, bzn) or FileAccess.get_file_as_bytes(output) != bzn:
 				return rollback(stage, names, "Could not write and verify " + name)
 			expected = FileAccess.get_sha256(output)
+		elif name == package.water_name and not wat.is_empty():
+			if not write_bytes(output, wat) or FileAccess.get_file_as_bytes(output) != wat:
+				return rollback(stage, names, "Could not write and verify " + name)
+			expected = FileAccess.get_sha256(output)
 		else:
 			var source := package.source_path.get_base_dir().path_join(name)
 			if DirAccess.copy_absolute(source, output) != OK:
@@ -175,6 +196,18 @@ func export_native(document: Document, target: String) -> bool:
 		for index: int in edits:
 			if reimport.terrain.material_value(layer, index) != edits[index]:
 				return rollback(stage, names, "Modified terrain material did not re-import as edited.")
+	if not wat.is_empty():
+		if reimport.water == null or reimport.water.width != package.water.width or reimport.water.depth != package.water.depth or reimport.water.invalid_layer_flags != package.water.invalid_layer_flags:
+			return rollback(stage, names, "Modified water did not re-import as edited.")
+		var reimported := {}
+		for entry: Dictionary in reimport.water.layers:
+			reimported[int(entry["index"])] = entry
+		for entry: Dictionary in document.water_layers_effective():
+			var index := int(entry["index"])
+			if not reimported.has(index) or reimported[index]["tiles"] != entry["tiles"] or absf(float(reimported[index]["height"]) - float(entry["height"])) > 0.0005:
+				return rollback(stage, names, "Modified water did not re-import as edited.")
+		if reimported.size() != document.water_layers_effective().size():
+			return rollback(stage, names, "Modified water did not re-import as edited.")
 	if not bzn.is_empty():
 		var path_indices := document.path_indices()
 		if reimport.path_codec.table_start != package.path_codec.table_start + object_shift or reimport.paths.size() != path_indices.size() or bzn.slice(reimport.path_codec.table_end) != suffix:

@@ -168,6 +168,7 @@ func run() -> void:
 	await test_graph_materials(editor, args[0], args[2])
 	await test_object_move(editor, args[0], args[2])
 	await test_object_tools(editor, args[0], args[2])
+	await test_water_tools(editor, args[0], args[2])
 	print("Native height at (0,0): %.4f -> %.4f, changed samples: %d" % [baseline, intended, document.edits.size()])
 	print("FAILURES: %d" % failures)
 	quit(0 if failures == 0 else 1)
@@ -998,3 +999,115 @@ func check_object_shortcut(button: Button, key: Key) -> void:
 	event.pressed = true
 	check(button.shortcut.matches_event(event) and not button.disabled, "object history shortcut is enabled")
 	button.pressed.emit()
+
+
+func test_water_tools(editor: Control, source: String, scratch: String) -> void:
+	check(editor.open_map(source), "load the water tools fixture")
+	var doc: Document = editor.document
+	var water: Water = doc.package.water
+	check(water.width == 64 and water.depth == 64, "the water codec measures the 64 × 64 Brave block grid")
+	check(doc.water_layer_height(0) == 135.0 and doc.water_cover_count(0) == 222, "layer 0 decodes at 135 m covering 222 blocks")
+	check(doc.water_layers_effective().size() == 1 and doc.water_layers_effective()[0]["index"] == 0, "only layer 0 carries coverage")
+	check(not doc.set_water_height(8, 10.0) and not doc.set_water_height(0, 150000.0) and not doc.error.is_empty(),
+		"elevation edits reject invalid layers and heights")
+	doc.error = ""
+	check(doc.set_water_height(0, 147.5) and doc.water_layer_height(0) == 147.5, "set elevation records the new height")
+	doc.undo()
+	check(doc.water_layer_height(0) == 135.0, "undo restores the native elevation")
+	doc.redo()
+	check(doc.water_layer_height(0) == 147.5, "redo restores the edited elevation")
+	doc.undo()
+
+	editor.water_edit_button.pressed.emit()
+	check(editor.water_tools.visible, "the Edit Water button opens the dialog")
+	check(editor.water_tools.current_layer() == 0, "the dialog starts on the coastal layer 0")
+	editor.water_tools.radius.value = 1.0
+	editor.water_tools.paint_toggle.button_pressed = true
+	check(editor.painting_water_active(), "enabling coverage paint arms the water brush")
+	var pixel: Vector2 = editor.top.view_rect().get_center()
+	var sample: Vector2 = editor.top.sample_at(pixel)
+	var block: int = (int(sample.y) / doc.WATER_BLOCK) * water.width + int(sample.x) / doc.WATER_BLOCK
+	check(not doc.water_effective_cover(0).has(block), "the painted block starts uncovered")
+	var press := InputEventMouseButton.new()
+	press.position = pixel
+	press.button_index = MOUSE_BUTTON_LEFT
+	press.pressed = true
+	editor.view_input(press, editor.top)
+	check(doc.water_stroke_active and editor.paint_view == editor.top, "a left press starts a coverage stroke in the 2D view")
+	check(doc.water_cover_count(0) == 226 and doc.water_effective_cover(0).has(block), "the stroke paints the four blocks meeting at the map centre sample")
+	check(editor.has_unsaved_changes(), "water coverage marks the document dirty")
+	var motion := InputEventMouseMotion.new()
+	motion.position = pixel
+	motion.button_mask = MOUSE_BUTTON_MASK_LEFT
+	editor.view_input(motion, editor.top)
+	editor.view_input(press, editor.top)
+	press.pressed = false
+	editor.view_input(press, editor.top)
+	check(not doc.water_stroke_active and editor.paint_view == null, "releasing the button ends the water stroke")
+	check(editor.status.text.contains("Water stroke done"), "the status line reports the finished stroke")
+	doc.undo()
+	check(doc.water_cover_count(0) == 222, "undo removes the painted coverage")
+	doc.redo()
+	check(doc.water_cover_count(0) == 226, "redo re-applies the painted coverage")
+	doc.undo()
+	editor.water_tools.elevation.value = 150.5
+	editor.water_tools.apply_elevation()
+	check(doc.water_layer_height(0) == 150.5, "Apply Elevation records the dialog value")
+	check(editor.status.text.contains("Water layer 1 elevation set"), "the dialog reports the elevation change")
+	editor.water_tools.paint_toggle.button_pressed = false
+	editor.water_tools.hide()
+	check(not editor.painting_water_active(), "closing the dialog stops coverage painting")
+
+	var base_tile: Vector2 = water.first_tiles[0]
+	var base_block := int(base_tile.y) * water.width + int(base_tile.x)
+	var base_sample := Vector2(int(base_tile.x) * doc.WATER_BLOCK + 8, int(base_tile.y) * doc.WATER_BLOCK + 8)
+	doc.begin_water_stroke()
+	doc.water_dab(base_sample, 1.0, 0, false)
+	doc.end_water_stroke(0)
+	check(not doc.water_effective_cover(0).has(base_block) and doc.water_cover_count(0) == 221, "erase stroke removes native coverage")
+	doc.undo()
+	check(doc.water_effective_cover(0).has(base_block) and doc.water_cover_count(0) == 222, "undo restores the erased native coverage")
+
+	doc.begin_water_stroke()
+	doc.water_dab(base_sample, 1.0, 0, false)
+	doc.end_water_stroke(0)
+	doc.begin_water_stroke()
+	doc.water_dab(Vector2(520.0, 520.0), 1.0, 2, true)
+	doc.end_water_stroke(2)
+	check(doc.water_cover_count(2) == 1 and doc.water_layer_height(2) == 0.0, "layer 2 gains coverage at its default elevation")
+	check(doc.water_layers_effective().size() == 2, "the effective layers now include layer 2")
+	check(doc.set_water_height(2, 90.0), "raise the second layer elevation")
+
+	var writer := Snapshots.new()
+	var project := scratch.path_join("water-tools.bzmag")
+	editor.save_project(project)
+	check(not editor.has_unsaved_changes(), "saving the project clears the water dirty flag")
+	var reopened := Document.new()
+	check(reopened.open(project), "reopen the water project file")
+	check(reopened.water_heights.keys() == doc.water_heights.keys() and absf(reopened.water_layer_height(2) - 90.0) < 0.0005,
+		"the project round-trips every edited elevation")
+	check(reopened.water_effective_cover(0) == doc.water_effective_cover(0) and reopened.water_effective_cover(2) == doc.water_effective_cover(2),
+		"the project round-trips every coverage edit")
+
+	var target := scratch.path_join("water-tools")
+	check(writer.export_native(reopened, target), writer.error)
+	var exported := Document.new()
+	check(exported.open(target.path_join(reopened.package.bzn_name)), "reopen the water export")
+	check(exported.package.water.layers.size() == 2, "the exported mask decodes both layers")
+	check(exported.water_layers_effective() == reopened.water_layers_effective(), "the exported mask re-imports as the document coverage")
+	check(exported.package.water.layers[1]["height"] == 90.0 and exported.package.water.layers[0]["height"] == 150.5,
+		"the exported heights re-import at the edited elevations")
+	var wat_expected := Water.encode(doc.package.water_bytes, doc.water_edits, doc.water_heights)
+	var wat_actual := FileAccess.get_file_as_bytes(target.path_join(doc.package.water_name))
+	check(wat_actual == wat_expected and wat_actual.size() == 6512, "the exported WAT matches the codec byte for byte")
+
+	var text: String = FileAccess.get_file_as_string(project)
+	var data: Dictionary = JSON.parse_string(text)
+	data["waterEdits"] = {"9": {"height": 5.0}}
+	var bad_path := scratch.path_join("water-bad.bzmag")
+	var output := FileAccess.open(bad_path, FileAccess.WRITE)
+	output.store_string(JSON.stringify(data, "", true, true))
+	output.close()
+	var bad := Document.new()
+	check(not bad.open(bad_path) and bad.error == "Invalid project water layer.", "the project loader rejects out-of-range water layers")
+	print("Water tools: coverage, elevation, project and export verified on layer 0 and 2.")

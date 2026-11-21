@@ -284,6 +284,19 @@ func show_water(enabled: bool) -> void:
 	var water := document.package.water
 	if not water or water.layers.is_empty():
 		return
+	build_water_mesh()
+
+
+func rebuild_water() -> void:
+	water_mesh.mesh = null
+	if water_mesh.visible:
+		build_water_mesh()
+
+
+func build_water_mesh() -> void:
+	var water := document.package.water
+	if not water or document.water_layers_effective().is_empty():
+		return
 	var terrain := document.package.terrain
 	var size := terrain.BLOCK * terrain.SPACING
 	var base := Vector2(terrain.origin) * terrain.SPACING
@@ -294,7 +307,7 @@ func show_water(enabled: bool) -> void:
 	ink.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLES, ink)
 	mesh.surface_set_normal(Vector3.UP)
-	for layer: Dictionary in water.layers:
+	for layer: Dictionary in document.water_layers_effective():
 		for tile: Vector2 in layer["tiles"]:
 			var origin := base + tile * size
 			for corner: Vector2 in [Vector2.ZERO, Vector2.RIGHT, Vector2.DOWN, Vector2.RIGHT, Vector2.ONE, Vector2.DOWN]:

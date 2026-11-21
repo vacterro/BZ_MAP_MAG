@@ -4,6 +4,7 @@ const Package := preload("res://formats/map_package.gd")
 const Graph := preload("res://nodes/height_graph.gd")
 const PathCodec := preload("res://formats/bzn_paths.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
+const Water := preload("res://formats/water_v5.gd")
 const HISTORY_LIMIT := 64
 const MAX_EDITOR_ABS_HEIGHT := 100000.0
 enum Brush { OFFSET, SMOOTH, FLATTEN, SPRAY }
@@ -15,6 +16,10 @@ signal materials_changed(region: Rect2i, layer: int)
 signal paths_changed
 signal object_moved(view_index: int)
 signal objects_changed
+signal water_changed
+
+const WATER_LAYERS := 8
+const WATER_BLOCK := 16
 
 var package: Package
 var base_heights := PackedFloat32Array()
@@ -26,6 +31,11 @@ var object_edits := {}
 var object_additions: Array = []
 var object_removals := {}
 var next_object_id := 1
+var water_edits := {}
+var water_heights := {}
+var water_base := {}
+var water_stroke := {}
+var water_stroke_active := false
 var undo_stack: Array[Dictionary] = []
 var redo_stack: Array[Dictionary] = []
 var stroke := {}
@@ -59,6 +69,11 @@ func open(path: String) -> bool:
 	object_additions = []
 	object_removals = {}
 	next_object_id = 1
+	water_edits = {}
+	water_heights = {}
+	water_base = {}
+	water_stroke = {}
+	water_stroke_active = false
 	package = Package.new()
 	if not package.open(source):
 		return fail(package.error)
@@ -90,6 +105,8 @@ func open(path: String) -> bool:
 		if not read_object_removals(saved.get("objectRemovals", [])):
 			return false
 		if not read_object_additions(saved.get("objectInserts", [])):
+			return false
+		if not read_water_edits(saved.get("waterEdits", {})):
 			return false
 	if not package.check_sources():
 		return fail(package.error)
@@ -324,6 +341,14 @@ func apply_history(change: Dictionary, direction: String) -> void:
 		objects_changed.emit()
 	elif change.has("material"):
 		apply_materials(change["material"], change[direction])
+	elif change.has("water"):
+		var layer := int(change["water"])
+		for block: int in change[direction]:
+			set_water_cover(layer, block, change[direction][block])
+		water_changed.emit()
+	elif change.has("water_height"):
+		set_water_height_internal(int(change["water_height"]), float(change[direction]))
+		water_changed.emit()
 	else:
 		var materials := {}
 		for layer: int in change.get("materials", {}):
@@ -555,6 +580,176 @@ func read_object_edits(saved: Variant) -> bool:
 			return fail("Invalid saved object edit.")
 		set_object_edit(index, Transform3D(read_saved_basis(fields["basis"]), Vector3(fields["position"][0], fields["position"][1], fields["position"][2])))
 	return true
+
+
+func read_water_edits(saved: Variant) -> bool:
+	if package.water == null:
+		return true if saved == null or (saved is Dictionary and saved.is_empty()) else fail("This map has no native water.")
+	if not saved is Dictionary or saved.size() > WATER_LAYERS:
+		return fail("Invalid project water edits.")
+	for key: String in saved:
+		var layer := key.to_int()
+		if str(layer) != key or not valid_water_layer(layer):
+			return fail("Invalid project water layer.")
+		var entry: Variant = saved[key]
+		if not entry is Dictionary:
+			return fail("Invalid project water record.")
+		var height: Variant = entry.get("height", null)
+		if height != null:
+			if not (height is float or height is int) or not is_finite(float(height)) or absf(float(height)) > Water.MAX_HEIGHT:
+				return fail("Invalid saved water elevation.")
+			set_water_height(layer, float(height), false)
+		var cover: Variant = entry.get("cover", null)
+		if cover != null:
+			if not cover is Dictionary or cover.size() > package.water.width * package.water.depth:
+				return fail("Invalid saved water coverage.")
+			for block_key: String in cover:
+				var block := block_key.to_int()
+				if str(block) != block_key or block < 0 or block >= package.water.width * package.water.depth:
+					return fail("Invalid saved water coverage reference.")
+				var value: Variant = cover[block_key]
+				if not (value is bool):
+					return fail("Invalid saved water coverage value.")
+				set_water_cover(layer, block, value)
+	return true
+
+
+func valid_water_layer(layer: int) -> bool:
+	return package.water != null and layer >= 0 and layer < WATER_LAYERS
+
+
+func water_block_count() -> int:
+	var water := package.water
+	return water.width * water.depth if water != null else 0
+
+
+func water_base_cover(layer: int) -> Dictionary:
+	if not water_base.has(layer):
+		var result := {}
+		for record: Dictionary in package.water.layers:
+			if int(record["index"]) == layer:
+				for tile: Vector2 in record["tiles"]:
+					result[int(tile.y) * package.water.width + int(tile.x)] = true
+				break
+		water_base[layer] = result
+	return water_base[layer]
+
+
+func water_effective_cover(layer: int) -> Dictionary:
+	var result := water_base_cover(layer).duplicate()
+	if water_edits.has(layer):
+		for block: int in water_edits[layer]:
+			if water_edits[layer][block]:
+				result[block] = true
+			else:
+				result.erase(block)
+	return result
+
+
+func water_cover_count(layer: int) -> int:
+	return water_effective_cover(layer).size()
+
+
+func water_layer_height(layer: int) -> float:
+	if water_heights.has(layer):
+		return float(water_heights[layer])
+	return Water.layer_height(package.water_bytes, layer)
+
+
+func water_layers_effective() -> Array:
+	var result: Array = []
+	if package.water == null:
+		return result
+	for layer in WATER_LAYERS:
+		var cover := water_effective_cover(layer)
+		if cover.is_empty():
+			continue
+		var blocks := cover.keys()
+		blocks.sort()
+		var tiles := PackedVector2Array()
+		for block: int in blocks:
+			tiles.append(Vector2(block % package.water.width, block / package.water.width))
+		result.append({"index": layer, "height": water_layer_height(layer), "tiles": tiles})
+	return result
+
+
+func set_water_height(layer: int, height: float, announce := true) -> bool:
+	if not valid_water_layer(layer) or not is_finite(height) or absf(height) > Water.MAX_HEIGHT:
+		return fail("Choose a water layer and a finite elevation within ±100000 m.")
+	var before := water_layer_height(layer)
+	if before == height:
+		return true
+	set_water_height_internal(layer, height)
+	if announce:
+		push_history({"water_height": layer, "before": before, "after": height})
+	water_changed.emit()
+	return true
+
+
+func set_water_height_internal(layer: int, height: float) -> void:
+	if height == Water.layer_height(package.water_bytes, layer):
+		water_heights.erase(layer)
+	else:
+		water_heights[layer] = height
+
+
+func set_water_cover(layer: int, block: int, value: bool) -> void:
+	if water_base_cover(layer).get(block, false) == value:
+		var record: Dictionary = water_edits.get(layer, {})
+		record.erase(block)
+		if record.is_empty():
+			water_edits.erase(layer)
+		else:
+			water_edits[layer] = record
+		return
+	if not water_edits.has(layer):
+		water_edits[layer] = {}
+	water_edits[layer][block] = value
+
+
+func begin_water_stroke() -> void:
+	if has_preview():
+		fail("Clear the terrain preview before painting water.")
+		return
+	water_stroke = {}
+	water_stroke_active = true
+
+
+func water_dab(point: Vector2, radius_m: float, layer: int, add: bool) -> void:
+	if not water_stroke_active or not valid_water_layer(layer) or not is_finite(radius_m) or radius_m <= 0.0 or radius_m > 1024.0:
+		return
+	var water := package.water
+	var block_m := Terrain.SPACING * Terrain.BLOCK
+	var radius := radius_m / block_m
+	var center := Vector2(point.x, point.y) / WATER_BLOCK
+	var cover := water_effective_cover(layer)
+	for block in water_block_count():
+		var column := block % water.width
+		var row := block / water.width
+		var nearest := center.clamp(Vector2(column, row), Vector2(column + 1.0, row + 1.0))
+		if center.distance_to(nearest) > radius:
+			continue
+		if not water_stroke.has(block):
+			water_stroke[block] = cover.get(block, false)
+		set_water_cover(layer, block, add)
+	water_changed.emit()
+
+
+func end_water_stroke(layer: int) -> void:
+	if not water_stroke_active:
+		return
+	water_stroke_active = false
+	if water_stroke.is_empty():
+		return
+	var after := {}
+	for block: int in water_stroke:
+		after[block] = water_effective_cover(layer).get(block, false)
+	push_history({"water": layer, "before": water_stroke.duplicate(), "after": after})
+	water_stroke = {}
+
+
+func has_water_file_edits() -> bool:
+	return not water_edits.is_empty() or not water_heights.is_empty()
 
 
 func read_object_removals(saved: Variant) -> bool:

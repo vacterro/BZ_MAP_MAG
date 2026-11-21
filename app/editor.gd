@@ -12,6 +12,7 @@ const NativeAssets := preload("res://formats/native_assets.gd")
 const TerrainTextures := preload("res://render/terrain_textures.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
 const TerrainCommands := preload("res://tools/terrain_commands.gd")
+const WaterCommands := preload("res://tools/water_commands.gd")
 const MoveObject := preload("res://tools/move_object.gd")
 const SETTINGS := "user://editor.cfg"
 
@@ -35,6 +36,10 @@ var objects_button: Button
 var move_objects_button: Button
 var object_tool := MoveObject.new()
 var water_button: Button
+var water_edit_button: Button
+var water_tools := WaterCommands.new()
+var painting_water := false
+var water_add := true
 var color_button: Button
 var texture_button: Button
 var object_thread := Thread.new()
@@ -91,6 +96,8 @@ var saved_object_removals := {}
 var saved_asset_profile := ""
 var saved_colors := {}
 var saved_tiles := {}
+var saved_water_edits := {}
+var saved_water_heights := {}
 var cursor := Vector2(-1, -1)
 var last_cursor := Vector2(-1, -1)
 var anchor := Vector2(-1, -1)
@@ -183,6 +190,7 @@ func _ready() -> void:
 			move_objects_button.toggle_mode = true
 			water_button = add_button(heading, "Water", toggle_water, "Preview decoded native water layers in both views")
 			water_button.toggle_mode = true
+			water_edit_button = add_button(heading, "Edit Water", toggle_water_edit, "Edit water layer coverage and elevations. Left drag paints, Shift erases.")
 		panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		dock.add_child(panel)
 		panel.mouse_exited.connect(func(): set_cursor(Vector2(-1, -1)))
@@ -214,7 +222,7 @@ func _ready() -> void:
 	add_child(confirmation)
 	confirmation.confirmed.connect(func(): open_map(pending_path))
 	keys_dialog.title = "Editor Hotkeys"
-	keys_dialog.dialog_text = "Shift+1–6  Brush size\nShift+Q/W/E/R  Square / Circle / Cone / Bell\nShift+Z/X/C/V  Pressure 10 / 20 / 50 / 100%\nShift+A/S/D/F/G  Paint / Spray / Raise / Blend / Pick\nAlt+H  Height brush\nF5  Playtest\nCtrl+O/S/Z/Y  Open / Save Project / Undo / Redo\n\nMove Points tool\nDrag  Move a point\nShift+click  Append a point\nDelete  Remove selected point\nEsc  Cancel drag\n\nMove Object tool\nDrag  Move an object\nShift+drag  Snap to terrain grid\n[ / ]  Rotate −15° / +15°  (Shift for 1°)\nCtrl+D  Duplicate the selection\nDelete  Remove the selection\nEsc  Cancel drag"
+	keys_dialog.dialog_text = "Shift+1–6  Brush size\nShift+Q/W/E/R  Square / Circle / Cone / Bell\nShift+Z/X/C/V  Pressure 10 / 20 / 50 / 100%\nShift+A/S/D/F/G  Paint / Spray / Raise / Blend / Pick\nAlt+H  Height brush\nF5  Playtest\nCtrl+O/S/Z/Y  Open / Save Project / Undo / Redo\n\nMove Points tool\nDrag  Move a point\nShift+click  Append a point\nDelete  Remove selected point\nEsc  Cancel drag\n\nMove Object tool\nDrag  Move an object\nShift+drag  Snap to terrain grid\n[ / ]  Rotate −15° / +15°  (Shift for 1°)\nCtrl+D  Duplicate the selection\nDelete  Remove the selection\nEsc  Cancel drag\n\nEdit Water dialog\nLeft drag  Paint coverage on the chosen layer\nShift+drag  Erase coverage\nApply Elevation  Set the layer water height\nDialog closes  Painting stops"
 	add_child(keys_dialog)
 	studio.hide()
 	add_child(studio)
@@ -222,6 +230,9 @@ func _ready() -> void:
 	studio.preview_display.connect(show_graph_preview)
 	add_child(terrain_tools)
 	terrain_tools.updated.connect(func(value: String): sync_actions(); report(value))
+	add_child(water_tools)
+	water_tools.updated.connect(func(value: String): sync_actions(); report(value))
+	water_tools.painting_changed.connect(update_water_painting)
 	setup_dialog(game_picker, FileDialog.FILE_MODE_OPEN_DIR, [])
 	setup_dialog(vrv_picker, FileDialog.FILE_MODE_OPEN_DIR, [])
 	setup_dialog(asset_profile_picker, FileDialog.FILE_MODE_OPEN_FILE, ["*.json ; Asset profile"])
@@ -309,7 +320,7 @@ func toggle_water() -> void:
 	scene_view.show_water(top.water_visible)
 	if top.water_visible:
 		var water := document.package.water
-		var message := "%d WAT layer(s) visible" % water.layers.size()
+		var message := "%d WAT layer(s) visible" % document.water_layers_effective().size()
 		if water.invalid_layer_flags != 0:
 			message += " · skipped invalid layer heights"
 		report(message)
@@ -377,7 +388,7 @@ func show_graph_preview(layer: int) -> void:
 
 
 func _shortcut_input(event: InputEvent) -> void:
-	if not event is InputEventKey or not event.pressed or event.echo or document == null or document.stroke_active:
+	if not event is InputEventKey or not event.pressed or event.echo or document == null or document.stroke_active or document.water_stroke_active:
 		return
 	var focused := get_viewport().gui_get_focus_owner()
 	if focused is LineEdit or focused is TextEdit:
@@ -447,7 +458,7 @@ func _shortcut_input(event: InputEvent) -> void:
 
 
 func sync_actions() -> void:
-	var locked := document == null or document.stroke_active or path_drag_view != null or object_tool.drag_view != null
+	var locked := document == null or document.stroke_active or document.water_stroke_active or path_drag_view != null or object_tool.drag_view != null
 	undo_button.disabled = locked or document.undo_stack.is_empty()
 	redo_button.disabled = locked or document.redo_stack.is_empty()
 	save_button.disabled = locked
@@ -464,6 +475,7 @@ func sync_actions() -> void:
 	objects_button.disabled = locked or document.package.objects.is_empty() or object_thread.is_started()
 	move_objects_button.disabled = locked or document.object_count() == 0 or document.has_preview()
 	water_button.disabled = locked or document.package.water == null
+	water_edit_button.disabled = water_button.disabled
 	color_button.disabled = locked or texture_button.button_pressed
 	texture_button.disabled = locked or object_thread.is_started()
 	if document != null:
@@ -477,7 +489,8 @@ func has_unsaved_changes() -> bool:
 		or document.path_edits != saved_path_edits or document.asset_profile != saved_asset_profile
 		or document.object_edits != saved_object_edits or document.object_additions != saved_object_additions
 		or document.object_removals != saved_object_removals
-		or document.package.terrain.color_edits != saved_colors or document.package.terrain.tile_edits != saved_tiles)
+		or document.package.terrain.color_edits != saved_colors or document.package.terrain.tile_edits != saved_tiles
+		or document.water_edits != saved_water_edits or document.water_heights != saved_water_heights)
 
 
 func remember_saved_changes() -> void:
@@ -490,6 +503,8 @@ func remember_saved_changes() -> void:
 	saved_asset_profile = document.asset_profile
 	saved_colors = document.package.terrain.color_edits.duplicate()
 	saved_tiles = document.package.terrain.tile_edits.duplicate()
+	saved_water_edits = document.water_edits.duplicate(true)
+	saved_water_heights = document.water_heights.duplicate()
 
 
 func request_open(path: String) -> void:
@@ -552,6 +567,9 @@ func open_map(path: String) -> bool:
 		document.paths_changed.disconnect(refresh_path_list)
 		document.object_moved.disconnect(object_position_changed)
 		document.objects_changed.disconnect(objects_topology_changed)
+		document.water_changed.disconnect(refresh_water)
+	water_tools.hide()
+	painting_water = false
 	document = next
 	loaded_objects = null
 	objects_button.set_pressed_no_signal(false)
@@ -574,6 +592,7 @@ func open_map(path: String) -> bool:
 	document.paths_changed.connect(refresh_path_list)
 	document.object_moved.connect(object_position_changed)
 	document.objects_changed.connect(objects_topology_changed)
+	document.water_changed.connect(refresh_water)
 	top.bind(document)
 	scene_view.bind(document)
 	object_tool.bind(document, top, scene_view)
@@ -1018,7 +1037,10 @@ func _process(_time: float) -> void:
 		scene_view.refresh_material(region, layer)
 	pending_materials.clear()
 	if paint_view != null and not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
-		finish_stroke()
+		if document.water_stroke_active:
+			finish_water_stroke()
+		else:
+			finish_stroke()
 	if path_drag_view != null and not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
 		finish_point_drag(true)
 
@@ -1047,7 +1069,7 @@ func set_cursor(point: Vector2) -> void:
 	if document == null:
 		return
 	cursor = point
-	var brush_point := Vector2(-1, -1) if move_path_button.button_pressed or object_tool.active else point
+	var brush_point := Vector2(-1, -1) if move_path_button.button_pressed or object_tool.active or painting_water_active() else point
 	top.cursor = brush_point
 	top.queue_redraw()
 	scene_view.show_cursor(brush_point)
@@ -1075,12 +1097,35 @@ func view_input(event: InputEvent, panel: Control) -> void:
 		elif path_drag_view == panel:
 			preview_path_point(point)
 		if paint_view == panel:
-			paint(point)
+			if document.water_stroke_active:
+				water_paint(point)
+			else:
+				paint(point)
 	elif event is InputEventMouseButton:
 		if panel == scene_view and event.pressed and event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
 			scene_view.zoom(0.87 if event.button_index == MOUSE_BUTTON_WHEEL_UP else 1.15)
 			set_cursor(scene_view.sample_at(event.position))
 		if event.button_index == MOUSE_BUTTON_LEFT:
+			if not event.pressed and paint_view != null and document.water_stroke_active:
+				finish_water_stroke()
+				return
+			if painting_water_active():
+				if event.pressed and paint_view == null:
+					var water_point: Vector2 = panel.sample_at(event.position)
+					if water_point.x >= 0:
+						water_add = not event.shift_pressed
+						document.begin_water_stroke()
+						if document.water_stroke_active:
+							paint_view = panel
+							anchor = Vector2(-1, -1)
+							water_paint(water_point)
+							set_cursor(water_point)
+							sync_actions()
+						else:
+							report(document.error)
+				elif not event.pressed and paint_view != null:
+					finish_water_stroke()
+				return
 			if object_tool.active:
 				if event.pressed and object_tool.drag_view == null:
 					object_tool.start(panel, event.position)
@@ -1189,6 +1234,62 @@ func finish_stroke() -> void:
 			report("%d native texture blocks changed" % document.package.terrain.tile_edits.size())
 		_:
 			report("%d terrain samples changed" % document.edits.size())
+
+
+func water_paint(point: Vector2) -> void:
+	if point.x < 0:
+		anchor = point
+		return
+	var spacing := document.package.terrain.SPACING
+	var radius_m := water_tools.radius_m()
+	var layer := water_tools.current_layer()
+	if anchor.x < 0:
+		document.water_dab(point, radius_m, layer, water_add)
+	else:
+		var segments := maxi(1, ceili(anchor.distance_to(point) / maxf(1, radius_m / spacing * 0.25)))
+		for i in range(1, segments + 1):
+			document.water_dab(anchor.lerp(point, float(i) / segments), radius_m, layer, water_add)
+	anchor = point
+
+
+func finish_water_stroke() -> void:
+	if paint_view == null or not document.water_stroke_active:
+		return
+	var layer := water_tools.current_layer()
+	paint_view = null
+	document.end_water_stroke(layer)
+	report("Water stroke done. Layer %d has %d block edits." % [layer + 1, document.water_edits.get(layer, {}).size()])
+	sync_actions()
+
+
+func painting_water_active() -> bool:
+	return painting_water and document != null and water_tools.document == document
+
+
+func toggle_water_edit() -> void:
+	if document == null or document.package.water == null:
+		return
+	water_tools.begin(document)
+
+
+func update_water_painting() -> void:
+	var paint := water_tools.painting() and document != null and water_tools.document == document
+	if paint and not painting_water:
+		if path_drag_view != null:
+			finish_point_drag(false)
+		move_path_button.set_pressed_no_signal(false)
+		leave_object_tool()
+		if paint_view != null:
+			finish_stroke()
+	painting_water = paint
+	set_cursor(cursor)
+	sync_actions()
+
+
+func refresh_water() -> void:
+	top.queue_redraw()
+	scene_view.rebuild_water()
+	sync_actions()
 
 
 func _exit_tree() -> void:
