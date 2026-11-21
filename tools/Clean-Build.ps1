@@ -1,7 +1,7 @@
-[CmdletBinding(SupportsShouldProcess)]
+﻿[CmdletBinding(SupportsShouldProcess)]
 param(
     [switch] $Apply,
-    [ValidateRange(1, 5)] [int] $Keep = 1
+    [ValidateRange(0, 5)] [int] $Keep = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,11 +30,11 @@ function Get-BuildTree([string] $Directory) {
 $known = Get-ChildItem -LiteralPath $root -Directory -Force |
     Where-Object {
         -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
-        $_.Name -match '^(bzn-185|bzn-probe|BZMAG|desktop|flat|sdk|test|ui-bridge)-[0-9a-f]{32}$'
+        $_.Name -match '^(asset-test|bzn-185|bzn-probe|BZMAG|desktop|flat|path-profiles|sdk|test|ui-bridge)-[0-9a-f]{32}$'
     }
 $expired = foreach ($group in $known | Group-Object { $_.Name -replace '-[0-9a-f]{32}$', '' }) {
     $ordered = $group.Group | Sort-Object LastWriteTimeUtc -Descending
-    if ($group.Name -in 'BZMAG','bzn-185','sdk') { $ordered }
+    if ($group.Name -in 'BZMAG','bzn-185','sdk' -or $Keep -eq 0) { $ordered }
     else { $ordered | Select-Object -Skip $Keep }
 }
 $livePaths = @(Get-Process | ForEach-Object Path | Where-Object { $_ })

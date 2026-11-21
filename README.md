@@ -36,7 +36,7 @@ $map = (Resolve-Path 'map_references/Brave Lil Toaster/braveliltoaster.bzn').Pat
 ./tools/Clean-Build.ps1 -Apply
 ```
 
-Use the release template matching your Godot version. Keep the executable, pack and adjacent tools folder together. The portable build includes the local native preview adapter when it has been compiled. Game meshes and textures stay in the installed game or mod directories. Cleanup keeps the newest generated desktop and QA runs, skips in-use runtimes, and unlinks junctions before removing stale game copies.
+Use the release template matching your Godot version. Keep the executable, pack and adjacent tools folder together. The portable build includes the local native preview adapter when it has been compiled. Game meshes and textures stay in the installed game or mod directories. Cleanup removes every generated run folder by default — keep the newest few with `-Keep N` instead — skips in-use runtimes, unlinks junctions before removing game copies, and preserves the compiled `object-preview` adapter and `terrain_oracle.exe`. Session agents follow the standing hygiene rules in `AGENTS.md`.
 
 - [Architecture and snapshot rules](docs/ARCHITECTURE.md)
 - [Compatibility matrix](docs/COMPATIBILITY_MATRIX.md)
