@@ -6,6 +6,7 @@ const PathCodec := preload("res://formats/bzn_paths.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
 const Water := preload("res://formats/water_v5.gd")
 const SlopeShapes := preload("res://core/slope_shapes.gd")
+const VrvShapes := preload("res://core/vrv_shapes.gd")
 const HISTORY_LIMIT := 64
 const MAX_EDITOR_ABS_HEIGHT := 100000.0
 enum Brush { OFFSET, SMOOTH, FLATTEN, SPRAY }
@@ -29,6 +30,7 @@ var path_edits := {}
 var native_path_ids := {}
 var asset_profile := ""
 var object_edits := {}
+var object_label_edits := {}
 var object_additions: Array = []
 var object_removals := {}
 var next_object_id := 1
@@ -75,6 +77,7 @@ func open(path: String) -> bool:
 	water_base = {}
 	water_stroke = {}
 	water_stroke_active = false
+	object_label_edits = {}
 	package = Package.new()
 	if not package.open(source):
 		return fail(package.error)
@@ -102,6 +105,8 @@ func open(path: String) -> bool:
 		if not read_path_edits(saved.get("pathEdits", {})):
 			return false
 		if not read_object_edits(saved.get("objectEdits", {})):
+			return false
+		if not read_object_label_edits(saved.get("objectLabelEdits", {})):
 			return false
 		if not read_object_removals(saved.get("objectRemovals", [])):
 			return false
@@ -140,6 +145,28 @@ static func sound_point(label: String) -> Dictionary:
 		values.append(int(parts[index]))
 	return {"odf": "vrv_sndpoint", "sound": sound, "volume": values[0], "range": values[1],
 		"interval": values[2], "jitter": values[3], "pitch": values[4], "near": values[5]}
+
+
+static func format_sound_point(settings: Dictionary) -> Dictionary:
+	var sound := String(settings.get("sound", "")).strip_edges()
+	if sound.is_empty() or sound.length() > 48:
+		return {"label": "", "error": "Enter a sound filename between 1 and 48 characters."}
+	for character in sound:
+		if not (character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."):
+			return {"label": "", "error": "Sound filename may only use A-Z, 0-9, '_', '-' and '.'."}
+	var extension := sound.get_extension().to_lower()
+	if extension != "wav" and extension != "ogg":
+		return {"label": "", "error": "Sound filename must end with .wav or .ogg."}
+	var volume := clampi(int(settings.get("volume", 70)), 0, 100)
+	var rng := clampi(int(settings.get("range", 150)), 10, 2000)
+	var interval := clampi(int(settings.get("interval", 0)), 0, 600)
+	var jitter := clampi(int(settings.get("jitter", 0)), 0, 100)
+	var pitch := clampi(int(settings.get("pitch", 100)), 25, 200)
+	var near := clampi(int(settings.get("near", 20)), 0, 90)
+	return {
+		"label": "vrvsnd:%s:%d:%d:%d:%d:%d:%d" % [sound, volume, rng, interval, jitter, pitch, near],
+		"error": "",
+	}
 
 
 static func valid_asset_profile(value: Variant) -> bool:
@@ -356,6 +383,8 @@ func apply_history(change: Dictionary, direction: String) -> void:
 		paths_changed.emit()
 	elif change.has("object"):
 		apply_object_transform(change["object"], change[direction])
+	elif change.has("object_label"):
+		apply_object_label(change["object_label"], String(change[direction]))
 	elif change.has("object_add") or change.has("object_add_removed"):
 		var addition: Dictionary = change["object_add"] if change.has("object_add") else change["object_add_removed"]
 		var restore := (change.has("object_add") and direction == "after") or (change.has("object_add_removed") and direction == "before")
@@ -736,6 +765,20 @@ func read_object_edits(saved: Variant) -> bool:
 	return true
 
 
+func read_object_label_edits(saved: Variant) -> bool:
+	if saved == null:
+		return true
+	if not saved is Dictionary or saved.size() > package.objects.size():
+		return fail("Invalid project object label edits.")
+	for key: String in saved:
+		var index := key.to_int()
+		var value: Variant = saved[key]
+		if str(index) != key or index < 0 or index >= package.objects.size() or not (value is String) or String(value).length() > 128:
+			return fail("Invalid saved object label edit.")
+		set_base_object_label(index, String(value))
+	return true
+
+
 func read_water_edits(saved: Variant) -> bool:
 	if package.water == null:
 		return true if saved == null or (saved is Dictionary and saved.is_empty()) else fail("This map has no native water.")
@@ -1055,6 +1098,9 @@ func object_odf(view: int) -> String:
 func object_label(view: int) -> String:
 	if object_is_added(view):
 		return String(object_addition(view).get("label", ""))
+	var base := object_actual_index(view)
+	if object_label_edits.has(base):
+		return String(object_label_edits[base])
 	return String(object_template(view).get("label", ""))
 
 
@@ -1063,9 +1109,13 @@ func object_team(view: int) -> int:
 
 
 func object_sequence(view: int) -> int:
-	if object_is_added(view):
-		return int(object_addition(view).get("sequence", 0))
-	return int(object_template(view).get("sequence", 0))
+	var seq := int(object_addition(view).get("sequence", 0)) if object_is_added(view) else int(object_template(view).get("sequence", 0))
+	var lbl := object_label(view)
+	if not lbl.is_empty():
+		return seq & ~0x800000
+	if not object_is_added(view) and object_label_edits.has(object_actual_index(view)):
+		return seq | 0x800000
+	return seq
 
 
 func object_pool_reference(view: int) -> int:
@@ -1079,7 +1129,7 @@ func object_pool_reference(view: int) -> int:
 
 
 func has_object_file_edits() -> bool:
-	return not object_edits.is_empty() or not object_removals.is_empty() or not object_additions.is_empty()
+	return not object_edits.is_empty() or not object_label_edits.is_empty() or not object_removals.is_empty() or not object_additions.is_empty()
 
 
 func move_object(view: int, position: Vector3) -> bool:
@@ -1212,8 +1262,14 @@ func valid_view_object(view: int) -> bool:
 
 func object_history_key(view: int) -> Variant:
 	if object_is_added(view):
-		return int(object_addition(view)["id"])
+		return "add:%d" % int(object_addition(view)["id"])
 	return object_actual_index(view)
+
+
+static func addition_history_id(key: Variant) -> int:
+	if key is String and String(key).begins_with("add:"):
+		return String(key).substr(4).to_int()
+	return int(key)
 
 
 func set_object_transform(view: int, transform: Transform3D) -> void:
@@ -1245,6 +1301,40 @@ func object_export_edits() -> Dictionary:
 	return result
 
 
+func set_object_label(view: int, new_label: String) -> bool:
+	if stroke_active or has_preview():
+		return fail("Finish the current terrain edit first.")
+	if not valid_view_object(view) or new_label.length() > 128:
+		return fail("Select a valid object with a label of at most 128 characters.")
+	var before := object_label(view)
+	if before == new_label:
+		return true
+	var key: Variant = object_history_key(view)
+	push_history({"object_label": key, "before": before, "after": new_label})
+	apply_object_label(key, new_label)
+	return true
+
+
+func set_base_object_label(base: int, new_label: String) -> void:
+	if String(package.objects[base].get("label", "")) == new_label:
+		object_label_edits.erase(base)
+	else:
+		object_label_edits[base] = new_label
+
+
+func apply_object_label(key: Variant, new_label: String) -> void:
+	if key is int and key >= 0 and key < package.objects.size():
+		set_base_object_label(int(key), new_label)
+		object_moved.emit(view_for_base(int(key)))
+		return
+	var target_id := addition_history_id(key)
+	for addition in object_additions:
+		if int(addition["id"]) == target_id:
+			addition["label"] = new_label
+			object_moved.emit(find_object_view(addition))
+			return
+
+
 func apply_object_transform(key: Variant, transform: Transform3D) -> void:
 	if key is int and key >= 0 and key < package.objects.size():
 		if package.objects[key]["transform"] == transform:
@@ -1253,8 +1343,9 @@ func apply_object_transform(key: Variant, transform: Transform3D) -> void:
 			object_edits[key] = {"basis": transform.basis, "position": transform.origin}
 		object_moved.emit(view_for_base(int(key)))
 		return
+	var target_id := addition_history_id(key)
 	for addition in object_additions:
-		if int(addition["id"]) == int(key):
+		if int(addition["id"]) == target_id:
 			addition["transform"] = transform
 			object_moved.emit(find_object_view(addition))
 			return
@@ -1340,6 +1431,38 @@ func preview_slope_shape(params: Dictionary, batch := {}) -> bool:
 			return fail("The shape exceeds the terrain height range.")
 		native_sample[0] = value
 		values[index] = native_sample[0]
+	return show_preview(values)
+
+
+func preview_vrv_shape(op: String, params: Dictionary, region: Rect2i = Rect2i()) -> bool:
+	if stroke_active:
+		return fail("Finish the stroke before shaping terrain.")
+	clear_preview()
+	var terrain := package.terrain
+	var limit := minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0)
+	var strength := clampi(int(params.get("strength", 35)), 0, 100)
+	var grain_m := clampi(int(params.get("grain_m", 16)), 2, 64)
+	var values: Dictionary = {}
+	match op:
+		"smooth":
+			values = VrvShapes.smooth(terrain.heights, terrain.dimensions, region, strength, grain_m, package.granularity, limit)
+		"rough_plus", "rough_minus":
+			values = VrvShapes.rough(
+				terrain.heights, terrain.dimensions, terrain.origin, region,
+				strength, grain_m,
+				clampi(int(params.get("softness", 50)), 0, 100),
+				clampi(int(params.get("contrast", 35)), 0, 100),
+				int(params.get("seed", 1)),
+				1 if op == "rough_plus" else -1,
+				String(params.get("symmetry", "none")),
+				package.granularity, limit
+			)
+		"relief_plus", "relief_minus":
+			values = VrvShapes.relief(terrain.heights, terrain.dimensions, region, strength, 1 if op == "relief_plus" else -1, package.granularity, limit)
+		_:
+			return fail("Unsupported VRV terrain shape operation.")
+	if values.is_empty():
+		return fail("The selected VRV shape produced no height changes.")
 	return show_preview(values)
 
 

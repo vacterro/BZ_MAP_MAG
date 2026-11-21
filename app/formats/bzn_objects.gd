@@ -225,7 +225,7 @@ static func build_block(source: PackedByteArray, entry: Dictionary, sequence: in
 
 
 static func patch_objects(source: PackedByteArray, entries: Array[Dictionary], transforms: Dictionary,
-		removals: Array, insert_blocks: Array, count_offset: int, insert_offset: int) -> Dictionary:
+		removals: Array, insert_blocks: Array, count_offset: int, insert_offset: int, label_edits: Dictionary = {}) -> Dictionary:
 	if count_offset < 0 or insert_offset <= 0 or insert_offset + 7 > source.size():
 		return {}
 	var result := PackedByteArray()
@@ -245,11 +245,22 @@ static func patch_objects(source: PackedByteArray, entries: Array[Dictionary], t
 		if start < cursor or end <= start or end > insert_offset:
 			return {}
 		result.append_array(source.slice(cursor, start))
-		var block := source.slice(start, end)
-		if transforms.has(index):
-			var transform: Transform3D = transforms[index]
-			write_transform(block, entry["matrix_offset"] - start, entry["position_offset"] - start, transform)
-		result.append_array(block)
+		var transform: Transform3D = transforms[index] if transforms.has(index) else entry["transform"]
+		if label_edits.has(index):
+			var new_label := String(label_edits[index])
+			var seq := int(entry["sequence"])
+			if new_label.is_empty():
+				seq = seq | 0x800000
+			else:
+				seq = seq & ~0x800000
+			var rebuilt := build_block(source, entry, seq, new_label, transform)
+			result.append_array(rebuilt)
+			shift += rebuilt.size() - (end - start)
+		else:
+			var block := source.slice(start, end)
+			if transforms.has(index):
+				write_transform(block, entry["matrix_offset"] - start, entry["position_offset"] - start, transform)
+			result.append_array(block)
 		cursor = end
 	if cursor > insert_offset:
 		return {}

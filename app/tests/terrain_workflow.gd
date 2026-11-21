@@ -12,6 +12,8 @@ const Shapes := preload("res://core/slope_shapes.gd")
 const MissionProfiles := preload("res://core/mission_profiles.gd")
 const TerrainView := preload("res://render/terrain_view.gd")
 const Package := preload("res://formats/map_package.gd")
+const VrvShapes := preload("res://core/vrv_shapes.gd")
+const Wintage := preload("res://themes/wintage.gd")
 
 var failures := 0
 
@@ -181,6 +183,7 @@ func run() -> void:
 	await test_fly_autosave_symmetry(editor, args[0], args[2])
 	test_mission_studio(editor, args[0], args[2])
 	test_sound_point_labels(editor)
+	test_vrv_parity_wave7(editor, args[0], args[2])
 	print("Native height at (0,0): %.4f -> %.4f, changed samples: %d" % [baseline, intended, document.edits.size()])
 	print("FAILURES: %d" % failures)
 	quit(0 if failures == 0 else 1)
@@ -1664,3 +1667,145 @@ func test_mission_studio(editor: Control, source: String, scratch: String) -> vo
 		"independently reimport exported Mission Studio BZN")
 	studio.hide()
 	print("Mission & Path Studio vertical slice verified (%d paths)." % cloned_count)
+
+
+func test_vrv_parity_wave7(editor: Control, source: String, scratch: String) -> void:
+	check(editor.open_map(source), "reopen Brave for Wave 7 parity suite")
+	var doc: Document = editor.document
+	var writer := Snapshots.new()
+	var terrain := doc.package.terrain
+	var w := terrain.dimensions.x
+	var d := terrain.dimensions.y
+
+	# 1. VRV Smooth / Rough / Relief parity + deterministic seed + symmetry + Undo/Redo + native TER export
+	var h0 := terrain.heights.duplicate()
+	var tools = editor.terrain_tools
+	tools.begin(doc, Vector2i(w / 2, d / 2), 64.0)
+	tools.operation.select(2) # VRV Smooth
+	tools.choose_operation(2)
+	tools.vrv_scope.select(1) # Whole map
+	tools.vrv_strength.value = 50.0
+	tools.vrv_grain.value = 16.0
+	check(tools.preview_plane() and doc.has_preview() and not doc.preview_after.is_empty(),
+		"VRV Smooth produces non-empty preview")
+	var stack_before := doc.undo_stack.size()
+	tools.apply_terrain()
+	check(doc.undo_stack.size() == stack_before + 1 and not doc.has_preview(),
+		"VRV Smooth applies in 1 undo step and clears preview")
+	check(terrain.heights != h0, "VRV Smooth updates heightfield")
+	doc.undo()
+	check(terrain.heights == h0, "Undo restores pre-Smooth heightfield cleanly")
+	doc.redo()
+	check(terrain.heights != h0, "Redo re-applies VRV Smooth")
+
+	# Rough +/- determinism + XZ symmetry on a flat buffer
+	var flat := PackedFloat32Array()
+	flat.resize(32 * 32)
+	flat.fill(10.0)
+	var r1: Dictionary = VrvShapes.rough(flat, Vector2i(32, 32), Vector2i.ZERO, Rect2i(), 60, 16, 50, 35, 42, 1, "xz", 0.1, 1000.0)
+	var r2: Dictionary = VrvShapes.rough(flat, Vector2i(32, 32), Vector2i.ZERO, Rect2i(), 60, 16, 50, 35, 42, 1, "xz", 0.1, 1000.0)
+	var r_diff: Dictionary = VrvShapes.rough(flat, Vector2i(32, 32), Vector2i.ZERO, Rect2i(), 60, 16, 50, 35, 99, 1, "xz", 0.1, 1000.0)
+	var r_neg: Dictionary = VrvShapes.rough(flat, Vector2i(32, 32), Vector2i.ZERO, Rect2i(), 60, 16, 50, 35, 42, -1, "xz", 0.1, 1000.0)
+	check(not r1.is_empty() and r1 == r2 and r1 != r_diff and r1 != r_neg,
+		"VRV Rough +/- is deterministic by seed and flips sign cleanly")
+	var sym_ok := true
+	for z in 16:
+		for x in 16:
+			var a: float = float(r1.get(z * 32 + x, 10.0))
+			var b: float = float(r1.get(z * 32 + (31 - x), 10.0))
+			var c: float = float(r1.get((31 - z) * 32 + x, 10.0))
+			if absf(a - b) > 0.001 or absf(a - c) > 0.001:
+				sym_ok = false
+				break
+		if not sym_ok:
+			break
+	check(sym_ok, "VRV Rough XZ symmetry mirrors noise cleanly across both axes")
+
+	# Rough + and Relief +/- through document preview/bake on Brave (cursor region keeps test fast)
+	var sub_region := Rect2i(maxi(0, w / 2 - 32), maxi(0, d / 2 - 32), mini(64, w), mini(64, d))
+	check(doc.preview_vrv_shape("rough_plus", {"strength": 30, "grain_m": 16, "seed": 7, "symmetry": "none"}, sub_region),
+		"Document VRV Rough + previews cleanly")
+	doc.bake_preview()
+	var after_rough := terrain.heights[w / 2 * w + w / 2]
+	check(doc.preview_vrv_shape("relief_plus", {"strength": 40}, sub_region),
+		"Document VRV Relief + previews cleanly on sub-region")
+	doc.bake_preview()
+	check(doc.preview_vrv_shape("relief_minus", {"strength": 25}, sub_region),
+		"Document VRV Relief - previews cleanly on sub-region")
+	doc.bake_preview()
+	tools.hide()
+	check(is_finite(after_rough), "VRV shapes leave finite terrain samples")
+
+	# 2. Structured Sound Point Editor + label rewrite + BZMAG + native BZN reimport
+	check(Document.format_sound_point({"sound": "bad name.wav", "volume": 70, "range": 150, "interval": 0, "jitter": 0, "pitch": 100, "near": 20})["label"] == "",
+		"format_sound_point rejects unsafe spaces")
+	var fmt := Document.format_sound_point({"sound": "ambient.wav", "volume": 80, "range": 300, "interval": 15, "jitter": 10, "pitch": 110, "near": 25})
+	check(fmt["label"] == "vrvsnd:ambient.wav:80:300:15:10:110:25", "format_sound_point builds exact vrvsnd label")
+
+	var target_view := 0 if doc.object_count() > 0 else -1
+	check(target_view >= 0, "found object for Sound Point edit")
+	if target_view >= 0:
+		var orig_label := doc.object_label(target_view)
+		var base_objs := doc.object_count()
+		var base_paths := doc.path_indices().size()
+		var se = editor.sound_editor
+		se.begin(doc, target_view)
+		se.sound_field.text = "ambient.wav"
+		se.volume_spin.value = 80
+		se.range_spin.value = 300
+		se.interval_spin.value = 15
+		se.jitter_spin.value = 10
+		se.pitch_spin.value = 110
+		se.near_spin.value = 25
+		se.apply_sound_point()
+		check(doc.object_label(target_view) == "vrvsnd:ambient.wav:80:300:15:10:110:25",
+			"Sound Point dialog updates object label cleanly")
+		doc.undo()
+		check(doc.object_label(target_view) == orig_label, "Undo restores original object label")
+		doc.redo()
+		check(doc.object_label(target_view) == "vrvsnd:ambient.wav:80:300:15:10:110:25",
+			"Redo re-applies Sound Point label")
+		se.begin(doc, target_view)
+		se.duplicate_sound_point()
+		check(doc.object_count() == base_objs + 1 and doc.object_label(base_objs) == "vrvsnd:ambient.wav:80:300:15:10:110:25",
+			"Duplicate Sound Point appends copied object with vrvsnd label")
+		se.hide()
+
+		var proj := scratch.path_join("wave7-sound.bzmag")
+		check(writer.save_project(doc, proj), "save Wave 7 BZMAG project")
+		var reopened := Document.new()
+		check(reopened.open(proj) and reopened.object_label(target_view) == "vrvsnd:ambient.wav:80:300:15:10:110:25"
+			and reopened.object_count() == base_objs + 1,
+			"BZMAG project round-trips edited and duplicated Sound Point labels")
+		var exp_dir := scratch.path_join("wave7-export")
+		check(writer.export_native(reopened, exp_dir), "export Wave 7 native TER+BZN: " + writer.error)
+		var reimported := Document.new()
+		check(reimported.open(exp_dir.path_join(reopened.package.bzn_name)),
+			"independently reimport Wave 7 native package")
+		check(reimported.object_count() == base_objs + 1 and reimported.path_indices().size() == base_paths,
+			"native BZN export preserves duplicated object count and shifted AiPath stream")
+		check(reimported.object_label(target_view) == "vrvsnd:ambient.wav:80:300:15:10:110:25"
+			and not Document.sound_point(reimported.object_label(target_view)).is_empty(),
+			"native BZN export round-trips Sound Point label")
+
+	# 3. Wintage theme registry + compact mode + ConfigFile persistence + toolbar search
+	var saved_cfg_path: String = editor.settings_path
+	editor.settings_path = scratch.path_join("wave7-editor.cfg")
+	for slug: String in Wintage.theme_slugs():
+		editor.set_wintage_theme(slug, true)
+		check(editor.theme_slug == slug and editor.ui_compact and editor.backdrop.color == Wintage.palette(slug)["background"],
+			"Wintage theme '%s' updates palette and compact state" % slug)
+	var cfg := ConfigFile.new()
+	check(cfg.load(editor.settings_path) == OK and String(cfg.get_value("ui", "theme", "")) == "nord"
+		and bool(cfg.get_value("ui", "compact", false)),
+		"Wintage theme choice persists to ConfigFile")
+	editor.set_wintage_theme(Wintage.DEFAULT_THEME, false, false)
+	editor.settings_path = saved_cfg_path
+
+	editor.filter_toolbar("Slope")
+	check(editor.slope_studio_button.visible and not editor.undo_button.visible,
+		"toolbar search narrows visible commands")
+	editor.filter_toolbar("")
+	check(editor.slope_studio_button.visible and editor.undo_button.visible,
+		"clearing toolbar search restores all toolbar buttons")
+	print("Wave 7 VRV shapes, Sound Point editor & Wintage UI polish verified.")

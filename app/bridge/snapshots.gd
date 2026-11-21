@@ -64,6 +64,9 @@ func save_project(document: Document, target: String) -> bool:
 		object_inserts.append({"template": addition["template"], "id": addition["id"], "label": addition["label"],
 			"sequence": addition["sequence"], "position": [addition["transform"].origin.x, addition["transform"].origin.y, addition["transform"].origin.z],
 			"basis": basis_array(addition["transform"].basis)})
+	var object_label_edits := {}
+	for index: int in document.object_label_edits:
+		object_label_edits[str(index)] = String(document.object_label_edits[index])
 	var water_records := {}
 	for layer: int in document.water_heights:
 		water_records[str(layer)] = {"height": float(document.water_heights[layer])}
@@ -76,7 +79,7 @@ func save_project(document: Document, target: String) -> bool:
 		else:
 			water_records[str(layer)] = {"cover": cover}
 	var record := {"schema": 1, "source": document.package.source_path, "files": document.package.files, "edits": edits,
-		"layers": document.layers, "pathEdits": path_edits, "objectEdits": object_edits,
+		"layers": document.layers, "pathEdits": path_edits, "objectEdits": object_edits, "objectLabelEdits": object_label_edits,
 		"objectRemovals": object_removals, "objectInserts": object_inserts, "waterEdits": water_records}
 	if not document.asset_profile.is_empty():
 		record["assetProfile"] = document.asset_profile
@@ -131,7 +134,7 @@ func export_native(document: Document, target: String) -> bool:
 		wat = Water.encode(package.water_bytes, document.water_edits, document.water_heights)
 		if wat.is_empty():
 			return fail("The native water edits could not be applied to this map.")
-	if not document.path_edits.is_empty() or not document.object_edits.is_empty() or not document.object_removals.is_empty() or not document.object_additions.is_empty():
+	if not document.path_edits.is_empty() or document.has_object_file_edits():
 		var source_bzn := FileAccess.get_file_as_bytes(package.source_path.get_base_dir().path_join(package.bzn_name))
 		var digest := HashingContext.new()
 		digest.start(HashingContext.HASH_SHA256)
@@ -148,7 +151,13 @@ func export_native(document: Document, target: String) -> bool:
 			var blocks: Array = []
 			for addition: Dictionary in document.object_additions:
 				var template: Dictionary = package.objects[addition["template"]]
-				var block := BznObjects.build_block(source_bzn, template, int(addition["sequence"]), String(addition["label"]), addition["transform"], next_pointer_id)
+				var add_label := String(addition["label"])
+				var add_seq := int(addition["sequence"])
+				if add_label.is_empty():
+					add_seq = add_seq | 0x800000
+				else:
+					add_seq = add_seq & ~0x800000
+				var block := BznObjects.build_block(source_bzn, template, add_seq, add_label, addition["transform"], next_pointer_id)
 				next_pointer_id += 1
 				blocks.append(block)
 			var removals: Array = []
@@ -158,7 +167,7 @@ func export_native(document: Document, target: String) -> bool:
 					return fail("Cannot remove an object referenced by another mission record.")
 				removals.append(index)
 			var patch := BznObjects.patch_objects(source_bzn, package.objects, document.object_export_edits(),
-				removals, blocks, package.object_count_offset, package.object_insert_offset)
+				removals, blocks, package.object_count_offset, package.object_insert_offset, document.object_label_edits)
 			if patch.is_empty():
 				return fail("The native object edits could not be applied to this BZN.")
 			bzn = patch["bytes"]

@@ -18,6 +18,7 @@ const MissionStudio := preload("res://tools/mission_studio.gd")
 const MissionProfiles := preload("res://core/mission_profiles.gd")
 const WaterCommands := preload("res://tools/water_commands.gd")
 const MoveObject := preload("res://tools/move_object.gd")
+const SoundEditor := preload("res://tools/sound_editor.gd")
 const AutoSaveStore := preload("res://core/autosave_store.gd")
 const SETTINGS := "user://editor.cfg"
 var document: Document
@@ -89,6 +90,16 @@ var studio := NodeStudio.new()
 var terrain_tools_button: Button
 var terrain_tools := TerrainCommands.new()
 var slope_studio := SlopeStudio.new()
+var sound_editor := SoundEditor.new()
+var sound_button: Button
+var theme_slug := Wintage.DEFAULT_THEME
+var ui_font_size := 12
+var ui_compact := false
+var backdrop := ColorRect.new()
+var theme_select := OptionButton.new()
+var compact_check := CheckBox.new()
+var tool_search := LineEdit.new()
+var toolbar_buttons: Array[Button] = []
 var confirmation := ConfirmationDialog.new()
 var keys_dialog := AcceptDialog.new()
 var playtest_dialog := ConfirmationDialog.new()
@@ -112,6 +123,7 @@ var saved_edits := {}
 var saved_layers: Array = []
 var saved_path_edits := {}
 var saved_object_edits := {}
+var saved_object_label_edits := {}
 var saved_object_additions: Array = []
 var saved_object_removals := {}
 var saved_asset_profile := ""
@@ -130,13 +142,18 @@ var pending_materials := {}
 func _ready() -> void:
 	DisplayServer.window_set_min_size(Vector2i(640, 540))
 	RenderingServer.set_debug_generate_wireframes(true)
-	var colors := Wintage.palette()
-	theme = Wintage.make(colors)
+	var settings := ConfigFile.new()
+	settings.load(settings_path)
+	theme_slug = String(settings.get_value("ui", "theme", Wintage.DEFAULT_THEME))
+	if not (theme_slug in Wintage.theme_slugs()):
+		theme_slug = Wintage.DEFAULT_THEME
+	ui_compact = bool(settings.get_value("ui", "compact", false))
+	ui_font_size = clampi(int(settings.get_value("ui", "font_size", 12)), 10, 24)
+	var colors := Wintage.palette(theme_slug)
+	theme = Wintage.make(colors, ui_font_size, ui_compact)
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	for window in [open_dialog, blank_dialog, flat_template_dialog, flat_output_dialog, save_dialog, export_dialog,
-		confirmation, keys_dialog, playtest_dialog, recover_dialog, game_picker, vrv_picker, autosave_picker, asset_profile_picker, studio, path_inspector, mission_studio, terrain_tools, slope_studio]:
+	for window in all_dialogs():
 		window.theme = theme
-	var backdrop := ColorRect.new()
 	backdrop.color = colors["background"]
 	backdrop.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	backdrop.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -151,20 +168,35 @@ func _ready() -> void:
 	margin.add_child(layout)
 	var tools := HFlowContainer.new()
 	layout.add_child(tools)
-	add_button(tools, "Open", open_dialog.popup_centered_ratio.bind(0.72), "Open a BZN map or BZMAG project", KEY_O)
+	toolbar_buttons.append(add_button(tools, "Open", open_dialog.popup_centered_ratio.bind(0.72), "Open a BZN map or BZMAG project", KEY_O))
 	var new_map := add_button(tools, "New Map", blank_dialog.popup_centered_ratio.bind(0.72), "Create a new map from a blank BZN and matching flat TER")
 	new_map.disabled = OS.get_name() != "Windows"
+	toolbar_buttons.append(new_map)
 	save_button = add_button(tools, "Save Project", request_save, "Create a .bzmag project snapshot", KEY_S)
+	toolbar_buttons.append(save_button)
 	recover_button = add_button(tools, "Recover…", recover_autosaves, "Open a rolling autosave from the verified recovery store")
+	toolbar_buttons.append(recover_button)
 	export_button = add_button(tools, "Export Native", request_export, "Export and re-import a new native map folder")
+	toolbar_buttons.append(export_button)
 	playtest_button = add_button(tools, "Playtest", playtest, "Launch Battlezone with the current edits")
-	add_button(tools, "Setup", show_playtest_setup, "Choose the Battlezone and VRV folders")
+	toolbar_buttons.append(playtest_button)
+	toolbar_buttons.append(add_button(tools, "Setup", show_playtest_setup, "Choose the Battlezone and VRV folders"))
 	undo_button = add_button(tools, "Undo", func(): document.undo(); sync_actions(), "Undo the last stroke", KEY_Z)
+	toolbar_buttons.append(undo_button)
 	redo_button = add_button(tools, "Redo", func(): document.redo(); sync_actions(), "Redo the last stroke", KEY_Y)
+	toolbar_buttons.append(redo_button)
 	nodes_button = add_button(tools, "Layers / Nodes", open_studio, "Preview and bake procedural height, color or base tile layers")
-	terrain_tools_button = add_button(tools, "Shape Terrain", open_terrain_tools, "Preview a slope plane or mirror the heightfield")
+	toolbar_buttons.append(nodes_button)
+	terrain_tools_button = add_button(tools, "Shape Terrain", open_terrain_tools, "Preview a slope plane, mirror heights, or apply VRV Smooth/Rough/Relief")
+	toolbar_buttons.append(terrain_tools_button)
 	slope_studio_button = add_button(tools, "Slope Studio", open_slope_studio, "Build exact-angle ramps, terraces, ridges, valleys, trenches and excavations with batch stamps and masks")
-	add_button(tools, "Hotkeys", keys_dialog.popup_centered, "Show editor shortcuts")
+	toolbar_buttons.append(slope_studio_button)
+	toolbar_buttons.append(add_button(tools, "Hotkeys", keys_dialog.popup_centered, "Show editor shortcuts"))
+	tool_search.placeholder_text = "Filter tools…"
+	tool_search.custom_minimum_size.x = 110
+	tool_search.tooltip_text = "Filter main toolbar commands by name or hint"
+	tool_search.text_changed.connect(filter_toolbar)
+	tools.add_child(tool_search)
 	title.text = "Open a map to edit terrain"
 	title.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	var map_info := HBoxContainer.new()
@@ -217,6 +249,7 @@ func _ready() -> void:
 			objects_button.toggle_mode = true
 			move_objects_button = add_button(heading, "Move Object", object_tool_changed, "Select and drag an object in either view. Shift snaps to the terrain grid. [ / ] rotate ±15° (Shift 1°), Ctrl+D duplicates, Delete removes. Esc cancels.")
 			move_objects_button.toggle_mode = true
+			sound_button = add_button(heading, "Sound Point", open_sound_editor, "Edit structured VRV sound point settings (vrvsnd:...) on the selected object")
 			water_button = add_button(heading, "Water", toggle_water, "Preview decoded native water layers in both views")
 			water_button.toggle_mode = true
 			water_edit_button = add_button(heading, "Edit Water", toggle_water_edit, "Edit water layer coverage and elevations. Left drag paints, Shift erases.")
@@ -261,6 +294,8 @@ func _ready() -> void:
 	terrain_tools.updated.connect(func(value: String): sync_actions(); report(value))
 	add_child(slope_studio)
 	slope_studio.updated.connect(func(value: String): sync_actions(); report(value))
+	add_child(sound_editor)
+	sound_editor.updated.connect(func(value: String): sync_actions(); report(value))
 	add_child(water_tools)
 	water_tools.updated.connect(func(value: String): sync_actions(); report(value))
 	water_tools.painting_changed.connect(update_water_painting)
@@ -295,19 +330,31 @@ func _ready() -> void:
 	asset_profile_browse.disabled = true
 	engine_editor_mode.text = "Start in the engine editor without mission scripts"
 	paths.add_child(engine_editor_mode)
+	var theme_row := HBoxContainer.new()
+	paths.add_child(theme_row)
+	var theme_lbl := Label.new()
+	theme_lbl.text = "Wintage theme"
+	theme_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	theme_row.add_child(theme_lbl)
+	for slug in Wintage.theme_slugs():
+		theme_select.add_item(Wintage.theme_label(slug))
+	theme_select.item_selected.connect(func(idx: int): set_wintage_theme(Wintage.theme_slugs()[idx], compact_check.button_pressed))
+	theme_row.add_child(theme_select)
+	compact_check.text = "Compact toolbar spacing"
+	compact_check.toggled.connect(func(on: bool): set_wintage_theme(theme_slug, on))
+	paths.add_child(compact_check)
 	add_button(paths, "Find via Steam", func(): find_steam_game(true), "Find Battlezone in your Steam libraries")
 	paths.add_child(setup_status)
 	playtest_dialog.add_child(paths)
 	add_child(playtest_dialog)
 	playtest_dialog.confirmed.connect(save_playtest_setup)
-	var settings := ConfigFile.new()
-	settings.load(settings_path)
 	game_path.text = settings.get_value("playtest", "game", "")
 	vrv_path.text = settings.get_value("playtest", "vrv", "")
 	autosave_root_field.text = settings.get_value("autosave", "root", "")
 	autosave_custom_root = autosave_root_field.text.strip_edges()
 	engine_editor_mode.button_pressed = settings.get_value("playtest", "engine_editor", false)
 	vrv_configured = settings.has_section_key("playtest", "vrv")
+	sync_theme_controls()
 	recover_dialog.title = "Recover autosave"
 	recover_dialog.min_size = Vector2i(520, 260)
 	recover_dialog.ok_button_text = "Open Selected"
@@ -528,6 +575,8 @@ func sync_actions() -> void:
 	mission_studio_button.disabled = locked
 	objects_button.disabled = locked or document.package.objects.is_empty() or object_thread.is_started()
 	move_objects_button.disabled = locked or document.object_count() == 0 or document.has_preview()
+	if sound_button != null:
+		sound_button.disabled = locked or document.object_count() == 0
 	water_button.disabled = locked or document.package.water == null
 	water_edit_button.disabled = water_button.disabled
 	color_button.disabled = locked or texture_button.button_pressed
@@ -541,7 +590,8 @@ func sync_actions() -> void:
 func has_unsaved_changes() -> bool:
 	return document != null and (document.edits != saved_edits or document.layers != saved_layers
 		or document.path_edits != saved_path_edits or document.asset_profile != saved_asset_profile
-		or document.object_edits != saved_object_edits or document.object_additions != saved_object_additions
+		or document.object_edits != saved_object_edits or document.object_label_edits != saved_object_label_edits
+		or document.object_additions != saved_object_additions
 		or document.object_removals != saved_object_removals
 		or document.package.terrain.color_edits != saved_colors or document.package.terrain.tile_edits != saved_tiles
 		or document.water_edits != saved_water_edits or document.water_heights != saved_water_heights)
@@ -552,6 +602,7 @@ func remember_saved_changes() -> void:
 	saved_layers = document.layers.duplicate(true)
 	saved_path_edits = document.path_edits.duplicate(true)
 	saved_object_edits = document.object_edits.duplicate(true)
+	saved_object_label_edits = document.object_label_edits.duplicate()
 	saved_object_additions = document.object_additions.duplicate(true)
 	saved_object_removals = document.object_removals.duplicate()
 	saved_asset_profile = document.asset_profile
@@ -1047,8 +1098,61 @@ func store_playtest_settings() -> void:
 	var root := autosave_root_field.text.strip_edges()
 	settings.set_value("autosave", "root", root)
 	autosave_custom_root = root
+	settings.set_value("ui", "theme", theme_slug)
+	settings.set_value("ui", "compact", ui_compact)
+	settings.set_value("ui", "font_size", ui_font_size)
 	settings.save(settings_path)
 	vrv_configured = true
+
+
+func all_dialogs() -> Array[Window]:
+	return [
+		open_dialog, blank_dialog, flat_template_dialog, flat_output_dialog, save_dialog, export_dialog,
+		confirmation, keys_dialog, playtest_dialog, recover_dialog, game_picker, vrv_picker, autosave_picker,
+		asset_profile_picker, studio, path_inspector, mission_studio, terrain_tools, slope_studio, water_tools, sound_editor,
+	]
+
+
+func sync_theme_controls() -> void:
+	var idx := Wintage.theme_slugs().find(theme_slug)
+	if idx >= 0 and theme_select.item_count > idx:
+		theme_select.select(idx)
+	compact_check.set_pressed_no_signal(ui_compact)
+
+
+func set_wintage_theme(slug: String, compact: bool, persist: bool = true) -> void:
+	theme_slug = slug if slug in Wintage.theme_slugs() else Wintage.DEFAULT_THEME
+	ui_compact = compact
+	var colors := Wintage.palette(theme_slug)
+	theme = Wintage.make(colors, ui_font_size, ui_compact)
+	backdrop.color = colors["background"]
+	coordinates.add_theme_color_override("font_color", colors["textSecondary"])
+	top.palette = colors
+	scene_view.palette = colors
+	top.queue_redraw()
+	for window in all_dialogs():
+		window.theme = theme
+	sync_theme_controls()
+	if persist:
+		var settings := ConfigFile.new()
+		settings.load(settings_path)
+		settings.set_value("ui", "theme", theme_slug)
+		settings.set_value("ui", "compact", ui_compact)
+		settings.set_value("ui", "font_size", ui_font_size)
+		settings.save(settings_path)
+
+
+func filter_toolbar(query: String) -> void:
+	var needle := query.strip_edges().to_lower()
+	for button in toolbar_buttons:
+		button.visible = needle.is_empty() or button.text.to_lower().contains(needle) or button.tooltip_text.to_lower().contains(needle)
+
+
+func open_sound_editor() -> void:
+	if document == null or document.object_count() == 0:
+		return
+	var view := object_tool.selected if object_tool.selected >= 0 else 0
+	sound_editor.begin(document, view, game_path.text.strip_edges(), vrv_path.text.strip_edges())
 
 
 func playtest() -> void:
