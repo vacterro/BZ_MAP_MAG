@@ -11,36 +11,56 @@ Clean them as part of finishing any session, and opportunistically during long o
 
 1. Prune `build/`:
    `powershell -NoProfile -ExecutionPolicy Bypass -File tools/Clean-Build.ps1 -Apply`
-   The default `-Keep 0` removes **every** generated run folder (`BZMAG-*`, `test-*`,
-   `desktop-*`, `asset-test-*`, `path-profiles-*`, `flat-*`, `ui-bridge-*`,
-   `bzn-185-*`, `bzn-probe-*`, `sdk-*`); `-Keep N` keeps the newest N per group.
-   The same command without `-Apply` is a dry run. The tool skips in-use runtimes and
-   unlinks junctions before recursing. It never touches `build/object-preview/` or
-   `build/terrain_oracle.exe` (compiled local tools).
-2. Prune suite output under `V:/_TEMP_/`: keep only the newest `bzmag-terrain-<guid>/`
-   (its `godot.log` is the latest suite evidence) and delete older ones plus one-off
-   probe/scratch dirs (`water-*`, `*-probe*`, ad-hoc export dirs) once the evidence
-   they hold is recorded in `docs/EVIDENCE.md`.
-3. Before finishing, stop stray processes the session started: `battlezone2` (game)
-   and headless `Godot_v4.7.2-stable_win64` runs. A killed game produces a
+   Uniform keep contract, no hidden per-group exceptions: `-Keep 0` removes **every**
+   generated run folder (`BZMAG-*`, `test-*`, `desktop-*`, `asset-test-*`,
+   `path-profiles-*`, `flat-*`, `ui-bridge-*`, `bzn-185-*`, `bzn-probe-*`, `sdk-*`);
+   `-Keep N` (0–5) keeps the newest N of each group and removes older ones. Without
+   `-Apply` it is a dry run. The tool skips in-use runtimes and unlinks junctions
+   before recursing. It never touches `build/object-preview/` or
+   `build/terrain_oracle.exe` (compiled local tools). A repeated run is a no-op.
+2. Prune suite output under `V:/_TEMP_/` with
+   `powershell -NoProfile -ExecutionPolicy Bypass -File tools/Clean-TempEvidence.ps1`
+   (dry run by default, `-Apply` to remove). It only considers workspace-owned names:
+   `bzmag-terrain-<guid>`, `bzmag-layout-<guid>`, `bzmag-autosave-<guid>` and true
+   one-off probes (`water-…`, `bzm-<guid>`, `native-route-probe`, `bzn-conv-probe`,
+   or a generic `*-probe*` name that carries an internal workspace marker). Per group
+   it always keeps the newest PASS and the newest FAIL, plus `-Keep N` extra newest
+   runs, plus fresh (< 24 h) UNKNOWN runs. Foreign `*-probe*` folders without a
+   workspace marker are reported and never touched. Live-referenced folders are
+   skipped. Never match temp folders by broad wildcards outside this tool.
+3. Before finishing, stop stray processes the session started — **never by name and
+   never anything outside this repository**. Use
+   `powershell -NoProfile -ExecutionPolicy Bypass -File tools/Stop-OwnedProcesses.ps1`
+   (dry run by default, `-Apply` to stop). Ownership is proven by location: the
+   process executable path or command line must reference a path inside this repo;
+   the tool excludes its own process tree, re-verifies each PID immediately before
+   stopping and refuses anything else. A user's Battlezone session from the Steam
+   install or an unrelated Godot project can never match. A killed game produces a
    `Battlezone-Crashed *.log` — a normal exit (`System shutdown normally`) is the
-   clean pattern.
+   clean pattern; check the run logs before trusting a crash log.
 4. Never delete: `build/object-preview/` (compiled VRV mesh adapter),
    `build/terrain_oracle.exe` (reference TER decoder), `tools/`, `map_references/`,
    the installed game, or the VRV checkout. A `desktop-<hash>` export is reproducible
-   via `Build-Desktop.ps1` and may be pruned.
+   via `Build-Desktop.ps1` and may be pruned. Suite evidence under `V:/_TEMP_/` is
+   pruned only through `Clean-TempEvidence.ps1`, and only after its content is
+   recorded in `docs/EVIDENCE.md`.
 
 ## Commands and fixed paths
 
 - Godot executable: `V:/__STORE_V/_SOFT/Godot/4.7.2-stable/Godot_v4.7.2-stable_win64.exe`
-- Test suite (~2–6 min, success prints `FAILURES: 0`):
+- Test suite (~3–6 min, success ends in three chained `FAILURES: 0` blocks:
+  terrain workflow, BZN layout profiles, autosave failure injection):
   `powershell -NoProfile -ExecutionPolicy Bypass -File tools/Test-Terrain.ps1 -Godot '<godot>'`
-  Output goes to `V:/_TEMP_/bzmag-terrain-<guid>/godot.log`. A stuck headless run can
-  be killed with `Stop-Process`; parse errors abort before any checks.
-- Playtest (Steam must be running; **never pass `-KeepBznLayout`** — it skips the
-  required 1196→185 `bzn_compat` conversion and produces the false failure
-  `SAVEGAME CORRUPT AT OFFSET 411`):
+  The workflow log goes to `V:/_TEMP_/bzmag-terrain-<guid>/godot.log`, the chained
+  stages to `bzmag-layout-<guid>/` and `bzmag-autosave-<guid>/`. A stuck headless run
+  can be killed with `tools/Stop-OwnedProcesses.ps1 -Apply`; parse errors abort
+  before any checks.
+- Playtest (Steam must be running; **never pass `-KeepBznLayout`** — it is now a
+  hard refusal for anything but the verified native 1192 layout; the launcher
+  only runs 1192 natively or 1196 through the verified `bzn_compat` conversion
+  and aborts every other version with an explanation instead of launching):
   `powershell -File tools/Start-Playtest.ps1 -Game <BZ2R> -VrvSource <vrv> -Mission <bzn>`
+  `-ValidateOnly` prints the classified launch route without launching.
   Success = `[Main] Entering run code [MISSION]` + `[Mission] Entering run code [RUN]`
   and zero `SAVEGAME CORRUPT` lines in the newest log under
   `C:\Users\vac34\Documents\My Games\Battlezone Combat Commissioner\` (session-profile
