@@ -39,8 +39,60 @@ $blank = Join-Path $repo 'map_references/blank_map1/duel_map_27_autosave_01.bzn'
 $template = Join-Path $VrvSource 'mod/Data/Templates/vrv_new_blank.ter'
 $flat = & (Join-Path $PSScriptRoot 'New-FlatTerrainSnapshot.ps1') -Mission $blank -VrvTemplate $template -Destination (Join-Path $root 'native')
 $native = & $launcher @common -Mission $flat -ValidateOnly
-if ($native.LaunchRoute -ne 'native' -or $stock.LaunchRoute -ne 'convert') {
-    throw 'Verified BZN layouts did not select their expected launch routes.'
+if ($native.LaunchRoute -ne 'native' -or $stock.LaunchRoute -ne 'convert' -or -not $native.ResolvedOdfs.ContainsKey('ivtank_vsr.odf')) {
+    throw 'Verified BZN layouts did not select their expected launch routes or resolve ivtank_vsr.odf.'
+}
+# Converter vs asset root separation: 1192 native resolves VSR ODFs via -AssetRoots without needing -VrvSource,
+# and refuses cleanly before launch when neither VSR nor -AssetRoots provides ivtank_vsr.odf.
+$vsrDeps = Join-Path $Game 'VRV/deps/3532748119'
+if (Test-Path -LiteralPath $vsrDeps -PathType Container) {
+    Expect-Refusal 'Missing object ODF dependencies: ivtank_vsr.odf' { & $launcher -Game $Game -Godot $Godot -Mission $flat -ValidateOnly }
+    $separated = & $launcher -Game $Game -Godot $Godot -AssetRoots @($native.VrvFolders) -Mission $flat -ValidateOnly
+    if ($separated.LaunchRoute -ne 'native' -or $separated.ConverterRoot -ne '' -or -not $separated.ResolvedOdfs.ContainsKey('ivtank_vsr.odf')) {
+        throw '1192 native launch failed to resolve ODFs through explicit -AssetRoots without -VrvSource.'
+    }
+}
+# Cached ODF index reuse + invalidation + ambiguity + packed DOCP .pak support.
+. (Join-Path $PSScriptRoot 'Playtest-Assets.ps1')
+$cacheRoot = Join-Path $root 'asset-cache'
+$synthRoot = [IO.Directory]::CreateDirectory((Join-Path $root 'synth-assets')).FullName
+$subA = [IO.Directory]::CreateDirectory((Join-Path $synthRoot 'subA')).FullName
+$subB = [IO.Directory]::CreateDirectory((Join-Path $synthRoot 'subB')).FullName
+[IO.File]::WriteAllText((Join-Path $subA 'ivtank_vsr.odf'), '[GameObjectClass]')
+$synthMissionDir = [IO.Directory]::CreateDirectory((Join-Path $root 'synth-mission')).FullName
+$synthMission = Join-Path $synthMissionDir 'dummy.bzn'
+[IO.File]::WriteAllText($synthMission, '')
+$firstPlan = Get-PlaytestAssetPlan $Game $synthMission '' '' $true @($synthRoot) @('ivtank_vsr.odf') $cacheRoot
+if ($firstPlan.CacheMisses -lt 1 -or -not $firstPlan.ResolvedOdfs.ContainsKey('ivtank_vsr.odf')) {
+    throw 'Initial asset index build did not resolve ivtank_vsr.odf.'
+}
+$secondPlan = Get-PlaytestAssetPlan $Game $synthMission '' '' $true @($synthRoot) @('ivtank_vsr.odf') $cacheRoot
+if ($secondPlan.CacheHits -lt 1 -or $secondPlan.CacheMisses -ne 0) {
+    throw 'Second asset preflight call did not reuse the cached ODF index.'
+}
+# Add a duplicate ODF in subB -> directory stamp changes, cache invalidates, ambiguity is reported.
+[IO.File]::WriteAllText((Join-Path $subB 'ivtank_vsr.odf'), '[GameObjectClass]')
+$ambigPlan = Get-PlaytestAssetPlan $Game $synthMission '' '' $true @($synthRoot) @('ivtank_vsr.odf') $cacheRoot
+if ($ambigPlan.CacheMisses -lt 1 -or $ambigPlan.AmbiguousOdfs.Count -ne 1) {
+    throw 'Cache invalidation or ambiguous ODF detection failed after adding duplicate ODF.'
+}
+# Packed DOCP v2 .pak resolution without a loose ODF file on disk.
+$pakRoot = [IO.Directory]::CreateDirectory((Join-Path $root 'pak-assets')).FullName
+$pakPath = Join-Path $pakRoot 'custom.pak'
+$entryName = [Text.Encoding]::ASCII.GetBytes('packed_unit.odf')
+$ms = [IO.MemoryStream]::new()
+$bw = [IO.BinaryWriter]::new($ms)
+$bw.Write([Text.Encoding]::ASCII.GetBytes('DOCP'))
+$bw.Write([uint32]2); $bw.Write([uint32]0); $bw.Write([uint32]0)
+$bw.Write([uint32]1); $bw.Write([uint32]32); $bw.Write([uint32]0); $bw.Write([uint32]0)
+$bw.Write([uint32]1); $bw.Write([byte]$entryName.Length); $bw.Write($entryName)
+$bw.Write([uint32]0); $bw.Write([uint32]0); $bw.Write([uint32]0)
+$bw.Flush()
+[IO.File]::WriteAllBytes($pakPath, $ms.ToArray())
+$bw.Dispose(); $ms.Dispose()
+$pakPlan = Get-PlaytestAssetPlan $Game $synthMission '' '' $true @($pakRoot) @('packed_unit.odf') $cacheRoot
+if ($pakPlan.ResolvedOdfs['packed_unit.odf'] -ne "${pakPath}::packed_unit.odf") {
+    throw 'Packed DOCP .pak ODF resource was not resolved without a false refusal.'
 }
 $nativeBytes = [IO.File]::ReadAllBytes($flat)
 [IO.File]::WriteAllBytes($flat, [byte[]]($nativeBytes[0..20]))

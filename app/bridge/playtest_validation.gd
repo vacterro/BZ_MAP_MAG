@@ -21,11 +21,21 @@ static func validate(mission: String) -> Dictionary:
 	if package.layout_id != layout["profile"] or not package.path_codec.can_resize or package.object_count_offset < 0:
 		return {"error": "The BZN path table, trailer or object records do not match the verified layout."}
 	var sequences := {}
-	for object in package.objects:
+	var odfs: Array[String] = []
+	var seen_odfs := {}
+	for object: Dictionary in package.objects:
 		var sequence: int = object["sequence"]
 		if sequences.has(sequence):
 			return {"error": "The BZN object table contains duplicate sequence numbers."}
 		sequences[sequence] = true
+		var raw_odf := String(object.get("odf", "")).strip_edges()
+		if not raw_odf.is_empty():
+			var odf_file := raw_odf if raw_odf.to_lower().ends_with(".odf") else raw_odf + ".odf"
+			var key := odf_file.to_lower()
+			if not seen_odfs.has(key):
+				seen_odfs[key] = true
+				odfs.append(odf_file)
+	odfs.sort()
 	if not package.check_sources():
 		return {"error": package.error}
-	return {"route": route, "version": version, "files": package.files}
+	return {"route": route, "version": version, "files": package.files, "odfs": odfs}

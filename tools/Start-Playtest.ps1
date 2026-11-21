@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory)] [string] $Mission,
     [string] $Godot,
     [string] $VrvSource,
+    [string[]] $AssetRoots = @(),
     [string] $AssetProfile,
     [string] $ResultFile,
     [string] $PreparedRun,
@@ -135,7 +136,8 @@ if ($launchRoute -eq 'convert') {
     $layout = $probe | ConvertFrom-Json
 }
 
-$assetPlan = Get-PlaytestAssetPlan $Game $Mission $AssetProfile $VrvSource ([bool]$WithoutMissionScript)
+$odfs = if ($package.PSObject.Properties.Name -contains 'odfs') { @($package.odfs) } else { @() }
+$assetPlan = Get-PlaytestAssetPlan $Game $Mission $AssetProfile $VrvSource ([bool]$WithoutMissionScript) $AssetRoots $odfs
 if ($ValidateOnly) {
     return $assetPlan | Add-Member -PassThru -NotePropertyMembers @{
         LaunchRoute = $launchRoute
@@ -206,7 +208,7 @@ $assetLines = ''
 if ($assetPlan.LuaScript -and -not (Test-Path -LiteralPath (Join-Path $pack (Split-Path -Leaf $assetPlan.LuaScript)))) {
     Copy-Item -LiteralPath $assetPlan.LuaScript -Destination $pack
 }
-$folders = @($assetPlan.LinkedFolders) + @($assetPlan.VrvFolders)
+$folders = @($assetPlan.AssetRoots)
 if ($folders.Count) {
     $localDeps = [IO.Directory]::CreateDirectory((Join-Path $clone 'linkedassets')).FullName
     for ($index = 0; $index -lt $folders.Count; $index++) {
