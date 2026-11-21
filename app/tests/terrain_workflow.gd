@@ -171,6 +171,7 @@ func run() -> void:
 	await test_object_tools(editor, args[0], args[2])
 	await test_water_tools(editor, args[0], args[2])
 	await test_fly_autosave_symmetry(editor, args[0], args[2])
+	test_sound_point_labels(editor)
 	print("Native height at (0,0): %.4f -> %.4f, changed samples: %d" % [baseline, intended, document.edits.size()])
 	print("FAILURES: %d" % failures)
 	quit(0 if failures == 0 else 1)
@@ -1185,3 +1186,21 @@ func test_fly_autosave_symmetry(editor: Control, source: String, scratch: String
 	check(editor.brush_panel.mirrored(doc, Vector2(100.0, 200.0), true) == Vector2(923.0, 200.0)
 		and editor.brush_panel.mirrored(doc, Vector2(100.0, 200.0), false) == Vector2(100.0, 823.0), "mirror points compute the opposite samples")
 	print("Fly camera, rolling autosave and live symmetry verified.")
+
+
+func test_sound_point_labels(editor: Control) -> void:
+	var point := Document.sound_point("vrvsnd:ding.wav:70:150:0:0:100:20")
+	check(point["odf"] == "vrv_sndpoint" and point["sound"] == "ding.wav" and point["volume"] == 70 and point["range"] == 150
+		and point["interval"] == 0 and point["jitter"] == 0 and point["pitch"] == 100 and point["near"] == 20,
+		"VRV sound labels parse into their seven settings")
+	check(Document.sound_point("vrvsnd:bad name.wav:70:150:0:0:100:20").is_empty()
+		and Document.sound_point("vrvsnd:ding.mp3:70:150:0:0:100:20").is_empty()
+		and Document.sound_point("vrvsnd:ding.wav:70:150:0:0:100").is_empty()
+		and Document.sound_point("vrvsnd:ding.wav:seventy:150:0:0:100:20").is_empty()
+		and Document.sound_point("sp_farm").is_empty() and Document.sound_point("").is_empty(),
+		"sound inspection rejects unsafe names, extensions, partial and non-integer labels")
+	check(editor.object_tool.label_suffix("vrvsnd:ding.wav:70:150:0:0:100:20").contains("ding.wav")
+		and editor.object_tool.label_suffix("vrvsnd:ding.wav:70:150:0:0:100:20").contains("range 150 m"),
+		"the object status renders sound settings")
+	check(editor.object_tool.label_suffix("sp_farm") == " · sp_farm", "ordinary labels keep their plain rendering")
+	print("VRV sound point inspection verified.")

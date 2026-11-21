@@ -114,6 +114,33 @@ func open(path: String) -> bool:
 	return true
 
 
+static func sound_point(label: String) -> Dictionary:
+	# VRV sound points are plain BZN objects of vrv_sndpoint whose label carries
+	# vrvsnd:<sound>:<volume>:<range>:<interval>:<jitter>:<pitch>:<near>
+	# (VRV src/shared/SoundPoints.h). Playback stays VRV-managed.
+	if not label.begins_with("vrvsnd:"):
+		return {}
+	var parts := label.split(":")
+	if parts.size() != 8:
+		return {}
+	var sound := parts[1]
+	if sound.is_empty() or sound.length() > 48:
+		return {}
+	for character in sound:
+		if not (character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."):
+			return {}
+	var extension := sound.get_extension().to_lower()
+	if extension != "wav" and extension != "ogg":
+		return {}
+	var values: Array[int] = []
+	for index in range(2, 8):
+		if not parts[index].is_valid_int():
+			return {}
+		values.append(int(parts[index]))
+	return {"odf": "vrv_sndpoint", "sound": sound, "volume": values[0], "range": values[1],
+		"interval": values[2], "jitter": values[3], "pitch": values[4], "near": values[5]}
+
+
 static func valid_asset_profile(value: Variant) -> bool:
 	return value is String and (value.is_empty() or (value.is_absolute_path() and value.get_extension().to_lower() == "json"))
 

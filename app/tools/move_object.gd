@@ -140,6 +140,11 @@ func description() -> String:
 
 
 func label_suffix(label: String) -> String:
+	if document != null:
+		var point: Dictionary = document.sound_point(label)
+		if not point.is_empty():
+			return " · Sound %s · vol %d%% · range %d m · interval %d s · jitter %d%% · pitch %d%% · near %d%%" % [
+				point["sound"], point["volume"], point["range"], point["interval"], point["jitter"], point["pitch"], point["near"]]
 	return " · %s" % label if label != "" else ""
 
 
