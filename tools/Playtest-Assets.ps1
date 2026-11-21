@@ -28,14 +28,19 @@ function Get-LinkedAssetFolders([string] $AssetProfile) {
 function Get-ExplicitAssetRoots([string[]] $AssetRoots) {
     if (-not $AssetRoots) { return }
     $seen = @{}
-    foreach ($entry in $AssetRoots) {
-        if ([string]::IsNullOrWhiteSpace($entry)) { continue }
-        $root = Get-Item -LiteralPath $entry -ErrorAction SilentlyContinue
-        if (-not $root -or -not $root.PSIsContainer) { throw "Asset root folder was not found: $entry" }
-        $resolved = (Resolve-Path -LiteralPath $root.FullName).Path
-        if (-not $seen.ContainsKey($resolved)) {
-            $seen[$resolved] = $true
-            $resolved
+    foreach ($raw in $AssetRoots) {
+        if ([string]::IsNullOrWhiteSpace($raw)) { continue }
+        $entries = if (Test-Path -LiteralPath $raw -PathType Container) { @($raw) } else { @($raw -split ';') }
+        foreach ($entry in $entries) {
+            $trimmed = $entry.Trim()
+            if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+            $root = Get-Item -LiteralPath $trimmed -ErrorAction SilentlyContinue
+            if (-not $root -or -not $root.PSIsContainer) { throw "Asset root folder was not found: $trimmed" }
+            $resolved = (Resolve-Path -LiteralPath $root.FullName).Path
+            if (-not $seen.ContainsKey($resolved)) {
+                $seen[$resolved] = $true
+                $resolved
+            }
         }
     }
 }

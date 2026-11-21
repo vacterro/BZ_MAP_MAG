@@ -1347,7 +1347,7 @@ func playtest() -> void:
 	var route := Layouts.playtest_route(document.package.bzn_version, "binary")
 	if route == "convert" and vrv != "":
 		args.append_array(PackedStringArray(["-Converter", vrv]))
-	elif document.mod_profile == "vrv" and vrv != "":
+	if document.mod_profile == "vrv" and vrv != "":
 		args.append_array(PackedStringArray(["-VrvSource", vrv]))
 	if engine_editor_mode.button_pressed:
 		args.append_array(PackedStringArray(["-StartInEditor", "-WithoutMissionScript"]))
@@ -1362,7 +1362,7 @@ func playtest() -> void:
 				joined.append(String(r_v))
 		if not joined.is_empty():
 			args.append("-AssetRoots")
-			args.append(",".join(joined))
+			args.append(";".join(joined))
 	launcher_pid = OS.create_process("powershell.exe", args, false)
 	if launcher_pid <= 0:
 		report("Could not start the Playtest helper. Export retained at " + target)

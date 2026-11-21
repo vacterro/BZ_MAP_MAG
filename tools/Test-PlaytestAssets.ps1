@@ -51,6 +51,12 @@ if (Test-Path -LiteralPath $vsrDeps -PathType Container) {
     if ($separated.LaunchRoute -ne 'native' -or $separated.ConverterRoot -ne '' -or -not $separated.ResolvedOdfs.ContainsKey('ivtank_vsr.odf')) {
         throw '1192 native launch failed to resolve ODFs through explicit -AssetRoots without -VrvSource.'
     }
+    # Semicolon-delimited -AssetRoots across PowerShell -File process boundary (editor.gd OS.create_process contract, T-17).
+    $multiJoined = (@($assetRoot) + @($native.VrvFolders)) -join ';'
+    $cliOut = & powershell.exe -NoProfile -NonInteractive -File $launcher -Game $Game -Godot $Godot -AssetRoots $multiJoined -Mission $flat -ValidateOnly 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ("powershell.exe -File failed to parse semicolon-delimited -AssetRoots: " + ($cliOut | Out-String))
+    }
     # Strict Stock isolation: -ModProfile 'stock' must NEVER mount VRV/VSR assets even if -Converter or -VrvSource is provided.
     Expect-Refusal 'Missing object ODF dependencies: ivtank_vsr.odf' {
         & $launcher -Game $Game -Godot $Godot -ModProfile 'stock' -Converter $VrvSource -VrvSource $VrvSource -Mission $flat -ValidateOnly
