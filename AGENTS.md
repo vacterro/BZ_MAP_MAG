@@ -59,7 +59,7 @@ Clean them as part of finishing any session, and opportunistically during long o
   hard refusal for anything but the verified native 1192 layout; the launcher
   only runs 1192 natively or 1196 through the verified `bzn_compat` conversion
   and aborts every other version with an explanation instead of launching):
-  `powershell -File tools/Start-Playtest.ps1 -Game <BZ2R> -VrvSource <vrv> -Mission <bzn>`
+  `powershell -File tools/Start-Playtest.ps1 -Godot <godot> -Game <BZ2R> -VrvSource <vrv> -Mission <bzn>`
   `-ValidateOnly` prints the classified launch route without launching.
   Success = `[Main] Entering run code [MISSION]` + `[Mission] Entering run code [RUN]`
   and zero `SAVEGAME CORRUPT` lines in the newest log under

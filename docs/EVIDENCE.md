@@ -207,3 +207,10 @@ Every 2.0.185 launch route carries fresh same-day evidence on the current HEAD (
 - **unknown versions**: refused at package level and asserted by today's chained suite (`bzn_layout_profiles.gd`: unregistered 1199 header refusal; 3× `FAILURES: 0`).
 
 The matrix is therefore: two engine-verified launch routes (native 1192, adapter-converted 1196) and every other recorded layout refused instead of launched unverified — all demonstrated fresh on this HEAD in one session.
+
+## Playtest admission regression (T-10 recovery, 2026-11-21)
+
+- The same `-ValidateOnly` probe accepted a genuine 1192 package in both revisions. The launcher at `85251cc` also accepted its 21-byte BZN prefix. The launcher at `5c47cf4` refused that prefix and a 128-byte sample with a complete header. The test used only private fixture copies. `Test-PlaytestAssets.ps1` also refused a corrupt TER, missing VRV checkout or converter, and the 1196 bypass attempt. Its DLL/Lua and prepared-launch controls passed.
+- The Windows desktop export resolved its built-in headless validator and admitted the verified 1192 fixture. A separate ordinary desktop startup smoke test exited cleanly.
+- The installed 2.0.185 ran the unchanged flat 1192 BZN and the adapter-converted 1196 Brave ramp into MISSION and RUN. Both shut down normally with zero `SAVEGAME CORRUPT` entries. Native log `Battlezone 2026-11-21 13.27.14.5234.log` has SHA-256 `b6c2b5e56f57484ce164218b8cd9b95899dbaba6901aa05f60abe494afa7c4e4`. Converted log `Battlezone 2026-11-21 13.25.46.7406.log` has SHA-256 `63c967b9adca74cc61df784dbc5316f7a72deef09f7cadeb75ede6f6c3ba4ed6`.
+- SAIPEN suite record `a8473ac2e2a0b12f-20261121T112838546207Z.json` recorded three `FAILURES: 0` stages with identical before/after subjects. The original 1192 and 1196 packages were independently read as 1/76 objects and 23 paths each. The editor continues to permit native export of EDITOR_ONLY object-count changes and refuses to playtest them from a document with those edits.
