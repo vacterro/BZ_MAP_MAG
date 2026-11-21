@@ -125,12 +125,12 @@ func _draw() -> void:
 		for marker: Dictionary in object_marks:
 			if marker["pool"]:
 				pools[marker["index"]] = true
-		for index in document.package.objects.size():
+		for index in document.object_count():
 			var selected := move_objects and index == selected_object
 			var world := object_preview if selected and object_preview.is_finite() else document.object_position(index)
 			var pixel := path_point_pixel(Vector2(world.x, world.z))
 			if rect.has_point(pixel):
-				var pool := pools.has(index)
+				var pool := pools.has(document.object_pool_reference(index))
 				var radius := 6.0 if selected else (4.0 if pool else 1.5)
 				draw_circle(pixel, radius, palette["accentTeal"] if selected else palette["borderHighlight"], not pool and not selected)
 	if not path_overlay.is_empty():

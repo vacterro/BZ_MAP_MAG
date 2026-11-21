@@ -51,10 +51,21 @@ func save_project(document: Document, target: String) -> bool:
 		path_edits[str(index)] = record
 	var object_edits := {}
 	for index: int in document.object_edits:
-		var position: Vector3 = document.object_edits[index]
-		object_edits[str(index)] = [position.x, position.y, position.z]
+		var edit: Dictionary = document.object_edits[index]
+		var transform := Transform3D(edit["basis"], edit["position"])
+		object_edits[str(index)] = {"position": [transform.origin.x, transform.origin.y, transform.origin.z],
+			"basis": basis_array(transform.basis)}
+	var object_removals := []
+	for index: int in document.object_removals:
+		object_removals.append(index)
+	var object_inserts := []
+	for addition: Dictionary in document.object_additions:
+		object_inserts.append({"template": addition["template"], "id": addition["id"], "label": addition["label"],
+			"sequence": addition["sequence"], "position": [addition["transform"].origin.x, addition["transform"].origin.y, addition["transform"].origin.z],
+			"basis": basis_array(addition["transform"].basis)})
 	var record := {"schema": 1, "source": document.package.source_path, "files": document.package.files, "edits": edits,
-		"layers": document.layers, "pathEdits": path_edits, "objectEdits": object_edits}
+		"layers": document.layers, "pathEdits": path_edits, "objectEdits": object_edits,
+		"objectRemovals": object_removals, "objectInserts": object_inserts}
 	if not document.asset_profile.is_empty():
 		record["assetProfile"] = document.asset_profile
 	var terrain := document.package.terrain
@@ -81,6 +92,16 @@ func indexed_record(values: Dictionary) -> Dictionary:
 	return record
 
 
+static func basis_array(basis: Basis) -> Array:
+	var values := []
+	for axis in 3:
+		var vector: Vector3 = basis.x if axis == 0 else (basis.y if axis == 1 else basis.z)
+		values.append(vector.x)
+		values.append(vector.y)
+		values.append(vector.z)
+	return values
+
+
 func export_native(document: Document, target: String) -> bool:
 	if document.has_preview():
 		return fail("Apply or clear the terrain preview before exporting.")
@@ -92,15 +113,36 @@ func export_native(document: Document, target: String) -> bool:
 		return fail(package.error)
 	var bzn := PackedByteArray()
 	var suffix := PackedByteArray()
-	if not document.path_edits.is_empty() or not document.object_edits.is_empty():
+	var object_shift := 0
+	if not document.path_edits.is_empty() or not document.object_edits.is_empty() or not document.object_removals.is_empty() or not document.object_additions.is_empty():
 		var source_bzn := FileAccess.get_file_as_bytes(package.source_path.get_base_dir().path_join(package.bzn_name))
 		var digest := HashingContext.new()
 		digest.start(HashingContext.HASH_SHA256)
 		if digest.update(source_bzn) != OK or digest.finish().hex_encode() != package.files[package.bzn_name]:
 			return fail("BZN changed while preparing mission edits.")
 		suffix = source_bzn.slice(package.path_codec.table_end)
-		bzn = BznObjects.patch_positions(source_bzn, package.objects, document.object_edits)
+		if document.has_object_file_edits():
+			if package.object_count_offset < 0 or package.object_insert_offset != package.path_codec.table_start - 7:
+				return fail("This BZN layout does not support native object edits yet.")
+			var blocks: Array = []
+			for addition: Dictionary in document.object_additions:
+				var template: Dictionary = package.objects[addition["template"]]
+				var block := BznObjects.build_block(source_bzn, template, int(addition["sequence"]), String(addition["label"]), addition["transform"])
+				blocks.append(block)
+			var removals: Array = []
+			for index: int in document.object_removals:
+				removals.append(index)
+			var patch := BznObjects.patch_objects(source_bzn, package.objects, document.object_export_edits(),
+				removals, blocks, package.object_count_offset, package.object_insert_offset)
+			if patch.is_empty():
+				return fail("The native object edits could not be applied to this BZN.")
+			bzn = patch["bytes"]
+			object_shift = int(patch["shift"])
+			package.path_codec.shift(object_shift)
+		else:
+			bzn = source_bzn
 		bzn = package.path_codec.patch(bzn, document.path_edits)
+		package.path_codec.shift(-object_shift)
 	var stage := target.get_base_dir().path_join(".bzmag-" + nonce())
 	if DirAccess.make_dir_absolute(stage) != OK:
 		return fail("Could not reserve export staging folder.")
@@ -135,25 +177,27 @@ func export_native(document: Document, target: String) -> bool:
 				return rollback(stage, names, "Modified terrain material did not re-import as edited.")
 	if not bzn.is_empty():
 		var path_indices := document.path_indices()
-		if reimport.path_codec.table_start != package.path_codec.table_start or reimport.paths.size() != path_indices.size() or bzn.slice(reimport.path_codec.table_end) != suffix:
+		if reimport.path_codec.table_start != package.path_codec.table_start + object_shift or reimport.paths.size() != path_indices.size() or bzn.slice(reimport.path_codec.table_end) != suffix:
 			return rollback(stage, names, "Modified BZN did not retain the expected path table and original trailer.")
 		for index in reimport.paths.size():
 			if not Document.same_path_fields(reimport.paths[index], document.path_at(path_indices[index])):
 				return rollback(stage, names, "Modified BZN path did not re-import as edited.")
-		if reimport.objects.size() != package.objects.size():
-			return rollback(stage, names, "Modified BZN did not preserve the native object count.")
+		if reimport.objects.size() != document.object_count():
+			return rollback(stage, names, "Modified BZN did not re-import the expected native object count.")
 		for index in reimport.objects.size():
-			var expected := package.objects[index].duplicate()
-			var transform: Transform3D = expected["transform"]
-			transform.origin = document.object_position(index)
-			expected["transform"] = transform
-			if reimport.objects[index] != expected:
+			if BznObjects.fields(reimport.objects[index]) != expected_object_fields(document, index):
 				return rollback(stage, names, "Modified BZN object did not re-import as edited.")
 	if not package.check_sources():
 		return rollback(stage, names, package.error)
 	if exists(target) or DirAccess.rename_absolute(stage, target) != OK:
 		return rollback(stage, names, "Could not publish export to the new folder.")
 	return true
+
+
+static func expected_object_fields(document: Document, view: int) -> Dictionary:
+	var template: Dictionary = document.object_template(view)
+	return {"odf": template["odf"], "label": document.object_label(view), "team": document.object_team(view),
+		"sequence": document.object_sequence(view), "transform": document.object_transform(view)}
 
 
 func write_bytes(path: String, bytes: PackedByteArray) -> bool:

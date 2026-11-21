@@ -6,6 +6,7 @@ const Document := preload("res://core/map_document.gd")
 const Snapshots := preload("res://bridge/snapshots.gd")
 const Graph := preload("res://nodes/height_graph.gd")
 const Water := preload("res://formats/water_v5.gd")
+const BznObjects := preload("res://formats/bzn_objects.gd")
 
 var failures := 0
 
@@ -166,6 +167,7 @@ func run() -> void:
 	test_shape_tools(editor, args[2])
 	await test_graph_materials(editor, args[0], args[2])
 	await test_object_move(editor, args[0], args[2])
+	await test_object_tools(editor, args[0], args[2])
 	print("Native height at (0,0): %.4f -> %.4f, changed samples: %d" % [baseline, intended, document.edits.size()])
 	print("FAILURES: %d" % failures)
 	quit(0 if failures == 0 else 1)
@@ -843,6 +845,142 @@ func object_mouse_button(editor: Control, view: Control, pixel: Vector2, down: b
 	button.button_index = MOUSE_BUTTON_LEFT
 	button.pressed = down
 	editor.view_input(button, view)
+
+
+func object_key(editor: Control, key: Key, shift := false, ctrl := false) -> void:
+	var event := InputEventKey.new()
+	event.keycode = key
+	event.shift_pressed = shift
+	event.ctrl_pressed = ctrl
+	event.pressed = true
+	editor._shortcut_input(event)
+
+
+func test_object_tools(editor: Control, source: String, scratch: String) -> void:
+	check(editor.open_map(source), "load the object tools fixture")
+	var doc: Document = editor.document
+	var index := 15
+	var entry: Dictionary = doc.package.objects[index]
+	check(entry["odf"] == "morock03", "object tools use the decorative Brave rock")
+	var original: Transform3D = entry["transform"]
+	editor.move_objects_button.set_pressed_no_signal(true)
+	editor.move_objects_button.pressed.emit()
+	editor.object_tool.selected = index
+	editor.object_tool.set_active(true)
+
+	object_key(editor, KEY_BRACKETRIGHT)
+	var rotated: Transform3D = doc.object_transform(index)
+	var plus15 := original.basis.rotated(Vector3.UP, deg_to_rad(15.0))
+	check(rotated.basis == plus15 and rotated.origin == original.origin,
+		"the ] hotkey rotates the selection 15° around the world up axis in place")
+	check(editor.status.text.contains("Heading"), "the status line reports the native heading")
+	object_key(editor, KEY_BRACKETLEFT, true)
+	check(doc.object_transform(index).basis == plus15.rotated(Vector3.UP, deg_to_rad(-1.0)),
+		"Shift+[ applies a one degree counter-rotation")
+	check(doc.object_transform(index).basis != original.basis, "the net rotation differs from the source basis")
+	doc.undo()
+	check(doc.object_transform(index).basis == plus15, "undo cancels the last rotation step only")
+	doc.undo()
+	check(doc.object_transform(index) == original, "undo restores the exact native basis floats")
+	doc.redo()
+	doc.redo()
+	print("Object %d heading test euler: %s" % [index, doc.object_transform(index).basis.get_euler()])
+
+	var writer := Snapshots.new()
+	var rotate_target := scratch.path_join("object-rotate")
+	check(writer.export_native(doc, rotate_target), writer.error)
+	var rotated_map := Document.new()
+	check(rotated_map.open(rotate_target.path_join(doc.package.bzn_name)), "reopen rotation-only export")
+	if rotated_map.package.objects.size() == doc.object_count():
+		check(rotated_map.package.objects[index]["transform"] == doc.object_transform(index), "exported rotation round-trips exactly")
+		var exported_bytes := FileAccess.get_file_as_bytes(rotate_target.path_join(doc.package.bzn_name))
+		var source_bytes := FileAccess.get_file_as_bytes(source)
+		check(exported_bytes.size() == source_bytes.size(), "rotation edits rewrite the BZN in place without shifting any records")
+
+	var offset := Vector3(8.0, 0.0, 8.0)
+	var added := doc.duplicate_object(index, original.origin + offset)
+	check(added == doc.object_count() - 1 and doc.object_count() == doc.package.objects.size() + 1,
+		"duplicating appends a native object record after the existing stream")
+	var addition := doc.object_addition(added)
+	var base_sequences := {}
+	for record in doc.package.objects:
+		base_sequences[int(record["sequence"])] = true
+	check(doc.object_odf(added) == entry["odf"] and not base_sequences.has(int(addition["sequence"]))
+		and doc.object_transform(added).origin == original.origin + offset, "the duplicate keeps the class and gains an unused sequence")
+	object_key(editor, KEY_D, false, true)
+	check(doc.object_count() == doc.package.objects.size() + 2, "Ctrl+D duplicates the current selection through the editor tool")
+	doc.undo()
+	check(doc.object_count() == doc.package.objects.size() + 1, "undo removes one duplicate and restores the previous count")
+
+	var duplicate_target := scratch.path_join("object-duplicate")
+	check(writer.export_native(doc, duplicate_target), writer.error)
+	var duplicated_map := Document.new()
+	check(duplicated_map.open(duplicate_target.path_join(doc.package.bzn_name)), "reopen the duplicated export")
+	if duplicated_map.package.objects.size() == doc.object_count():
+		var view_added := doc.object_count() - 1
+		check(duplicated_map.package.objects[view_added]["odf"] == entry["odf"]
+			and duplicated_map.package.objects[view_added]["transform"] == doc.object_transform(view_added)
+			and duplicated_map.package.objects[view_added]["sequence"] == int(addition["sequence"]),
+			"the duplicated native record re-imports with the kept class, transform and sequence")
+		var suffix_source := FileAccess.get_file_as_bytes(source).slice(doc.package.path_codec.table_end)
+		var suffix_export := FileAccess.get_file_as_bytes(duplicate_target.path_join(doc.package.bzn_name)).slice(duplicated_map.package.path_codec.table_end)
+		check(suffix_source == suffix_export, "the untouched original trailer rides along after the resized path region")
+
+	var removed_view := doc.object_count() - 1
+	check(doc.remove_object(removed_view), "removing the appended duplicate reduces the count")
+	check(doc.object_count() == doc.package.objects.size(), "the duplicate removal leaves the original 76 native records")
+	doc.undo()
+	check(doc.object_count() == doc.package.objects.size() + 1, "undo restores the removed duplicate from history")
+
+	var labeled := -1
+	for view in doc.package.objects.size():
+		if String(doc.package.objects[view]["label"]) != "":
+			labeled = view
+			break
+	if labeled >= 0:
+		var label_before: String = doc.package.objects[labeled]["label"]
+		var labeled_duplicate := doc.duplicate_object(labeled, doc.object_position(labeled))
+		check(doc.object_label(labeled_duplicate) == label_before + "_2", "a labeled duplicate gains a fresh native label")
+		doc.undo()
+	else:
+		check(doc.object_label(doc.object_count() - 1) == "", "unlabeled duplicates stay unlabeled in the native stream")
+
+	var removed_base := -1
+	for view in doc.object_count():
+		if not doc.object_is_added(view) and int(doc.object_entry(view)["base"]) != index:
+			removed_base = view
+			break
+	check(doc.remove_object(removed_base), "remove a decorative source object")
+	check(doc.object_count() == doc.package.objects.size(), "the view count follows the ordered base and added entries")
+
+	var project := scratch.path_join("object-tools.bzmag")
+	editor.save_project(project)
+	check(not editor.has_unsaved_changes(), "saving the project clears the dirty flag for all object edits")
+	var reopened := Document.new()
+	check(reopened.open(project), "reopen the object project file")
+	print("Project reopen compares: rotation edits %d, removals %d, additions %d" % [
+		reopened.object_edits.size(), reopened.object_removals.size(), reopened.object_additions.size()])
+	check(reopened.object_edits.keys() == doc.object_edits.keys() and reopened.object_removals.keys() == doc.object_removals.keys()
+		and reopened.object_additions.size() == doc.object_additions.size(), "the project round-trips every transform, removal and insertion")
+	check(reopened.object_transform(index) == doc.object_transform(index), "the rotated transform survives the project round trip")
+
+	var final_target := scratch.path_join("object-tools")
+	check(writer.export_native(reopened, final_target), writer.error)
+	var final_map := Document.new()
+	check(final_map.open(final_target.path_join(reopened.package.bzn_name)), "reopen the full object-tools export")
+	if final_map.package.objects.size() == reopened.object_count():
+		for view in final_map.package.objects.size():
+			if BznObjects.fields(final_map.package.objects[view]) != Snapshots.expected_object_fields(reopened, view):
+				check(false, "exported object %d matches the document fields" % view)
+				break
+		check(true, "every exported object re-imports with the edited class, label, sequence and transform")
+	var clean := Document.new()
+	check(clean.open(source), "open a fresh document for the identity export")
+	var clean_target := scratch.path_join("object-clean")
+	check(writer.export_native(clean, clean_target), writer.error)
+	check(FileAccess.get_file_as_bytes(clean_target.path_join(clean.package.bzn_name)) == FileAccess.get_file_as_bytes(source),
+		"an unedited document exports a byte-identical native BZN")
+	print("Object tools: rotation, duplicate, label copy and removal verified for %s." % entry["odf"])
 
 
 func object_mouse_drag(editor: Control, view: Control, pixel: Vector2, snap: bool) -> void:

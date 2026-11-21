@@ -5,6 +5,7 @@ const Assets := preload("res://formats/native_assets.gd")
 var materials := {}
 var models := {}
 var instances := {}
+var specs := {}
 var adapter := ""
 
 
@@ -26,9 +27,12 @@ func display(assets: Dictionary) -> int:
 		model.mesh = models[key]
 		var world: Transform3D = item["transform"]
 		model.transform = world.scaled_local(Vector3.ONE * float(item["scale"]))
+		model.set_meta("native_scale", float(item["scale"]))
+		model.set_meta("native_mesh", key)
 		model.set_meta("native_pool", item["pool"])
 		add_child(model)
 		instances[item["index"]] = model
+		specs[item["index"]] = {"mesh": key, "scale": float(item["scale"]), "pool": item["pool"]}
 		count += 1
 	return count
 
@@ -40,12 +44,55 @@ func clear_models() -> void:
 	models.clear()
 	instances.clear()
 	materials.clear()
+	specs.clear()
 
 
 func move_instance(index: int, position: Vector3) -> void:
 	var instance: MeshInstance3D = instances.get(index)
 	if instance:
 		instance.position = position
+
+
+func set_instance_transform(index: int, transform: Transform3D) -> void:
+	var instance: MeshInstance3D = instances.get(index)
+	if instance:
+		instance.transform = transform.scaled_local(Vector3.ONE * float(instance.get_meta("native_scale", 1.0)))
+
+
+func rebuild(document) -> void:
+	# Reassign the loaded meshes to the document's current topological view.
+	var pool := {}
+	for child in get_children():
+		var node: MeshInstance3D = child
+		var key: String = node.get_meta("native_mesh", "")
+		remove_child(node)
+		if key.is_empty():
+			node.queue_free()
+			continue
+		if not pool.has(key):
+			pool[key] = []
+		pool[key].append(node)
+	instances.clear()
+	for view in document.object_count():
+		var spec: Dictionary = specs.get(document.object_pool_reference(view), {})
+		if spec.is_empty() or not models.has(spec["mesh"]):
+			continue
+		var candidates: Array = pool.get(String(spec["mesh"]), [])
+		var model: MeshInstance3D = null
+		if candidates.is_empty():
+			model = MeshInstance3D.new()
+			model.mesh = models[spec["mesh"]]
+			model.set_meta("native_mesh", String(spec["mesh"]))
+			model.set_meta("native_scale", float(spec["scale"]))
+			model.set_meta("native_pool", bool(spec["pool"]))
+		else:
+			model = candidates.pop_back()
+		model.transform = document.object_transform(view).scaled_local(Vector3.ONE * float(spec["scale"]))
+		add_child(model)
+		instances[view] = model
+	for key in pool:
+		for node: MeshInstance3D in pool[key]:
+			node.queue_free()
 
 
 func read_mesh(bytes: PackedByteArray, textures: Dictionary) -> ArrayMesh:

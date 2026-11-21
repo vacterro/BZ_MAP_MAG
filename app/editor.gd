@@ -86,6 +86,8 @@ var saved_edits := {}
 var saved_layers: Array = []
 var saved_path_edits := {}
 var saved_object_edits := {}
+var saved_object_additions: Array = []
+var saved_object_removals := {}
 var saved_asset_profile := ""
 var saved_colors := {}
 var saved_tiles := {}
@@ -177,7 +179,7 @@ func _ready() -> void:
 			add_label(heading, "2D Map")
 			objects_button = add_button(heading, "Objects", toggle_objects, "Display supported native BZCC models in the 3D view")
 			objects_button.toggle_mode = true
-			move_objects_button = add_button(heading, "Move Object", object_tool_changed, "Select and drag an object in either view. Shift snaps to the terrain grid. Esc cancels.")
+			move_objects_button = add_button(heading, "Move Object", object_tool_changed, "Select and drag an object in either view. Shift snaps to the terrain grid. [ / ] rotate ±15° (Shift 1°), Ctrl+D duplicates, Delete removes. Esc cancels.")
 			move_objects_button.toggle_mode = true
 			water_button = add_button(heading, "Water", toggle_water, "Preview decoded native water layers in both views")
 			water_button.toggle_mode = true
@@ -212,7 +214,7 @@ func _ready() -> void:
 	add_child(confirmation)
 	confirmation.confirmed.connect(func(): open_map(pending_path))
 	keys_dialog.title = "Editor Hotkeys"
-	keys_dialog.dialog_text = "Shift+1–6  Brush size\nShift+Q/W/E/R  Square / Circle / Cone / Bell\nShift+Z/X/C/V  Pressure 10 / 20 / 50 / 100%\nShift+A/S/D/F/G  Paint / Spray / Raise / Blend / Pick\nAlt+H  Height brush\nF5  Playtest\nCtrl+O/S/Z/Y  Open / Save Project / Undo / Redo\n\nMove Points tool\nDrag  Move a point\nShift+click  Append a point\nDelete  Remove selected point\nEsc  Cancel drag\n\nMove Object tool\nDrag  Move an object\nShift+drag  Snap to terrain grid\nEsc  Cancel drag"
+	keys_dialog.dialog_text = "Shift+1–6  Brush size\nShift+Q/W/E/R  Square / Circle / Cone / Bell\nShift+Z/X/C/V  Pressure 10 / 20 / 50 / 100%\nShift+A/S/D/F/G  Paint / Spray / Raise / Blend / Pick\nAlt+H  Height brush\nF5  Playtest\nCtrl+O/S/Z/Y  Open / Save Project / Undo / Redo\n\nMove Points tool\nDrag  Move a point\nShift+click  Append a point\nDelete  Remove selected point\nEsc  Cancel drag\n\nMove Object tool\nDrag  Move an object\nShift+drag  Snap to terrain grid\n[ / ]  Rotate −15° / +15°  (Shift for 1°)\nCtrl+D  Duplicate the selection\nDelete  Remove the selection\nEsc  Cancel drag"
 	add_child(keys_dialog)
 	studio.hide()
 	add_child(studio)
@@ -394,6 +396,39 @@ func _shortcut_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 	var key: Key = event.physical_keycode if event.physical_keycode != KEY_NONE else event.keycode
+	if object_tool.active and not event.echo:
+		if event.keycode in [KEY_BRACKETLEFT, KEY_BRACKETRIGHT] and not event.ctrl_pressed and not event.alt_pressed:
+			var step := deg_to_rad(1.0) if event.shift_pressed else deg_to_rad(15.0)
+			var direction := -1.0 if event.keycode == KEY_BRACKETLEFT else 1.0
+			if object_tool.selected >= 0 and document.rotate_object(object_tool.selected, direction * step):
+				report(object_tool.description())
+			else:
+				report(document.error)
+			get_viewport().set_input_as_handled()
+			return
+		if event.keycode == KEY_D and event.ctrl_pressed and not event.alt_pressed and not event.shift_pressed:
+			if object_tool.selected >= 0 and not document.has_preview():
+				var origin := document.object_position(object_tool.selected)
+				var offset := Vector3(4.0, 0.0, 4.0)
+				var view := document.duplicate_object(object_tool.selected, origin + offset)
+				if view >= 0:
+					object_tool.set_active(true)
+					object_tool.selected = view
+					object_tool.refresh_marker()
+					report(object_tool.description())
+				else:
+					report(document.error)
+			get_viewport().set_input_as_handled()
+			return
+		if event.keycode == KEY_DELETE and not event.ctrl_pressed:
+			if object_tool.selected >= 0 and document.remove_object(object_tool.selected):
+				object_tool.selected = -1
+				object_tool.refresh_marker()
+				report("Object removed. Undo restores it.")
+			else:
+				report(document.error)
+			get_viewport().set_input_as_handled()
+			return
 	if event.alt_pressed and key == KEY_H:
 		leave_object_tool()
 		move_path_button.set_pressed_no_signal(false)
@@ -427,7 +462,7 @@ func sync_actions() -> void:
 	edit_path_button.disabled = locked or path_list.selected <= 0
 	move_path_button.disabled = locked or path_list.selected <= 0
 	objects_button.disabled = locked or document.package.objects.is_empty() or object_thread.is_started()
-	move_objects_button.disabled = locked or document.package.objects.is_empty() or document.has_preview()
+	move_objects_button.disabled = locked or document.object_count() == 0 or document.has_preview()
 	water_button.disabled = locked or document.package.water == null
 	color_button.disabled = locked or texture_button.button_pressed
 	texture_button.disabled = locked or object_thread.is_started()
@@ -440,7 +475,8 @@ func sync_actions() -> void:
 func has_unsaved_changes() -> bool:
 	return document != null and (document.edits != saved_edits or document.layers != saved_layers
 		or document.path_edits != saved_path_edits or document.asset_profile != saved_asset_profile
-		or document.object_edits != saved_object_edits
+		or document.object_edits != saved_object_edits or document.object_additions != saved_object_additions
+		or document.object_removals != saved_object_removals
 		or document.package.terrain.color_edits != saved_colors or document.package.terrain.tile_edits != saved_tiles)
 
 
@@ -448,7 +484,9 @@ func remember_saved_changes() -> void:
 	saved_edits = document.edits.duplicate()
 	saved_layers = document.layers.duplicate(true)
 	saved_path_edits = document.path_edits.duplicate(true)
-	saved_object_edits = document.object_edits.duplicate()
+	saved_object_edits = document.object_edits.duplicate(true)
+	saved_object_additions = document.object_additions.duplicate(true)
+	saved_object_removals = document.object_removals.duplicate()
 	saved_asset_profile = document.asset_profile
 	saved_colors = document.package.terrain.color_edits.duplicate()
 	saved_tiles = document.package.terrain.tile_edits.duplicate()
@@ -513,6 +551,7 @@ func open_map(path: String) -> bool:
 		document.materials_changed.disconnect(mark_material_refresh)
 		document.paths_changed.disconnect(refresh_path_list)
 		document.object_moved.disconnect(object_position_changed)
+		document.objects_changed.disconnect(objects_topology_changed)
 	document = next
 	loaded_objects = null
 	objects_button.set_pressed_no_signal(false)
@@ -534,6 +573,7 @@ func open_map(path: String) -> bool:
 	document.materials_changed.connect(mark_material_refresh)
 	document.paths_changed.connect(refresh_path_list)
 	document.object_moved.connect(object_position_changed)
+	document.objects_changed.connect(objects_topology_changed)
 	top.bind(document)
 	scene_view.bind(document)
 	object_tool.bind(document, top, scene_view)
@@ -774,8 +814,8 @@ func poll_objects() -> void:
 	asset_worker = null
 	if document == active_object_scan and result is Dictionary and asset_kind == "objects":
 		var count := scene_view.object_models.display(result)
-		for index: int in document.object_edits:
-			scene_view.object_models.move_instance(index, document.object_position(index))
+		for index in document.object_count():
+			scene_view.object_models.set_instance_transform(index, document.object_transform(index))
 		loaded_objects = document
 		scene_view.object_models.show()
 		top.object_marks = result["instances"]
@@ -783,7 +823,7 @@ func poll_objects() -> void:
 		object_tool.update_anchors()
 		top.queue_redraw()
 		report("Native models %d / %d · %d verified pool definitions · %d unresolved ODFs" % [
-			count, document.package.objects.size(), result["pools"], result["missing"].size()])
+			count, document.object_count(), result["pools"], result["missing"].size()])
 	elif document == active_object_scan and result is Dictionary and asset_kind == "textures":
 		if not result.is_empty():
 			scene_view.tile_material = tile_worker.material(result, document.package.terrain)
@@ -1123,6 +1163,16 @@ func object_position_changed(index: int) -> void:
 	object_tool.position_changed(index)
 	if object_tool.active and object_tool.selected == index:
 		report(object_tool.description())
+	sync_actions()
+
+
+func objects_topology_changed() -> void:
+	if loaded_objects == document:
+		scene_view.object_models.rebuild(document)
+		top.queue_redraw()
+	if object_tool.active and object_tool.selected >= document.object_count():
+		object_tool.selected = -1
+		object_tool.set_active(true)
 	sync_actions()
 
 

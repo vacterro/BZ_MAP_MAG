@@ -177,6 +177,19 @@ func point_records(points: PackedVector2Array) -> PackedByteArray:
 	return token_with_count(10, points.size(), payload)
 
 
+func shift(delta: int) -> void:
+	if delta == 0:
+		return
+	table_start += delta
+	table_end += delta
+	for record in paths:
+		record["start"] += delta
+		record["name_start"] += delta
+		record["point_start"] += delta
+		record["type_start"] += delta
+		record["end"] += delta
+
+
 func pointer_counts(source: PackedByteArray) -> Dictionary:
 	var ids := {}
 	var offset := source.find(8, 64)

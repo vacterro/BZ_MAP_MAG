@@ -20,6 +20,8 @@ var granularity := 0.1
 var metadata: Dictionary = {}
 var paths: Array[Dictionary] = []
 var objects: Array[Dictionary] = []
+var object_count_offset := -1
+var object_insert_offset := -1
 var path_codec := BznPaths.new()
 
 
@@ -59,6 +61,8 @@ func open(path: String) -> bool:
 		var object_reader := BznObjects.new()
 		if object_reader.read(bzn_bytes, bzn_version, path_codec.table_start):
 			objects = object_reader.objects
+			object_count_offset = object_reader.count_offset
+			object_insert_offset = object_reader.insert_offset
 	for role in ["trn", "inf"]:
 		metadata[role] = read_settings(FileAccess.get_file_as_string(folder.path_join(roles[role])))
 	var info: Dictionary = metadata["inf"].get("description", {})

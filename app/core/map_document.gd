@@ -13,7 +13,8 @@ enum MirrorDirection { MIN_X_TO_MAX_X, MAX_X_TO_MIN_X, MIN_Z_TO_MAX_Z, MAX_Z_TO_
 signal terrain_changed(region: Rect2i)
 signal materials_changed(region: Rect2i, layer: int)
 signal paths_changed
-signal object_moved(index: int)
+signal object_moved(view_index: int)
+signal objects_changed
 
 var package: Package
 var base_heights := PackedFloat32Array()
@@ -22,6 +23,9 @@ var path_edits := {}
 var native_path_ids := {}
 var asset_profile := ""
 var object_edits := {}
+var object_additions: Array = []
+var object_removals := {}
+var next_object_id := 1
 var undo_stack: Array[Dictionary] = []
 var redo_stack: Array[Dictionary] = []
 var stroke := {}
@@ -51,6 +55,10 @@ func open(path: String) -> bool:
 			return fail("Project source must be an absolute BZN path.")
 	native_path_ids.clear()
 	asset_profile = ""
+	object_edits = {}
+	object_additions = []
+	object_removals = {}
+	next_object_id = 1
 	package = Package.new()
 	if not package.open(source):
 		return fail(package.error)
@@ -78,6 +86,10 @@ func open(path: String) -> bool:
 		if not read_path_edits(saved.get("pathEdits", {})):
 			return false
 		if not read_object_edits(saved.get("objectEdits", {})):
+			return false
+		if not read_object_removals(saved.get("objectRemovals", [])):
+			return false
+		if not read_object_additions(saved.get("objectInserts", [])):
 			return false
 	if not package.check_sources():
 		return fail(package.error)
@@ -290,7 +302,26 @@ func apply_history(change: Dictionary, direction: String) -> void:
 	if change.has("path"):
 		set_path_edit(change["path"], change[direction])
 	elif change.has("object"):
-		set_object_position(change["object"], change[direction])
+		apply_object_transform(change["object"], change[direction])
+	elif change.has("object_add") or change.has("object_add_removed"):
+		var addition: Dictionary = change["object_add"] if change.has("object_add") else change["object_add_removed"]
+		var restore := (change.has("object_add") and direction == "after") or (change.has("object_add_removed") and direction == "before")
+		if restore:
+			while object_additions.size() < change["slot"]:
+				object_additions.append({})
+			object_additions.insert(mini(int(change["slot"]), object_additions.size()), addition)
+		else:
+			for slot in range(object_additions.size() - 1, -1, -1):
+				if object_additions[slot] and int(object_additions[slot].get("id", -1)) == int(addition["id"]):
+					object_additions.remove_at(slot)
+		objects_changed.emit()
+	elif change.has("object_remove"):
+		var base := int(change["object_remove"])
+		if direction == "after":
+			object_removals[base] = true
+		else:
+			object_removals.erase(base)
+		objects_changed.emit()
 	elif change.has("material"):
 		apply_materials(change["material"], change[direction])
 	else:
@@ -509,34 +540,391 @@ func read_object_edits(saved: Variant) -> bool:
 	for key: String in saved:
 		var index := key.to_int()
 		var fields: Variant = saved[key]
-		if str(index) != key or index < 0 or index >= package.objects.size() or not fields is Array or fields.size() != 3:
+		if str(index) != key or index < 0 or index >= package.objects.size():
 			return fail("Invalid project object reference.")
-		for value in fields:
-			if not (value is float or value is int) or not is_finite(value):
-				return fail("Invalid saved object coordinate.")
-		var position := Vector3(fields[0], fields[1], fields[2])
-		if not valid_object_position(position):
-			return fail("Saved object position is outside the supported map.")
-		set_object_position(index, position)
+		if fields is Array and fields.size() == 3:
+			for value in fields:
+				if not (value is float or value is int) or not is_finite(value):
+					return fail("Invalid saved object coordinate.")
+			var legacy := Vector3(fields[0], fields[1], fields[2])
+			if not valid_object_position(legacy):
+				return fail("Saved object position is outside the supported map.")
+			set_object_edit(index, Transform3D(package.objects[index]["transform"].basis, legacy))
+			continue
+		if not fields is Dictionary or not valid_object_edit(index, fields):
+			return fail("Invalid saved object edit.")
+		set_object_edit(index, Transform3D(read_saved_basis(fields["basis"]), Vector3(fields["position"][0], fields["position"][1], fields["position"][2])))
 	return true
 
 
-func object_position(index: int) -> Vector3:
-	var original: Transform3D = package.objects[index]["transform"]
-	return object_edits.get(index, original.origin)
+func read_object_removals(saved: Variant) -> bool:
+	if saved == null:
+		saved = []
+	if not saved is Array or saved.size() > package.objects.size() or object_removals.size() + saved.size() > package.objects.size():
+		return fail("Invalid project object removals.")
+	for value: Variant in saved:
+		if not valid_native_integer(value):
+			return fail("Invalid project object removal reference.")
+		var index := int(value)
+		if index < 0 or index >= package.objects.size() or object_removals.has(index):
+			return fail("Invalid project object removal reference.")
+		remove_base_object(index, false)
+	return true
 
 
-func move_object(index: int, position: Vector3) -> bool:
+func read_object_additions(saved: Variant) -> bool:
+	if not saved is Array or saved.size() > 8192 - package.objects.size():
+		return fail("Invalid project object insertions.")
+	for item: Variant in saved:
+		if not item is Dictionary or not valid_object_insertion(item):
+			return fail("Invalid project object insertion.")
+		var addition: Dictionary = item.duplicate()
+		addition["transform"] = Transform3D(read_saved_basis(item["basis"]), Vector3(item["position"][0], item["position"][1], item["position"][2]))
+		next_object_id = maxi(next_object_id, int(item["id"]) + 1)
+		object_additions.append(addition)
+	return true
+
+
+func valid_object_edit(index: int, fields: Dictionary) -> bool:
+	var position: Variant = fields.get("position")
+	if not position is Array or position.size() != 3:
+		return false
+	for value in position:
+		if not (value is float or value is int) or not is_finite(value):
+			return false
+	if not valid_object_position(Vector3(position[0], position[1], position[2])):
+		return false
+	return valid_basis_array(fields.get("basis", []))
+
+
+func valid_object_insertion(item: Dictionary) -> bool:
+	var template: Variant = item.get("template")
+	if not valid_native_integer(template):
+		return false
+	var index := int(template)
+	if index < 0 or index >= package.objects.size() or object_removals.has(index):
+		return false
+	if not valid_native_integer(item.get("sequence")) or not valid_native_integer(item.get("id")):
+		return false
+	if sequence_taken(int(item["sequence"])):
+		return false
+	var label: Variant = item.get("label", "")
+	if not label is String or label.length() > 128:
+		return false
+	return valid_object_edit(index, item)
+
+
+func valid_basis_array(values: Variant) -> bool:
+	if not values is Array or values.size() not in [0, 9]:
+		return false
+	for value in values:
+		if not (value is float or value is int) or not is_finite(value):
+			return false
+	return true
+
+
+func read_saved_basis(values: Variant) -> Basis:
+	if values is Array and values.size() == 9:
+		return Basis(Vector3(values[0], values[1], values[2]), Vector3(values[3], values[4], values[5]), Vector3(values[6], values[7], values[8]))
+	return Basis()
+
+
+func object_entries() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for index in package.objects.size():
+		if not object_removals.has(index):
+			result.append({"base": index})
+	for slot in object_additions.size():
+		result.append({"added": slot})
+	return result
+
+
+func object_count() -> int:
+	return package.objects.size() - object_removals.size() + object_additions.size()
+
+
+func object_entry(view: int) -> Dictionary:
+	if view < 0:
+		return {}
+	var entries := object_entries()
+	return entries[view] if view < entries.size() else {}
+
+
+func object_is_added(view: int) -> bool:
+	return view >= 0 and object_entry(view).has("added")
+
+
+func object_addition(view: int) -> Dictionary:
+	var entry := object_entry(view)
+	var slot: int = entry.get("added", -1)
+	return object_additions[slot] if slot >= 0 and slot < object_additions.size() else {}
+
+
+func object_template(view: int) -> Dictionary:
+	var entry := object_entry(view)
+	if entry.has("added"):
+		var template: int = int(object_addition(view)["template"])
+		return package.objects[template] if template >= 0 and template < package.objects.size() else {}
+	if entry.is_empty():
+		return {}
+	return package.objects[int(entry["base"])]
+
+
+func object_actual_index(view: int) -> int:
+	var entry := object_entry(view)
+	return int(entry["base"]) if not entry.is_empty() else -1
+
+
+func object_position(view: int) -> Vector3:
+	if object_is_added(view):
+		return object_addition(view)["transform"].origin
+	var base := object_actual_index(view)
+	if base < 0:
+		return Vector3.INF
+	var edit: Dictionary = object_edits.get(base, {})
+	if edit.is_empty():
+		return package.objects[base]["transform"].origin
+	return Transform3D(edit["basis"], edit["position"]).origin
+
+
+func object_transform(view: int) -> Transform3D:
+	if object_is_added(view):
+		return object_addition(view)["transform"]
+	var base := object_actual_index(view)
+	if base < 0:
+		return Transform3D()
+	var edit: Dictionary = object_edits.get(base, {})
+	if edit.is_empty():
+		return package.objects[base]["transform"]
+	return Transform3D(edit["basis"], edit["position"])
+
+
+func object_odf(view: int) -> String:
+	return String(object_template(view).get("odf", ""))
+
+
+func object_label(view: int) -> String:
+	if object_is_added(view):
+		return String(object_addition(view).get("label", ""))
+	return String(object_template(view).get("label", ""))
+
+
+func object_team(view: int) -> int:
+	return int(object_template(view).get("team", 0))
+
+
+func object_sequence(view: int) -> int:
+	if object_is_added(view):
+		return int(object_addition(view).get("sequence", 0))
+	return int(object_template(view).get("sequence", 0))
+
+
+func object_pool_reference(view: int) -> int:
+	# The base object that supplies the mesh, team and pool for this view.
+	var entry := object_entry(view)
+	if entry.is_empty():
+		return -1
+	if entry.has("added"):
+		return int(object_addition(view).get("template", -1))
+	return int(entry["base"])
+
+
+func has_object_file_edits() -> bool:
+	return not object_edits.is_empty() or not object_removals.is_empty() or not object_additions.is_empty()
+
+
+func move_object(view: int, position: Vector3) -> bool:
 	if stroke_active or has_preview():
 		return fail("Finish the current terrain edit first.")
-	if index < 0 or index >= package.objects.size() or not valid_object_position(position):
+	if not valid_view_object(view) or not valid_object_position(position):
 		return fail("Choose a finite object position on the terrain.")
-	var before := object_position(index)
-	if before == position:
+	var before := object_transform(view)
+	var after := Transform3D(before.basis, position)
+	if before == after:
 		return true
-	push_history({"object": index, "before": before, "after": position})
-	set_object_position(index, position)
+	push_history({"object": object_history_key(view), "before": before, "after": after})
+	set_object_transform(view, after)
 	return true
+
+
+func rotate_object(view: int, radians: float) -> bool:
+	if stroke_active or has_preview() or not valid_view_object(view) or not is_finite(radians):
+		return fail("Select an object and finish other terrain edits first.")
+	var before := object_transform(view)
+	if not before.basis.is_finite():
+		return fail("The object basis is not finite.")
+	var rotated := before.basis.rotated(Vector3.UP, radians)
+	var after := Transform3D(rotated, before.origin)
+	if before == after:
+		return true
+	push_history({"object": object_history_key(view), "before": before, "after": after})
+	set_object_transform(view, after)
+	return true
+
+
+func sequence_taken(sequence: int) -> bool:
+	for entry in package.objects:
+		if int(entry["sequence"]) == sequence:
+			return true
+	for addition in object_additions:
+		if int(addition["sequence"]) == sequence:
+			return true
+	return false
+
+
+func fresh_sequence(template: Dictionary) -> int:
+	var mask := int(template["sequence"]) & 0x800000
+	var low := int(template["sequence"]) & 0x7fffff
+	for entry in package.objects:
+		low = maxi(low, int(entry["sequence"]) & 0x7fffff)
+	for addition in object_additions:
+		low = maxi(low, int(addition["sequence"]) & 0x7fffff)
+	for attempt in 65535:
+		var candidate := (low + 1 + attempt) & 0x7fffff
+		if not sequence_taken(candidate | mask):
+			return candidate | mask
+	return -1
+
+
+func copy_label(template: Dictionary) -> String:
+	var label: String = template.get("label", "")
+	if label == "":
+		return ""
+	for suffix in range(2, 999):
+		var candidate := label + "_" + str(suffix)
+		if candidate.length() > 128:
+			candidate = label.substr(0, maxf(1, 128 - str(suffix).length() - 1)) + "_" + str(suffix)
+		if not label_taken(candidate):
+			return candidate
+	return label
+
+
+func label_taken(label: String) -> bool:
+	for entry in package.objects:
+		if String(entry["label"]) == label:
+			return true
+	for addition in object_additions:
+		if String(addition["label"]) == label:
+			return true
+	return false
+
+
+func duplicate_object(view: int, position: Vector3) -> int:
+	if stroke_active or has_preview():
+		fail("Finish the current terrain edit first.")
+		return -1
+	if not valid_view_object(view) or not valid_object_position(position):
+		fail("Choose a finite object position on the terrain.")
+		return -1
+	var template := object_template(view)
+	var sequence := fresh_sequence(template)
+	if sequence < 0:
+		fail("No unused native object sequence is available.")
+		return -1
+	var entry := object_entry(view)
+	var template_base := int(entry["template"] if entry.has("added") else entry["base"])
+	var addition := {"id": next_object_id, "template": template_base,
+		"label": copy_label(template), "sequence": sequence, "position": [0.0, 0.0, 0.0], "basis": []}
+	var transform := object_transform(view)
+	addition["transform"] = Transform3D(transform.basis, position)
+	push_history({"object_add": addition, "slot": object_additions.size()})
+	object_additions.append(addition)
+	next_object_id += 1
+	objects_changed.emit()
+	return object_count() - 1
+
+
+func remove_object(view: int) -> bool:
+	if stroke_active or has_preview() or not valid_view_object(view):
+		return fail("Select an object and finish the current terrain edit first.")
+	var entry := object_entry(view)
+	if entry.has("added"):
+		var slot: int = int(entry["added"])
+		var addition: Dictionary = object_additions[slot]
+		push_history({"object_add_removed": addition, "slot": slot})
+		object_additions.remove_at(slot)
+		objects_changed.emit()
+		return true
+	var base := int(entry["base"])
+	push_history({"object_remove": base})
+	remove_base_object(base, true)
+	return true
+
+
+func remove_base_object(base: int, announce: bool) -> void:
+	object_removals[base] = true
+	if announce:
+		objects_changed.emit()
+
+
+func valid_view_object(view: int) -> bool:
+	return view >= 0 and view < object_count()
+
+
+func object_history_key(view: int) -> Variant:
+	if object_is_added(view):
+		return int(object_addition(view)["id"])
+	return object_actual_index(view)
+
+
+func set_object_transform(view: int, transform: Transform3D) -> void:
+	if object_is_added(view):
+		var addition := object_addition(view)
+		addition["transform"] = transform
+		object_moved.emit(view)
+		return
+	var base := object_actual_index(view)
+	if package.objects[base]["transform"] == transform:
+		object_edits.erase(base)
+	else:
+		object_edits[base] = {"basis": transform.basis, "position": transform.origin}
+	object_moved.emit(view)
+
+
+func set_object_edit(base: int, transform: Transform3D) -> void:
+	if package.objects[base]["transform"] == transform:
+		object_edits.erase(base)
+	else:
+		object_edits[base] = {"basis": transform.basis, "position": transform.origin}
+	object_moved.emit(base)
+
+
+func object_export_edits() -> Dictionary:
+	var result := {}
+	for base: int in object_edits:
+		result[base] = Transform3D(object_edits[base]["basis"], object_edits[base]["position"])
+	return result
+
+
+func apply_object_transform(key: Variant, transform: Transform3D) -> void:
+	if key is int and key >= 0 and key < package.objects.size():
+		if package.objects[key]["transform"] == transform:
+			object_edits.erase(key)
+		else:
+			object_edits[key] = {"basis": transform.basis, "position": transform.origin}
+		object_moved.emit(view_for_base(int(key)))
+		return
+	for addition in object_additions:
+		if int(addition["id"]) == int(key):
+			addition["transform"] = transform
+			object_moved.emit(find_object_view(addition))
+			return
+
+
+func view_for_base(base: int) -> int:
+	var entries := object_entries()
+	for view in entries.size():
+		if int(entries[view].get("base", -1)) == base:
+			return view
+	return -1
+
+
+func find_object_view(addition: Dictionary) -> int:
+	var entries := object_entries()
+	for view in entries.size():
+		if entries[view].has("added") and object_additions[int(entries[view]["added"])] == addition:
+			return view
+	return -1
 
 
 func valid_object_position(position: Vector3) -> bool:
@@ -544,15 +932,6 @@ func valid_object_position(position: Vector3) -> bool:
 	var minimum := Vector2(terrain.origin) * terrain.SPACING
 	var maximum := minimum + Vector2(terrain.dimensions - Vector2i.ONE) * terrain.SPACING
 	return position.is_finite() and absf(position.y) <= MAX_EDITOR_ABS_HEIGHT and position.x >= minimum.x and position.x <= maximum.x and position.z >= minimum.y and position.z <= maximum.y
-
-
-func set_object_position(index: int, position: Vector3) -> void:
-	var original: Transform3D = package.objects[index]["transform"]
-	if original.origin == position:
-		object_edits.erase(index)
-	else:
-		object_edits[index] = position
-	object_moved.emit(index)
 
 
 func preview_slope_plane(center: Vector2i, radius_m: float, height: float, grade: Vector2) -> bool:
