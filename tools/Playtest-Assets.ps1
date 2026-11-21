@@ -49,14 +49,74 @@ function Get-VrvAssetFolders([string] $Game, [string] $VrvSource) {
     }
 }
 
-function Get-PlaytestAssetConfiguration([string] $Game, [string] $Mission, [string] $AssetProfile, [string] $VrvSource, [string[]] $AssetRoots = @()) {
-    $converterRoot = if ($VrvSource) { (Resolve-Path -LiteralPath $VrvSource).Path } else { '' }
+function Get-WorkshopAssetFolders([string] $Game, [string] $ModProfile) {
+    if (-not $ModProfile -or $ModProfile -ieq 'stock') { return }
+    $wsRoot = [IO.Path]::GetFullPath((Join-Path $Game '../../workshop/content/624970'))
+    if (-not (Test-Path -LiteralPath $wsRoot -PathType Container)) { return }
+    $targetId = switch ($ModProfile.ToLowerInvariant()) {
+        'vsr' { '1325933293' }
+        'vrv' { '3820486276' }
+        default {
+            if ($ModProfile -match '^(?:custom:ws-)?(\d+)$') { $Matches[1] } else { '' }
+        }
+    }
+    if (-not $targetId) { return }
+    $itemDir = Join-Path $wsRoot $targetId
+    if (-not (Test-Path -LiteralPath $itemDir -PathType Container)) { return }
+    $seen = @{}
+    $queue = [System.Collections.Generic.List[string]]::new()
+    $queue.Add((Resolve-Path -LiteralPath $itemDir).Path)
+    $seen[$queue[0]] = $true
+    if ($ModProfile -ieq 'vrv') {
+        $vsrDir = Join-Path $wsRoot '1325933293'
+        if (Test-Path -LiteralPath $vsrDir -PathType Container) {
+            $r = (Resolve-Path -LiteralPath $vsrDir).Path
+            if (-not $seen.ContainsKey($r)) { $seen[$r] = $true; $queue.Add($r) }
+        }
+    }
+    $ini = Get-ChildItem -LiteralPath $itemDir -Filter '*.ini' -File | Select-Object -First 1
+    if ($ini) {
+        $text = [IO.File]::ReadAllText($ini.FullName)
+        $m = [regex]::Match($text, '(?im)^\s*assetDependencies\s*=\s*"?([^"\r\n]+)')
+        if ($m.Success) {
+            foreach ($tok in ($m.Groups[1].Value -split ',')) {
+                $depId = $tok.Trim()
+                if ($depId -match '^\d+$') {
+                    $depDir = Join-Path $wsRoot $depId
+                    if (Test-Path -LiteralPath $depDir -PathType Container) {
+                        $r = (Resolve-Path -LiteralPath $depDir).Path
+                        if (-not $seen.ContainsKey($r)) { $seen[$r] = $true; $queue.Add($r) }
+                    }
+                }
+            }
+        }
+    }
+    return @($queue.ToArray())
+}
+
+function Get-PlaytestAssetConfiguration([string] $Game, [string] $Mission, [string] $AssetProfile, [string] $VrvSource, [string[]] $AssetRoots = @(), [string] $ModProfile = '', [string] $Converter = '') {
+    $converterSource = if ($Converter) { $Converter } elseif ($VrvSource) { $VrvSource } else { '' }
+    $converterRoot = if ($converterSource) { (Resolve-Path -LiteralPath $converterSource).Path } else { '' }
     $linked = @(Get-LinkedAssetFolders $AssetProfile)
     $explicit = @(Get-ExplicitAssetRoots $AssetRoots)
-    $vrv = @(Get-VrvAssetFolders $Game $VrvSource)
+    # Strict Stock isolation: when -ModProfile 'stock' is selected, NEVER mount
+    # VRV or VSR folders even if a format converter is configured.
+    $modFolders = @()
+    $vrv = @()
+    if ($ModProfile) {
+        if ($ModProfile -ine 'stock') {
+            $modFolders = @(Get-WorkshopAssetFolders $Game $ModProfile)
+            if ($ModProfile -ieq 'vrv' -and $modFolders.Count -eq 0 -and $VrvSource) {
+                $vrv = @(Get-VrvAssetFolders $Game $VrvSource)
+            }
+        }
+    } else {
+        # Legacy callers without -ModProfile retain backward-compatible -VrvSource asset behavior.
+        $vrv = @(Get-VrvAssetFolders $Game $VrvSource)
+    }
     $combined = [System.Collections.Generic.List[string]]::new()
     $seen = @{}
-    foreach ($folder in ($linked + $explicit + $vrv)) {
+    foreach ($folder in ($linked + $explicit + $modFolders + $vrv)) {
         if ($folder -and -not $seen.ContainsKey($folder)) {
             $seen[$folder] = $true
             $combined.Add($folder)
@@ -70,9 +130,11 @@ function Get-PlaytestAssetConfiguration([string] $Game, [string] $Mission, [stri
         }
     }
     return [pscustomobject]@{
+        ModProfile = $ModProfile
         ConverterRoot = $converterRoot
         LinkedFolders = $linked
         ExplicitAssetRoots = $explicit
+        ModFolders = $modFolders
         VrvFolders = $vrv
         AssetRoots = @($combined.ToArray())
         NativeRoots = $nativeRoots
@@ -320,12 +382,14 @@ function Resolve-PlaytestOdfDependencies([string[]] $Odfs, [psobject] $Config, [
     }
 }
 
-function Get-PlaytestAssetPlan([string] $Game, [string] $Mission, [string] $AssetProfile, [string] $VrvSource, [bool] $SkipScripts, [string[]] $AssetRoots = @(), [string[]] $Odfs = @(), [string] $CacheRoot = '') {
-    $config = Get-PlaytestAssetConfiguration $Game $Mission $AssetProfile $VrvSource $AssetRoots
+function Get-PlaytestAssetPlan([string] $Game, [string] $Mission, [string] $AssetProfile, [string] $VrvSource, [bool] $SkipScripts, [string[]] $AssetRoots = @(), [string[]] $Odfs = @(), [string] $CacheRoot = '', [string] $ModProfile = '', [string] $Converter = '') {
+    $config = Get-PlaytestAssetConfiguration $Game $Mission $AssetProfile $VrvSource $AssetRoots $ModProfile $Converter
     $plan = [pscustomobject]@{
+        ModProfile = $config.ModProfile
         ConverterRoot = $config.ConverterRoot
         LinkedFolders = $config.LinkedFolders
         ExplicitAssetRoots = $config.ExplicitAssetRoots
+        ModFolders = $config.ModFolders
         VrvFolders = $config.VrvFolders
         AssetRoots = $config.AssetRoots
         ScriptCheck = 'disabled'

@@ -7,6 +7,8 @@ const Terrain := preload("res://formats/terrain_v5.gd")
 const Water := preload("res://formats/water_v5.gd")
 const SlopeShapes := preload("res://core/slope_shapes.gd")
 const VrvShapes := preload("res://core/vrv_shapes.gd")
+const ModRegistry := preload("res://core/mod_registry.gd")
+const MissionProfiles := preload("res://core/mission_profiles.gd")
 const HISTORY_LIMIT := 64
 const MAX_EDITOR_ABS_HEIGHT := 100000.0
 enum Brush { OFFSET, SMOOTH, FLATTEN, SPRAY }
@@ -19,6 +21,7 @@ signal paths_changed
 signal object_moved(view_index: int)
 signal objects_changed
 signal water_changed
+signal profile_changed
 
 const WATER_LAYERS := 8
 const WATER_BLOCK := 16
@@ -29,6 +32,11 @@ var edits := {}
 var path_edits := {}
 var native_path_ids := {}
 var asset_profile := ""
+var engine_profile := "bzcc-2.0.185"
+var mod_profile := "stock"
+var mission_profile := "blank"
+var profile_explicit := false
+var detected_profile_info: Dictionary = {}
 var object_edits := {}
 var object_label_edits := {}
 var object_additions: Array = []
@@ -68,6 +76,11 @@ func open(path: String) -> bool:
 			return fail("Project source must be an absolute BZN path.")
 	native_path_ids.clear()
 	asset_profile = ""
+	engine_profile = "bzcc-2.0.185"
+	mod_profile = "stock"
+	mission_profile = "blank"
+	profile_explicit = false
+	detected_profile_info = {}
 	object_edits = {}
 	object_additions = []
 	object_removals = {}
@@ -83,13 +96,23 @@ func open(path: String) -> bool:
 		return fail(package.error)
 	var terrain := package.terrain
 	base_heights = terrain.heights.duplicate()
+	detected_profile_info = ModRegistry.detect_map_profiles(package)
+	mod_profile = String(detected_profile_info.get("recommendedMod", "stock"))
+	mission_profile = String(detected_profile_info.get("recommendedMission", "blank"))
+	profile_explicit = false
 	if not saved.is_empty():
 		if saved["files"] != package.files:
 			return fail("Project source revisions differ from the saved project.")
 		var saved_profile: Variant = saved.get("assetProfile", "")
+		var deps_block: Variant = saved.get("dependencies", null)
+		if deps_block is Dictionary and saved_profile is String and String(saved_profile).is_empty():
+			saved_profile = deps_block.get("assetProfile", "")
 		if not valid_asset_profile(saved_profile):
 			return fail("The project asset profile must be an absolute JSON path.")
 		asset_profile = saved_profile
+		if saved.has("target"):
+			if not read_target_profile(saved["target"]):
+				return false
 		var graph := Graph.new()
 		if not saved.get("layers", layers) is Array or not graph.validate_stack(saved.get("layers", layers)):
 			return fail("Invalid node stack. " + graph.error)
@@ -118,6 +141,38 @@ func open(path: String) -> bool:
 		return fail(package.error)
 	edit_revision += 1
 	return true
+
+
+const SOUND_POINT_ODF := "vrv_sndpoint"
+
+
+static func is_sound_point_odf(odf: String) -> bool:
+	var stem := odf.strip_edges().to_lower()
+	if stem.ends_with(".odf"):
+		stem = stem.substr(0, stem.length() - 4)
+	return stem == SOUND_POINT_ODF
+
+
+static func valid_object_label(label: String) -> bool:
+	if label.length() > 128:
+		return false
+	for i in label.length():
+		var code := label.unicode_at(i)
+		if code < 32 or code > 126:
+			return false
+	return true
+
+
+func object_is_sound_point(view: int) -> bool:
+	return valid_view_object(view) and is_sound_point_odf(object_odf(view))
+
+
+func sound_point_views() -> Array[int]:
+	var result: Array[int] = []
+	for view in object_count():
+		if object_is_sound_point(view):
+			result.append(view)
+	return result
 
 
 static func sound_point(label: String) -> Dictionary:
@@ -171,6 +226,69 @@ static func format_sound_point(settings: Dictionary) -> Dictionary:
 
 static func valid_asset_profile(value: Variant) -> bool:
 	return value is String and (value.is_empty() or (value.is_absolute_path() and value.get_extension().to_lower() == "json"))
+
+
+static func valid_mod_profile_id(value: Variant) -> bool:
+	if not (value is String):
+		return false
+	var id := String(value).strip_edges()
+	if id.is_empty():
+		return false
+	var re := RegEx.new()
+	re.compile("^[a-z0-9][a-z0-9._:-]{0,63}$")
+	return re.search(id) != null
+
+
+static func valid_mission_profile_id(value: Variant) -> bool:
+	return value is String and String(value).strip_edges().to_lower() in MissionProfiles.MISSION_MODES
+
+
+static func valid_engine_profile_id(value: Variant) -> bool:
+	return value is String and ModRegistry.ENGINE_PROFILES.has(String(value).strip_edges())
+
+
+func read_target_profile(saved_target: Variant) -> bool:
+	if not (saved_target is Dictionary):
+		return fail("Invalid project target profile metadata.")
+	var eng: Variant = saved_target.get("engineProfile", "bzcc-2.0.185")
+	var mod: Variant = saved_target.get("modProfile", "stock")
+	var mis: Variant = saved_target.get("missionProfile", "blank")
+	if not valid_engine_profile_id(eng) or not valid_mod_profile_id(mod) or not valid_mission_profile_id(mis):
+		return fail("Invalid project target profile identifiers.")
+	engine_profile = String(eng).strip_edges()
+	mod_profile = String(mod).strip_edges().to_lower()
+	mission_profile = String(mis).strip_edges().to_lower()
+	profile_explicit = bool(saved_target.get("explicit", true))
+	return true
+
+
+func set_target_profile(next_mod: String, next_mission: String, next_engine: String = "") -> bool:
+	if stroke_active or has_preview():
+		return fail("Finish the current terrain edit before switching target profiles.")
+	var mod_clean := next_mod.strip_edges().to_lower()
+	var mis_clean := next_mission.strip_edges().to_lower()
+	var eng_clean := next_engine.strip_edges() if not next_engine.strip_edges().is_empty() else engine_profile
+	if not valid_mod_profile_id(mod_clean):
+		return fail("Invalid target mod profile identifier.")
+	if not valid_mission_profile_id(mis_clean):
+		return fail("Invalid target mission profile identifier.")
+	if not valid_engine_profile_id(eng_clean):
+		return fail("Invalid target engine profile identifier.")
+	var before := {"engine": engine_profile, "mod": mod_profile, "mission": mission_profile, "explicit": profile_explicit}
+	var after := {"engine": eng_clean, "mod": mod_clean, "mission": mis_clean, "explicit": true}
+	if before == after:
+		return true
+	push_history({"target_profile": true, "before": before, "after": after})
+	_apply_target_profile(after)
+	return true
+
+
+func _apply_target_profile(state: Dictionary) -> void:
+	engine_profile = String(state["engine"])
+	mod_profile = String(state["mod"])
+	mission_profile = String(state["mission"])
+	profile_explicit = bool(state["explicit"])
+	profile_changed.emit()
 
 
 func begin_stroke(layer := Terrain.Layer.HEIGHT) -> void:
@@ -414,6 +532,8 @@ func apply_history(change: Dictionary, direction: String) -> void:
 	elif change.has("water_height"):
 		set_water_height_internal(int(change["water_height"]), float(change[direction]))
 		water_changed.emit()
+	elif change.has("target_profile"):
+		_apply_target_profile(change[direction])
 	else:
 		var materials := {}
 		for layer: int in change.get("materials", {}):
@@ -604,7 +724,10 @@ func create_paths_batch(specs: Array[Dictionary]) -> Array[int]:
 		var label := String(spec.get("name", ""))
 		var points: PackedVector2Array = spec.get("points", PackedVector2Array())
 		var kind := int(spec.get("type", 0))
-		if not valid_path_fields(label, points, kind, {}) or taken_names.has(label.to_lower()):
+		if not valid_path_fields(label, points, kind, {}):
+			return []
+		if taken_names.has(label.to_lower()):
+			fail("Choose a unique path name (duplicate: %s)." % label)
 			return []
 		taken_names[label.to_lower()] = true
 		while path_edits.has(next_index):
@@ -625,28 +748,102 @@ func create_paths_batch(specs: Array[Dictionary]) -> Array[int]:
 	return created
 
 
+func path_is_mission_referenced(index: int) -> bool:
+	var base := source_path_at(index)
+	if base.is_empty():
+		return false
+	var label: String = String(base["name"]).to_lower()
+	var spawn := RegEx.new()
+	spawn.compile("^(player|enemy)_[0-9]+$")
+	if label == "edge_path" or spawn.search(label) != null:
+		return true
+	if package.path_codec.has_name_reference(path_source_bytes(), label):
+		return true
+	for member: String in package.files:
+		if member.get_extension().to_lower() in ["lua", "aip", "trn", "inf"]:
+			var content := FileAccess.get_file_as_string(package.source_path.get_base_dir().path_join(member))
+			if content.to_lower().contains(label):
+				return true
+	return false
+
+
 func edit_paths_batch(changes: Array[Dictionary]) -> bool:
 	if stroke_active or has_preview():
 		return fail("Finish the current terrain edit first.")
-	var batch: Array[Dictionary] = []
+	if changes.is_empty():
+		return true
+	var active_indices := path_indices()
+	if active_indices.size() > PathCodec.MAX_PATHS:
+		return fail("The path table exceeds the maximum supported path count.")
+	var staged := {}
+	for slot: int in active_indices:
+		var current := path_at(slot)
+		staged[slot] = {
+			"id": int(current["id"]),
+			"name": String(current["name"]),
+			"points": (current["points"] as PackedVector2Array).duplicate(),
+			"type": int(current["type"]),
+		}
+	var seen_indices := {}
+	var renamed_sources: Array[int] = []
+	var candidate_batch: Array[Dictionary] = []
 	for item: Dictionary in changes:
+		if not item.has("index") or not item.has("name") or not item.has("points") or not item.has("type"):
+			return fail("Invalid path batch item.")
+		if not (item["index"] is int) or not (item["points"] is PackedVector2Array):
+			return fail("Invalid path batch item fields.")
 		var index := int(item["index"])
-		var before := path_at(index)
-		if before.is_empty():
+		if seen_indices.has(index):
+			return fail("Batch contains duplicate path index %d." % index)
+		seen_indices[index] = true
+		if not staged.has(index):
 			return fail("Select a supported native path.")
+		var before: Dictionary = staged[index]
 		var label := String(item["name"])
 		var points: PackedVector2Array = item["points"]
 		var kind := int(item["type"])
 		var base := source_path_at(index)
-		if not valid_path_fields(label, points, kind, base) or not unique_path_name(index, label):
+		if not valid_path_fields(label, points, kind, base):
 			return false
-		var after := {"id": before["id"], "name": label, "points": points.duplicate(), "type": kind}
+		for pt in points:
+			if absf(pt.x) > MAX_EDITOR_ABS_HEIGHT or absf(pt.y) > MAX_EDITOR_ABS_HEIGHT:
+				return fail("Path coordinates exceed supported map bounds.")
+		var native_id := int(before["id"])
+		if native_id <= 0 or native_id > 4294967295:
+			return fail("Invalid native path ID.")
+		var after := {"id": native_id, "name": label, "points": points.duplicate(), "type": kind}
+		if label.nocasecmp_to(String(before["name"])) != 0 and not base.is_empty():
+			renamed_sources.append(index)
+		staged[index] = after
 		if not same_path_fields(after, before):
-			batch.append({"index": index, "before": before, "after": after})
-	if batch.is_empty():
+			candidate_batch.append({"index": index, "before": before, "after": after})
+	# Validate global invariants on the full proposed path table before mutating anything.
+	var lower_names := {}
+	var used_ids := {}
+	for slot: int in staged:
+		var entry: Dictionary = staged[slot]
+		var lower := String(entry["name"]).to_lower()
+		if lower_names.has(lower):
+			var other: int = int(lower_names[lower])
+			var both_untouched: bool = (String(entry["name"]) == String(source_path_at(slot).get("name", ""))
+				and String(staged[other]["name"]) == String(source_path_at(other).get("name", ""))
+				and not seen_indices.has(slot) and not seen_indices.has(other))
+			if not both_untouched:
+				return fail("Choose a unique path name (batch collision: %s)." % entry["name"])
+		else:
+			lower_names[lower] = slot
+		var pid := int(entry["id"])
+		if used_ids.has(pid):
+			return fail("Duplicate native path ID %d in batch." % pid)
+		used_ids[pid] = slot
+	for index in renamed_sources:
+		var orig_name := String(source_path_at(index).get("name", "")).to_lower()
+		if not lower_names.has(orig_name) and path_is_mission_referenced(index):
+			return fail("Cannot drop mission-referenced path name %s in batch." % source_path_at(index)["name"])
+	if candidate_batch.is_empty():
 		return true
-	push_history({"path_batch": batch})
-	for item: Dictionary in batch:
+	push_history({"path_batch": candidate_batch})
+	for item: Dictionary in candidate_batch:
 		set_path_edit_silent(int(item["index"]), item["after"])
 	paths_changed.emit()
 	return true
@@ -994,14 +1191,14 @@ func valid_object_insertion(item: Dictionary) -> bool:
 	if not valid_native_integer(template):
 		return false
 	var index := int(template)
-	if index < 0 or index >= package.objects.size() or object_removals.has(index):
+	if index < 0 or index >= package.objects.size():
 		return false
 	if not valid_native_integer(item.get("sequence")) or not valid_native_integer(item.get("id")):
 		return false
 	if sequence_taken(int(item["sequence"])):
 		return false
 	var label: Variant = item.get("label", "")
-	if not label is String or label.length() > 128:
+	if not label is String or not valid_object_label(String(label)):
 		return false
 	return valid_object_edit(index, item)
 
@@ -1208,22 +1405,35 @@ func label_taken(label: String) -> bool:
 	return false
 
 
-func duplicate_object(view: int, position: Vector3) -> int:
+func duplicate_object(view: int, position: Vector3, label_override: Variant = null) -> int:
 	if stroke_active or has_preview():
 		fail("Finish the current terrain edit first.")
 		return -1
 	if not valid_view_object(view) or not valid_object_position(position):
 		fail("Choose a finite object position on the terrain.")
 		return -1
+	if object_count() >= 8192:
+		fail("Object count has reached the native BZN limit (8192).")
+		return -1
+	if label_override != null and (not (label_override is String) or not valid_object_label(String(label_override))):
+		fail("Choose a valid ASCII label of at most 128 characters.")
+		return -1
 	var template := object_template(view)
+	if template.is_empty():
+		fail("Missing native object template.")
+		return -1
 	var sequence := fresh_sequence(template)
 	if sequence < 0:
 		fail("No unused native object sequence is available.")
 		return -1
 	var entry := object_entry(view)
-	var template_base := int(entry["template"] if entry.has("added") else entry["base"])
+	var template_base := int(object_addition(view)["template"]) if entry.has("added") else int(entry["base"])
+	if template_base < 0 or template_base >= package.objects.size():
+		fail("Missing native object template.")
+		return -1
+	var chosen_label := String(label_override) if label_override != null else copy_label(template)
 	var addition := {"id": next_object_id, "template": template_base,
-		"label": copy_label(template), "sequence": sequence, "position": [0.0, 0.0, 0.0], "basis": []}
+		"label": chosen_label, "sequence": sequence, "position": [0.0, 0.0, 0.0], "basis": []}
 	var transform := object_transform(view)
 	addition["transform"] = Transform3D(transform.basis, position)
 	push_history({"object_add": addition, "slot": object_additions.size()})
@@ -1231,6 +1441,23 @@ func duplicate_object(view: int, position: Vector3) -> int:
 	next_object_id += 1
 	objects_changed.emit()
 	return object_count() - 1
+
+
+func duplicate_sound_point(view: int, position: Vector3, sound_label: String) -> int:
+	if stroke_active or has_preview():
+		fail("Finish the current terrain edit first.")
+		return -1
+	if not valid_view_object(view):
+		fail("Select an existing %s sound point first." % SOUND_POINT_ODF)
+		return -1
+	if not object_is_sound_point(view):
+		fail("Object #%d (%s) is not a %s sound point. Only %s objects can be duplicated as sound points." % [
+			view, object_odf(view), SOUND_POINT_ODF, SOUND_POINT_ODF])
+		return -1
+	if sound_point(sound_label).is_empty():
+		fail("Invalid VRV sound point label syntax.")
+		return -1
+	return duplicate_object(view, position, sound_label)
 
 
 func remove_object(view: int) -> bool:
@@ -1304,8 +1531,8 @@ func object_export_edits() -> Dictionary:
 func set_object_label(view: int, new_label: String) -> bool:
 	if stroke_active or has_preview():
 		return fail("Finish the current terrain edit first.")
-	if not valid_view_object(view) or new_label.length() > 128:
-		return fail("Select a valid object with a label of at most 128 characters.")
+	if not valid_view_object(view) or not valid_object_label(new_label):
+		return fail("Select a valid object with an ASCII label of at most 128 characters.")
 	var before := object_label(view)
 	if before == new_label:
 		return true
@@ -1313,6 +1540,19 @@ func set_object_label(view: int, new_label: String) -> bool:
 	push_history({"object_label": key, "before": before, "after": new_label})
 	apply_object_label(key, new_label)
 	return true
+
+
+func set_sound_point_label(view: int, new_label: String) -> bool:
+	if stroke_active or has_preview():
+		return fail("Finish the current terrain edit first.")
+	if not valid_view_object(view):
+		return fail("Select an existing %s sound point first." % SOUND_POINT_ODF)
+	if not object_is_sound_point(view):
+		return fail("Object #%d (%s) is not a %s sound point. Use Object Label for ordinary object names." % [
+			view, object_odf(view), SOUND_POINT_ODF])
+	if sound_point(new_label).is_empty():
+		return fail("Invalid VRV sound point label syntax.")
+	return set_object_label(view, new_label)
 
 
 func set_base_object_label(base: int, new_label: String) -> void:

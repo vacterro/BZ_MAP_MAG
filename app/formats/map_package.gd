@@ -19,6 +19,7 @@ var bzn_version := 0
 var layout_id := ""
 var layout_reason := ""
 var mission_name := ""
+var mission_dll := ""
 var granularity := 0.1
 var metadata: Dictionary = {}
 var paths: Array[Dictionary] = []
@@ -75,6 +76,7 @@ func open(path: String) -> bool:
 			objects = object_reader.objects
 			object_count_offset = object_reader.count_offset
 			object_insert_offset = object_reader.insert_offset
+			mission_dll = object_reader.mission_dll
 	for role in ["trn", "inf"]:
 		metadata[role] = read_settings(FileAccess.get_file_as_string(folder.path_join(roles[role])))
 	var info: Dictionary = metadata["inf"].get("description", {})

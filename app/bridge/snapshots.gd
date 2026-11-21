@@ -29,6 +29,125 @@ func create_flat_map(mission: String, template: String, target: String, helper: 
 	return true
 
 
+## Creates a verified flat map package directly without requiring VRV templates.
+## Copies the source blank BZN + companions into a staged folder, updates TRN
+## [Size] to the requested dimensions/height, synthesizes a verified native TER
+## v5 file via Terrain.create_flat (or copies an explicit template TER), and
+## validates by full Package.open() before atomic publish.
+func create_native_flat_map(source_bzn: String, target: String, size_m: int = 2048, height: float = 100.0, template_ter: String = "") -> bool:
+	if not source_bzn.is_absolute_path() or not FileAccess.file_exists(source_bzn) or source_bzn.get_extension().to_lower() != "bzn":
+		return fail("Choose an existing blank BZN source file.")
+	if not target.is_absolute_path() or exists(target):
+		return fail("Choose a new destination folder for the map.")
+	var samples := size_m / int(Terrain.SPACING)
+	if size_m < 128 or size_m > 4096 or samples % Terrain.BLOCK != 0 or not is_finite(height) or absf(height) > 50000.0:
+		return fail("Map size must be between 128 m and 4096 m in 32 m steps, with a finite initial height.")
+	var src_dir := source_bzn.get_base_dir()
+	var stem := source_bzn.get_file().get_basename()
+	var trn_name := ""
+	var inf_name := ""
+	var extra_files: Array[String] = []
+	for fname in DirAccess.get_files_at(src_dir):
+		var lower := fname.to_lower()
+		if lower.get_basename() != stem.to_lower():
+			continue
+		var ext := lower.get_extension()
+		if ext == "ter":
+			continue
+		elif ext == "trn":
+			trn_name = fname
+		elif ext == "inf":
+			inf_name = fname
+		elif ext in ["bzn", "lua", "sky", "des"]:
+			extra_files.append(fname)
+	if trn_name.is_empty() or inf_name.is_empty():
+		return fail("Source blank map must include same-stem .trn and .inf companions.")
+	var ter_bytes := PackedByteArray()
+	var half := samples / 2
+	var origin := Vector2i(-half, -half)
+	if not template_ter.strip_edges().is_empty():
+		if not FileAccess.file_exists(template_ter):
+			return fail("Selected TER template file was not found.")
+		ter_bytes = FileAccess.get_file_as_bytes(template_ter)
+		var check_ter := Terrain.new()
+		if not check_ter.decode(ter_bytes):
+			return fail("Invalid TER template: " + check_ter.error)
+		origin = check_ter.origin
+		samples = check_ter.dimensions.x
+		size_m = samples * int(Terrain.SPACING)
+		height = check_ter.min_height
+	else:
+		ter_bytes = Terrain.create_flat(origin, Vector2i(samples, samples), height, 0)
+		if ter_bytes.is_empty():
+			return fail("Could not generate native flat TER v5 data.")
+	var stage := target.get_base_dir().path_join(".bzmag-new-" + nonce())
+	if DirAccess.make_dir_recursive_absolute(stage) != OK:
+		return fail("Could not reserve staging folder for the new map.")
+	var written: PackedStringArray = []
+	for fname in extra_files:
+		if DirAccess.copy_absolute(src_dir.path_join(fname), stage.path_join(fname)) != OK:
+			return rollback(stage, written, "Could not copy " + fname)
+		written.append(fname)
+	if DirAccess.copy_absolute(src_dir.path_join(inf_name), stage.path_join(inf_name)) != OK:
+		return rollback(stage, written, "Could not copy " + inf_name)
+	written.append(inf_name)
+	var trn_text := _rewrite_trn_size(FileAccess.get_file_as_string(src_dir.path_join(trn_name)), origin, Vector2i(samples, samples), height)
+	var trn_bytes := trn_text.to_utf8_buffer()
+	if not write_bytes(stage.path_join(trn_name), trn_bytes):
+		return rollback(stage, written, "Could not write " + trn_name)
+	written.append(trn_name)
+	var ter_name := stem + ".ter"
+	if not write_bytes(stage.path_join(ter_name), ter_bytes):
+		return rollback(stage, written, "Could not write " + ter_name)
+	written.append(ter_name)
+	var verify := Package.new()
+	if not verify.open(stage.path_join(source_bzn.get_file())):
+		return rollback(stage, written, "New map failed native package verification: " + verify.error)
+	if exists(target) or DirAccess.rename_absolute(stage, target) != OK:
+		return rollback(stage, written, "Could not publish new map folder.")
+	return true
+
+
+static func _rewrite_trn_size(content: String, origin: Vector2i, dims: Vector2i, height: float) -> String:
+	var min_x := origin.x * int(Terrain.SPACING)
+	var min_z := origin.y * int(Terrain.SPACING)
+	var width_m := dims.x * int(Terrain.SPACING)
+	var depth_m := dims.y * int(Terrain.SPACING)
+	var lines := content.replace("\r\n", "\n").split("\n")
+	var out: PackedStringArray = []
+	var in_size := false
+	var wrote := {"minx": false, "minz": false, "width": false, "depth": false, "height": false}
+	var values := {
+		"minx": "MinX = %d" % min_x,
+		"minz": "MinZ = %d" % min_z,
+		"width": "Width = %d" % width_m,
+		"depth": "Depth = %d" % depth_m,
+		"height": "Height = %.1f" % height,
+	}
+	for line in lines:
+		var trimmed := line.strip_edges()
+		if trimmed.begins_with("[") and trimmed.ends_with("]"):
+			if in_size:
+				for k in wrote:
+					if not wrote[k]:
+						out.append(values[k])
+			in_size = trimmed.to_lower() == "[size]"
+			out.append(line)
+			continue
+		if in_size and trimmed.contains("="):
+			var key := trimmed.get_slice("=", 0).strip_edges().to_lower()
+			if values.has(key):
+				out.append(values[key])
+				wrote[key] = true
+				continue
+		out.append(line)
+	if in_size:
+		for k in wrote:
+			if not wrote[k]:
+				out.append(values[k])
+	return "\r\n".join(out)
+
+
 func save_project(document: Document, target: String) -> bool:
 	if not target.is_absolute_path() or target.get_extension().to_lower() != "bzmag" or exists(target):
 		return fail("Choose a new .bzmag file in an existing folder.")
@@ -80,7 +199,17 @@ func save_project(document: Document, target: String) -> bool:
 			water_records[str(layer)] = {"cover": cover}
 	var record := {"schema": 1, "source": document.package.source_path, "files": document.package.files, "edits": edits,
 		"layers": document.layers, "pathEdits": path_edits, "objectEdits": object_edits, "objectLabelEdits": object_label_edits,
-		"objectRemovals": object_removals, "objectInserts": object_inserts, "waterEdits": water_records}
+		"objectRemovals": object_removals, "objectInserts": object_inserts, "waterEdits": water_records,
+		"target": {
+			"engineProfile": document.engine_profile,
+			"modProfile": document.mod_profile,
+			"missionProfile": document.mission_profile,
+			"formatProfile": document.package.layout_id,
+			"explicit": document.profile_explicit,
+		},
+		"dependencies": {
+			"assetProfile": document.asset_profile,
+		}}
 	if not document.asset_profile.is_empty():
 		record["assetProfile"] = document.asset_profile
 	var terrain := document.package.terrain
@@ -144,24 +273,36 @@ func export_native(document: Document, target: String) -> bool:
 		if document.has_object_file_edits():
 			if package.object_count_offset < 0 or package.object_insert_offset <= package.object_count_offset or package.object_insert_offset >= package.path_codec.table_start - 7:
 				return fail("This BZN layout does not support native object edits yet.")
+			if document.object_count() > BznObjects.MAX_OBJECTS:
+				return fail("Object count exceeds the native BZN limit (%d)." % BznObjects.MAX_OBJECTS)
 			var pointer_counts := package.path_codec.pointer_counts(source_bzn)
 			var next_pointer_id := 1
 			for ptr_id: int in pointer_counts:
-				next_pointer_id = maxi(next_pointer_id, ptr_id + 1)
+				if ptr_id < 4294967295:
+					next_pointer_id = maxi(next_pointer_id, ptr_id + 1)
 			var blocks: Array = []
 			for addition: Dictionary in document.object_additions:
-				var template: Dictionary = package.objects[addition["template"]]
+				var template_idx := int(addition.get("template", -1))
+				if template_idx < 0 or template_idx >= package.objects.size():
+					return fail("Missing native object template for insertion.")
+				var allocated_ptr := allocate_unique_pointer_id(pointer_counts, next_pointer_id)
+				if allocated_ptr <= 0:
+					return fail("No unused native object pointer ID is available.")
+				pointer_counts[allocated_ptr] = 1
+				next_pointer_id = 1 if allocated_ptr >= 4294967295 else allocated_ptr + 1
+				var template: Dictionary = package.objects[template_idx]
 				var add_label := String(addition["label"])
 				var add_seq := int(addition["sequence"])
 				if add_label.is_empty():
 					add_seq = add_seq | 0x800000
 				else:
 					add_seq = add_seq & ~0x800000
-				var block := BznObjects.build_block(source_bzn, template, add_seq, add_label, addition["transform"], next_pointer_id)
-				next_pointer_id += 1
+				var block := BznObjects.build_block(source_bzn, template, add_seq, add_label, addition["transform"], allocated_ptr)
 				blocks.append(block)
 			var removals: Array = []
 			for index: int in document.object_removals:
+				if index < 0 or index >= package.objects.size():
+					return fail("Invalid object removal index.")
 				var ptr_id := int(package.objects[index]["flag8"])
 				if ptr_id > 0 and int(pointer_counts.get(ptr_id, 0)) > 1:
 					return fail("Cannot remove an object referenced by another mission record.")
@@ -242,6 +383,16 @@ func export_native(document: Document, target: String) -> bool:
 	if exists(target) or DirAccess.rename_absolute(stage, target) != OK:
 		return rollback(stage, names, "Could not publish export to the new folder.")
 	return true
+
+
+static func allocate_unique_pointer_id(used_ids: Dictionary, start: int = 1, max_probes: int = 65536) -> int:
+	var candidate := start if start >= 1 and start <= 4294967295 else 1
+	var limit := mini(max_probes, 4294967295)
+	for _attempt in limit:
+		if not used_ids.has(candidate):
+			return candidate
+		candidate = 1 if candidate >= 4294967295 else candidate + 1
+	return -1
 
 
 static func expected_object_fields(document: Document, view: int) -> Dictionary:

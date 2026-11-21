@@ -16,6 +16,9 @@ const TerrainCommands := preload("res://tools/terrain_commands.gd")
 const SlopeStudio := preload("res://tools/slope_studio.gd")
 const MissionStudio := preload("res://tools/mission_studio.gd")
 const MissionProfiles := preload("res://core/mission_profiles.gd")
+const ModRegistry := preload("res://core/mod_registry.gd")
+const NewMapWizard := preload("res://tools/new_map_wizard.gd")
+const TargetProfileDialog := preload("res://tools/target_profile_dialog.gd")
 const WaterCommands := preload("res://tools/water_commands.gd")
 const MoveObject := preload("res://tools/move_object.gd")
 const SoundEditor := preload("res://tools/sound_editor.gd")
@@ -34,6 +37,11 @@ var move_path_button: Button
 var mission_studio_button: Button
 var path_inspector := PathInspector.new()
 var mission_studio := MissionStudio.new()
+var mod_registry := ModRegistry.new()
+var new_map_wizard := NewMapWizard.new()
+var target_profile_dialog := TargetProfileDialog.new()
+var target_profile_button: Button
+var default_new_mod_profile := "stock"
 var snap_path_drag := false
 var selected_extra_paths: Array[int] = []
 var path_drag_view: Control
@@ -92,6 +100,12 @@ var terrain_tools := TerrainCommands.new()
 var slope_studio := SlopeStudio.new()
 var sound_editor := SoundEditor.new()
 var sound_button: Button
+var object_label_button: Button
+var object_label_dialog := ConfirmationDialog.new()
+var object_label_target := Label.new()
+var object_label_field := LineEdit.new()
+var object_label_status := Label.new()
+var object_label_view := -1
 var theme_slug := Wintage.DEFAULT_THEME
 var ui_font_size := 12
 var ui_compact := false
@@ -127,6 +141,9 @@ var saved_object_label_edits := {}
 var saved_object_additions: Array = []
 var saved_object_removals := {}
 var saved_asset_profile := ""
+var saved_engine_profile := "bzcc-2.0.185"
+var saved_mod_profile := "stock"
+var saved_mission_profile := "blank"
 var saved_colors := {}
 var saved_tiles := {}
 var saved_water_edits := {}
@@ -169,9 +186,10 @@ func _ready() -> void:
 	var tools := HFlowContainer.new()
 	layout.add_child(tools)
 	toolbar_buttons.append(add_button(tools, "Open", open_dialog.popup_centered_ratio.bind(0.72), "Open a BZN map or BZMAG project", KEY_O))
-	var new_map := add_button(tools, "New Map", blank_dialog.popup_centered_ratio.bind(0.72), "Create a new map from a blank BZN and matching flat TER")
-	new_map.disabled = OS.get_name() != "Windows"
+	var new_map := add_button(tools, "New Map", open_new_map_wizard, "Create a new Stock, VSR, VRV or custom-mod map")
 	toolbar_buttons.append(new_map)
+	target_profile_button = add_button(tools, "Target Profile", func(): open_target_profile(0), "Inspect detected mod/mission profiles, switch editing environment or analyze conversion")
+	toolbar_buttons.append(target_profile_button)
 	save_button = add_button(tools, "Save Project", request_save, "Create a .bzmag project snapshot", KEY_S)
 	toolbar_buttons.append(save_button)
 	recover_button = add_button(tools, "Recover…", recover_autosaves, "Open a rolling autosave from the verified recovery store")
@@ -216,6 +234,11 @@ func _ready() -> void:
 	mission_studio_button = add_button(map_info, "Mission Studio", open_mission_studio, "Browse mission profiles, generate AI paths, transform/mirror/clone/resample and validate readiness")
 	add_child(path_inspector)
 	add_child(mission_studio)
+	add_child(new_map_wizard)
+	add_child(target_profile_dialog)
+	new_map_wizard.map_created.connect(_on_wizard_map_created)
+	target_profile_dialog.profile_applied.connect(func(msg: String): sync_actions(); report(msg))
+	target_profile_dialog.mods_changed.connect(_on_mods_settings_changed)
 	path_inspector.path_created.connect(select_created_path)
 	path_inspector.path_removed.connect(func(label: String): report("Removed path %s." % label))
 	mission_studio.paths_selection_changed.connect(set_extra_path_selection)
@@ -249,7 +272,8 @@ func _ready() -> void:
 			objects_button.toggle_mode = true
 			move_objects_button = add_button(heading, "Move Object", object_tool_changed, "Select and drag an object in either view. Shift snaps to the terrain grid. [ / ] rotate ±15° (Shift 1°), Ctrl+D duplicates, Delete removes. Esc cancels.")
 			move_objects_button.toggle_mode = true
-			sound_button = add_button(heading, "Sound Point", open_sound_editor, "Edit structured VRV sound point settings (vrvsnd:...) on the selected object")
+			object_label_button = add_button(heading, "Object Label", open_object_label_editor, "Edit the native BZN label of the selected object")
+			sound_button = add_button(heading, "Sound Point", open_sound_editor, "Edit structured VRV sound point settings (vrvsnd:...) on a selected vrv_sndpoint object")
 			water_button = add_button(heading, "Water", toggle_water, "Preview decoded native water layers in both views")
 			water_button.toggle_mode = true
 			water_edit_button = add_button(heading, "Edit Water", toggle_water_edit, "Edit water layer coverage and elevations. Left drag paints, Shift erases.")
@@ -296,6 +320,22 @@ func _ready() -> void:
 	slope_studio.updated.connect(func(value: String): sync_actions(); report(value))
 	add_child(sound_editor)
 	sound_editor.updated.connect(func(value: String): sync_actions(); report(value))
+	sound_editor.sound_point_selected.connect(select_object_view)
+	object_label_dialog.title = "Object Label Editor"
+	object_label_dialog.ok_button_text = "Apply Label"
+	object_label_dialog.dialog_hide_on_ok = false
+	object_label_dialog.min_size = Vector2i(420, 180)
+	var label_box := VBoxContainer.new()
+	label_box.add_theme_constant_override("separation", 6)
+	object_label_target.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	label_box.add_child(object_label_target)
+	object_label_field.placeholder_text = "ASCII label (empty clears custom label)"
+	label_box.add_child(object_label_field)
+	object_label_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	label_box.add_child(object_label_status)
+	object_label_dialog.add_child(label_box)
+	object_label_dialog.confirmed.connect(apply_object_label_dialog)
+	add_child(object_label_dialog)
 	add_child(water_tools)
 	water_tools.updated.connect(func(value: String): sync_actions(); report(value))
 	water_tools.painting_changed.connect(update_water_painting)
@@ -344,6 +384,7 @@ func _ready() -> void:
 	compact_check.toggled.connect(func(on: bool): set_wintage_theme(theme_slug, on))
 	paths.add_child(compact_check)
 	add_button(paths, "Find via Steam", func(): find_steam_game(true), "Find Battlezone in your Steam libraries")
+	add_button(paths, "Game & Mods Manager…", func(): open_target_profile(1), "Discover Stock, VSR, VRV and Steam Workshop mods")
 	paths.add_child(setup_status)
 	playtest_dialog.add_child(paths)
 	add_child(playtest_dialog)
@@ -354,6 +395,10 @@ func _ready() -> void:
 	autosave_custom_root = autosave_root_field.text.strip_edges()
 	engine_editor_mode.button_pressed = settings.get_value("playtest", "engine_editor", false)
 	vrv_configured = settings.has_section_key("playtest", "vrv")
+	default_new_mod_profile = String(settings.get_value("new_map", "default_mod", "stock"))
+	if default_new_mod_profile.is_empty():
+		default_new_mod_profile = "stock"
+	mod_registry.discover_installed(game_path.text.strip_edges(), vrv_path.text.strip_edges())
 	sync_theme_controls()
 	recover_dialog.title = "Recover autosave"
 	recover_dialog.min_size = Vector2i(520, 260)
@@ -520,7 +565,7 @@ func _shortcut_input(event: InputEvent) -> void:
 					object_tool.set_active(true)
 					object_tool.selected = view
 					object_tool.refresh_marker()
-					report(object_tool.description() + " | Duplicated: object-count changes are EDITOR-ONLY for the verified 2.0.185 loader (it rejected changed counts with SAVEGAME CORRUPT).")
+					report(object_tool.description() + object_count_notice("Duplicated"))
 				else:
 					report(document.error)
 			get_viewport().set_input_as_handled()
@@ -529,7 +574,7 @@ func _shortcut_input(event: InputEvent) -> void:
 			if object_tool.selected >= 0 and document.remove_object(object_tool.selected):
 				object_tool.selected = -1
 				object_tool.refresh_marker()
-				report("Object removed. Undo restores it. Object-count changes are EDITOR-ONLY for the verified 2.0.185 loader (it rejected changed counts with SAVEGAME CORRUPT).")
+				report("Object removed. Undo restores it." + object_count_notice("Removed"))
 			else:
 				report(document.error)
 			get_viewport().set_input_as_handled()
@@ -573,23 +618,30 @@ func sync_actions() -> void:
 	edit_path_button.disabled = locked or path_list.selected <= 0
 	move_path_button.disabled = locked or path_list.selected <= 0
 	mission_studio_button.disabled = locked
-	objects_button.disabled = locked or document.package.objects.is_empty() or object_thread.is_started()
+	var thread_busy := object_thread != null and object_thread.is_started()
+	objects_button.disabled = locked or document.package.objects.is_empty() or thread_busy
 	move_objects_button.disabled = locked or document.object_count() == 0 or document.has_preview()
+	if object_label_button != null:
+		object_label_button.disabled = locked or document.object_count() == 0
 	if sound_button != null:
 		sound_button.disabled = locked or document.object_count() == 0
 	water_button.disabled = locked or document.package.water == null
 	water_edit_button.disabled = water_button.disabled
 	color_button.disabled = locked or texture_button.button_pressed
-	texture_button.disabled = locked or object_thread.is_started()
+	texture_button.disabled = locked or thread_busy
 	if document != null:
 		var terrain := document.package.terrain
 		var dirty := "*" if has_unsaved_changes() else ""
-		title.text = "%s%s  |  BZN %d  |  TER v5  |  %d × %d m" % [document.package.mission_name, dirty, document.package.bzn_version, terrain.dimensions.x * 2, terrain.dimensions.y * 2]
+		title.text = "%s%s  |  %s · %s  |  BZN %d  |  %d × %d m" % [
+			document.package.mission_name, dirty, document.mod_profile, document.mission_profile,
+			document.package.bzn_version, terrain.dimensions.x * 2, terrain.dimensions.y * 2]
 
 
 func has_unsaved_changes() -> bool:
 	return document != null and (document.edits != saved_edits or document.layers != saved_layers
 		or document.path_edits != saved_path_edits or document.asset_profile != saved_asset_profile
+		or document.engine_profile != saved_engine_profile or document.mod_profile != saved_mod_profile
+		or document.mission_profile != saved_mission_profile
 		or document.object_edits != saved_object_edits or document.object_label_edits != saved_object_label_edits
 		or document.object_additions != saved_object_additions
 		or document.object_removals != saved_object_removals
@@ -606,6 +658,9 @@ func remember_saved_changes() -> void:
 	saved_object_additions = document.object_additions.duplicate(true)
 	saved_object_removals = document.object_removals.duplicate()
 	saved_asset_profile = document.asset_profile
+	saved_engine_profile = document.engine_profile
+	saved_mod_profile = document.mod_profile
+	saved_mission_profile = document.mission_profile
 	saved_colors = document.package.terrain.color_edits.duplicate()
 	saved_tiles = document.package.terrain.tile_edits.duplicate()
 	saved_water_edits = document.water_edits.duplicate(true)
@@ -682,6 +737,8 @@ func open_map(path: String) -> bool:
 			document.objects_changed.disconnect(objects_topology_changed)
 		if document.water_changed.is_connected(refresh_water):
 			document.water_changed.disconnect(refresh_water)
+		if document.profile_changed.is_connected(on_document_profile_changed):
+			document.profile_changed.disconnect(on_document_profile_changed)
 	water_tools.hide()
 	painting_water = false
 	document = next
@@ -710,14 +767,64 @@ func open_map(path: String) -> bool:
 	document.object_moved.connect(object_position_changed)
 	document.objects_changed.connect(objects_topology_changed)
 	document.water_changed.connect(refresh_water)
+	document.profile_changed.connect(on_document_profile_changed)
 	top.bind(document)
 	scene_view.bind(document)
 	object_tool.bind(document, top, scene_view)
 	refresh_path_list(true)
 	set_cursor(Vector2(-1, -1))
 	sync_actions()
-	report("Opened " + document.package.source_path.get_file())
+	var mod_info := mod_registry.get_profile(document.mod_profile)
+	var missing_note := ""
+	if document.mod_profile != "stock" and not bool(mod_info.get("installed", false)):
+		missing_note = " [WARN: mod '%s' not installed locally — generic terrain editing available]" % document.mod_profile
+	report("Opened %s [%s / %s]%s" % [document.package.source_path.get_file(), document.mod_profile, document.mission_profile, missing_note])
 	return true
+
+
+func open_new_map_wizard() -> void:
+	var fallback := tool_root().path_join("map_references/blank_map1/duel_map_27_autosave_01.bzn")
+	var parent_dir := document.package.source_path.get_base_dir().get_base_dir() if document != null else tool_root().path_join("build")
+	new_map_wizard.begin(mod_registry, game_path.text.strip_edges(), default_new_mod_profile, parent_dir, fallback)
+
+
+func _on_wizard_map_created(bzn_path: String, engine_id: String, mod_id: String, mission_id: String) -> void:
+	default_new_mod_profile = mod_id
+	_save_new_map_default()
+	if open_map(bzn_path):
+		document.engine_profile = engine_id
+		document.mod_profile = mod_id
+		document.mission_profile = mission_id
+		document.profile_explicit = true
+		remember_saved_changes()
+		sync_actions()
+		report("Created %s map (%s / %s) at %s" % [mod_id, mission_id, engine_id, bzn_path.get_base_dir()])
+
+
+func open_target_profile(tab_index: int = 0) -> void:
+	target_profile_dialog.begin(document, mod_registry, game_path.text.strip_edges(), vrv_path.text.strip_edges(), default_new_mod_profile, tab_index)
+
+
+func _on_mods_settings_changed(new_default: String) -> void:
+	if not new_default.is_empty():
+		default_new_mod_profile = new_default
+		_save_new_map_default()
+
+
+func _save_new_map_default() -> void:
+	var settings := ConfigFile.new()
+	settings.load(settings_path)
+	settings.set_value("new_map", "default_mod", default_new_mod_profile)
+	settings.save(settings_path)
+
+
+func on_document_profile_changed() -> void:
+	loaded_objects = null
+	if mission_studio.visible:
+		mission_studio.refresh_all()
+	if target_profile_dialog.visible:
+		target_profile_dialog.refresh_all()
+	sync_actions()
 
 
 func request_save() -> void:
@@ -987,7 +1094,7 @@ func start_asset_scan(kind: String, button: Button) -> void:
 
 
 func poll_objects() -> void:
-	if not object_thread.is_started() or object_thread.is_alive():
+	if object_thread == null or not object_thread.is_started() or object_thread.is_alive():
 		return
 	var result: Variant = object_thread.wait_to_finish()
 	asset_worker = null
@@ -1101,7 +1208,9 @@ func store_playtest_settings() -> void:
 	settings.set_value("ui", "theme", theme_slug)
 	settings.set_value("ui", "compact", ui_compact)
 	settings.set_value("ui", "font_size", ui_font_size)
+	settings.set_value("new_map", "default_mod", default_new_mod_profile)
 	settings.save(settings_path)
+	mod_registry.discover_installed(game_path.text.strip_edges(), vrv_path.text.strip_edges())
 	vrv_configured = true
 
 
@@ -1109,7 +1218,8 @@ func all_dialogs() -> Array[Window]:
 	return [
 		open_dialog, blank_dialog, flat_template_dialog, flat_output_dialog, save_dialog, export_dialog,
 		confirmation, keys_dialog, playtest_dialog, recover_dialog, game_picker, vrv_picker, autosave_picker,
-		asset_profile_picker, studio, path_inspector, mission_studio, terrain_tools, slope_studio, water_tools, sound_editor,
+		asset_profile_picker, studio, path_inspector, mission_studio, terrain_tools, slope_studio, water_tools,
+		sound_editor, object_label_dialog, new_map_wizard, target_profile_dialog,
 	]
 
 
@@ -1148,11 +1258,52 @@ func filter_toolbar(query: String) -> void:
 		button.visible = needle.is_empty() or button.text.to_lower().contains(needle) or button.tooltip_text.to_lower().contains(needle)
 
 
+func select_object_view(view: int) -> void:
+	if document == null or not document.valid_view_object(view):
+		return
+	object_tool.selected = view
+	if object_tool.active:
+		object_tool.refresh_marker()
+		report(object_tool.description())
+
+
+func open_object_label_editor() -> void:
+	if document == null or document.object_count() == 0:
+		return
+	object_label_view = object_tool.selected
+	if not document.valid_view_object(object_label_view):
+		object_label_target.text = "Select an object in Move Object mode first."
+		object_label_field.text = ""
+		object_label_field.editable = false
+		object_label_dialog.get_ok_button().disabled = true
+		object_label_status.text = ""
+		object_label_dialog.popup_centered()
+		return
+	object_label_target.text = "Object #%d (%s)" % [object_label_view, document.object_odf(object_label_view)]
+	object_label_field.text = document.object_label(object_label_view)
+	object_label_field.editable = true
+	object_label_dialog.get_ok_button().disabled = false
+	object_label_status.text = ""
+	object_label_dialog.popup_centered()
+
+
+func apply_object_label_dialog() -> void:
+	if document == null or not document.valid_view_object(object_label_view):
+		object_label_status.text = "[ERR] Select an object first."
+		return
+	var next_label := object_label_field.text.strip_edges()
+	if not document.set_object_label(object_label_view, next_label):
+		object_label_status.text = "[ERR] " + document.error
+		return
+	sync_actions()
+	report("Updated object #%d label: %s" % [object_label_view, next_label if not next_label.is_empty() else "(cleared)"])
+	object_label_dialog.hide()
+
+
 func open_sound_editor() -> void:
 	if document == null or document.object_count() == 0:
 		return
-	var view := object_tool.selected if object_tool.selected >= 0 else 0
-	sound_editor.begin(document, view, game_path.text.strip_edges(), vrv_path.text.strip_edges())
+	sound_editor.begin(document, object_tool.selected, game_path.text.strip_edges(), vrv_path.text.strip_edges())
 
 
 func playtest() -> void:
@@ -1190,15 +1341,28 @@ func playtest() -> void:
 		return
 	var mission := target.path_join(document.package.source_path.get_file())
 	playtest_result = run.path_join("playtest.json")
-	var args := PackedStringArray(["-NoProfile", "-NonInteractive", "-File", script, "-Game", game, "-Mission", mission, "-ResultFile", playtest_result, "-PreparedRun", run, "-WaitForGame"])
+	var args := PackedStringArray(["-NoProfile", "-NonInteractive", "-File", script, "-Game", game, "-Mission", mission, "-ResultFile", playtest_result, "-PreparedRun", run, "-WaitForGame", "-ModProfile", document.mod_profile, "-MissionProfile", document.mission_profile])
 	if OS.has_feature("editor"):
 		args.append_array(PackedStringArray(["-Godot", OS.get_executable_path()]))
-	if vrv != "":
+	var route := Layouts.playtest_route(document.package.bzn_version, "binary")
+	if route == "convert" and vrv != "":
+		args.append_array(PackedStringArray(["-Converter", vrv]))
+	elif document.mod_profile == "vrv" and vrv != "":
 		args.append_array(PackedStringArray(["-VrvSource", vrv]))
 	if engine_editor_mode.button_pressed:
 		args.append_array(PackedStringArray(["-StartInEditor", "-WithoutMissionScript"]))
 	if not document.asset_profile.is_empty():
 		args.append_array(PackedStringArray(["-AssetProfile", document.asset_profile]))
+	var mod_prof := mod_registry.get_profile(document.mod_profile)
+	var mod_roots: Array = mod_prof.get("assetRoots", [])
+	if document.mod_profile != "stock" and not mod_roots.is_empty():
+		var joined := PackedStringArray()
+		for r_v in mod_roots:
+			if DirAccess.dir_exists_absolute(String(r_v)):
+				joined.append(String(r_v))
+		if not joined.is_empty():
+			args.append("-AssetRoots")
+			args.append(",".join(joined))
 	launcher_pid = OS.create_process("powershell.exe", args, false)
 	if launcher_pid <= 0:
 		report("Could not start the Playtest helper. Export retained at " + target)
@@ -1261,6 +1425,8 @@ func _process(time: float) -> void:
 		top.refresh(pending_refresh)
 		scene_view.refresh(pending_refresh)
 		pending_refresh = Rect2i()
+	if scene_view.lod_pending_count > 0:
+		scene_view.step_lod_queue()
 	for layer: int in pending_materials:
 		var region: Rect2i = pending_materials[layer]
 		if top.preview_layer == layer:
@@ -1606,5 +1772,5 @@ func refresh_water() -> void:
 
 
 func _exit_tree() -> void:
-	if object_thread.is_started():
+	if object_thread != null and object_thread.is_started():
 		object_thread.wait_to_finish()

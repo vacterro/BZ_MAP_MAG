@@ -11,6 +11,7 @@ var records: Array[Vector3i] = []
 var count_offset := -1
 var object_count := 0
 var insert_offset := -1
+var mission_dll := ""
 
 
 func read(data: PackedByteArray, version: int, stop: int) -> bool:
@@ -19,6 +20,7 @@ func read(data: PackedByteArray, version: int, stop: int) -> bool:
 	count_offset = -1
 	object_count = 0
 	insert_offset = -1
+	mission_dll = ""
 	if not Layouts.supports_object_table(version) or stop <= 0 or stop > data.size():
 		return false
 	var header := RegEx.new()
@@ -39,16 +41,19 @@ func read(data: PackedByteArray, version: int, stop: int) -> bool:
 	# The GameObject stream ends immediately before the Mission section:
 	# [0, 640] groupTargets -> string(dllName) -> [4, 4] post-DLL int -> [4, 4] pathCount.
 	var mission_at := -1
+	var dll_name := ""
 	for candidate in [records.size() - 5, records.size() - 4]:
 		if candidate > count_at and is_record(candidate, 0, 640) and is_record(records.size() - 2, 4, 4):
 			var dll := read_string(candidate + 1)
 			if dll.x >= 0 and dll.y == records.size() - 2:
 				mission_at = candidate
+				dll_name = string_value(dll.x) if dll.x != candidate + 1 else ""
 				break
 	if mission_at < 0:
 		bytes = PackedByteArray()
 		records.clear()
 		return false
+	mission_dll = dll_name.strip_edges()
 	insert_offset = records[mission_at].z - 3
 	count_offset = records[count_at].z
 	object_count = bytes.decode_u32(count_offset)
@@ -226,19 +231,25 @@ static func build_block(source: PackedByteArray, entry: Dictionary, sequence: in
 
 static func patch_objects(source: PackedByteArray, entries: Array[Dictionary], transforms: Dictionary,
 		removals: Array, insert_blocks: Array, count_offset: int, insert_offset: int, label_edits: Dictionary = {}) -> Dictionary:
-	if count_offset < 0 or insert_offset <= 0 or insert_offset + 7 > source.size():
+	if count_offset < 0 or insert_offset <= 0 or insert_offset + 7 > source.size() or count_offset + 4 > insert_offset:
 		return {}
 	var result := PackedByteArray()
 	var cursor := 0
 	var shift := 0
 	var removed := {}
 	for index in removals:
+		if not (index is int) or index < 0 or index >= entries.size():
+			return {}
 		removed[index] = true
 	for index in entries.size():
 		var entry: Dictionary = entries[index]
 		if removed.has(index):
-			result.append_array(source.slice(cursor, int(entry["start"])))
-			cursor = int(entry["end"])
+			var rem_start: int = int(entry["start"])
+			var rem_end: int = int(entry["end"])
+			if rem_start < cursor or rem_end <= rem_start or rem_end > insert_offset:
+				return {}
+			result.append_array(source.slice(cursor, rem_start))
+			cursor = rem_end
 			continue
 		var start: int = entry["start"]
 		var end: int = entry["end"]
@@ -248,6 +259,8 @@ static func patch_objects(source: PackedByteArray, entries: Array[Dictionary], t
 		var transform: Transform3D = transforms[index] if transforms.has(index) else entry["transform"]
 		if label_edits.has(index):
 			var new_label := String(label_edits[index])
+			if new_label.length() > 128:
+				return {}
 			var seq := int(entry["sequence"])
 			if new_label.is_empty():
 				seq = seq | 0x800000
@@ -264,16 +277,22 @@ static func patch_objects(source: PackedByteArray, entries: Array[Dictionary], t
 		cursor = end
 	if cursor > insert_offset:
 		return {}
+	if cursor < insert_offset:
+		result.append_array(source.slice(cursor, insert_offset))
 	var count := entries.size() - removed.size()
 	var inserted := 0
 	for block in insert_blocks:
+		if not (block is PackedByteArray) or block.is_empty():
+			return {}
 		result.append_array(block)
 		shift += block.size()
 		inserted += 1
+	if count + inserted > MAX_OBJECTS:
+		return {}
 	for index in removed:
 		shift -= entries[index]["end"] - entries[index]["start"]
 	result.append_array(source.slice(insert_offset))
-	if count_offset + 4 > insert_offset:
+	if count_offset + 4 > result.size():
 		return {}
 	result.encode_u32(count_offset, count + inserted)
 	return {"bytes": result, "shift": shift}

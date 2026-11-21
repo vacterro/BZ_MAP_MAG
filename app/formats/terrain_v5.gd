@@ -274,6 +274,45 @@ func material_maps(include_edits := true) -> Dictionary:
 		"weights": Image.create_from_data(dimensions.x, dimensions.y, false, Image.FORMAT_RGB8, weights)}
 
 
+static func create_flat(origin_coord: Vector2i, size_samples: Vector2i, height: float = 100.0, tile: int = 0) -> PackedByteArray:
+	if size_samples.x <= 0 or size_samples.y <= 0 or size_samples.x % BLOCK != 0 or size_samples.y % BLOCK != 0:
+		return PackedByteArray()
+	if size_samples.x * size_samples.y > MAX_POINTS or not is_finite(height):
+		return PackedByteArray()
+	var max_coord := origin_coord + size_samples
+	if origin_coord.x < -32768 or origin_coord.y < -32768 or max_coord.x > 32767 or max_coord.y > 32767:
+		return PackedByteArray()
+	var columns := size_samples.x / BLOCK
+	var rows := size_samples.y / BLOCK
+	var block_count := columns * rows
+	var out := PackedByteArray()
+	out.resize(16 + block_count * 16)
+	out[0] = 84 # 'T'
+	out[1] = 69 # 'E'
+	out[2] = 82 # 'R'
+	out[3] = 82 # 'R'
+	out.encode_u32(4, 5)
+	out.encode_s16(8, origin_coord.x)
+	out.encode_s16(10, origin_coord.y)
+	out.encode_s16(12, max_coord.x)
+	out.encode_s16(14, max_coord.y)
+	var tile_word := clampi(tile, 0, 15)
+	for b in block_count:
+		var at := 16 + b * 16
+		out[at] = 0
+		out.encode_float(at + 1, height)
+		out[at + 5] = 255
+		out[at + 6] = 255
+		out[at + 7] = 255
+		out[at + 8] = 0
+		out[at + 9] = 0
+		out[at + 10] = 0
+		out[at + 11] = 0
+		out.encode_u16(at + 12, tile_word)
+		out.encode_u16(at + 14, 0x0101)
+	return out
+
+
 func fail(message: String) -> bool:
 	error = message
 	return false

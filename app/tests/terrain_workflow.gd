@@ -7,9 +7,11 @@ const Snapshots := preload("res://bridge/snapshots.gd")
 const Graph := preload("res://nodes/height_graph.gd")
 const Water := preload("res://formats/water_v5.gd")
 const BznObjects := preload("res://formats/bzn_objects.gd")
+const BznPaths := preload("res://formats/bzn_paths.gd")
 const AutoSaveStore := preload("res://core/autosave_store.gd")
 const Shapes := preload("res://core/slope_shapes.gd")
 const MissionProfiles := preload("res://core/mission_profiles.gd")
+const ModRegistry := preload("res://core/mod_registry.gd")
 const TerrainView := preload("res://render/terrain_view.gd")
 const Package := preload("res://formats/map_package.gd")
 const VrvShapes := preload("res://core/vrv_shapes.gd")
@@ -182,6 +184,9 @@ func run() -> void:
 	await test_adaptive_terrain_lod()
 	await test_fly_autosave_symmetry(editor, args[0], args[2])
 	test_mission_studio(editor, args[0], args[2])
+	test_universal_mod_architecture(editor, args[0], args[1], args[2])
+	test_batch_path_collisions(editor, args[0], args[2])
+	test_empty_object_table(args[0], args[1], args[2])
 	test_sound_point_labels(editor)
 	test_vrv_parity_wave7(editor, args[0], args[2])
 	print("Native height at (0,0): %.4f -> %.4f, changed samples: %d" % [baseline, intended, document.edits.size()])
@@ -1518,6 +1523,31 @@ func test_adaptive_terrain_lod() -> void:
 	check(editor.scene_view.effective_chunk_step(mid) == 2, "mid-range chunk uses 4 m resolution (step 2)")
 	check(editor.scene_view.effective_chunk_step(far) == 4, "distant chunk uses 8 m resolution (step 4)")
 
+	# Deferred LOD queue convergence: a single large camera jump queues > 16 chunks,
+	# then stationary frames drain the entire queue until every chunk matches desired LOD.
+	editor.scene_view.center = editor.scene_view.point_world(Vector2(192, 192))
+	editor.scene_view.update_camera()
+	var pending_after_jump: int = editor.scene_view.lod_pending_count
+	check(pending_after_jump > 0, "large camera jump bounds immediate work and leaves pending LOD chunks queued")
+	var rev_before_cancel: int = editor.scene_view.lod_revision
+	editor.scene_view.center = editor.scene_view.point_world(Vector2(1035, 1035))
+	editor.scene_view.update_camera()
+	check(editor.scene_view.lod_revision > rev_before_cancel, "second camera jump supersedes outdated LOD queue revision")
+	var drain_frames := 0
+	while editor.scene_view.lod_pending_count > 0 and drain_frames < 128:
+		editor._process(0.016)
+		drain_frames += 1
+	check(editor.scene_view.lod_pending_count == 0, "stationary camera drains all pending LOD chunks cleanly")
+	var stale_chunks := 0
+	for start: Vector2i in editor.scene_view.meshes:
+		if editor.scene_view.effective_chunk_step(start) != editor.scene_view.desired_lod_step(start):
+			stale_chunks += 1
+	check(stale_chunks == 0, "zero stale LOD chunks remain after deferred convergence")
+	var rebuilds_before_orbit: int = editor.scene_view.total_chunk_rebuilds
+	editor.scene_view.orbit(Vector2(14.0, -6.0))
+	editor.scene_view.zoom(0.92)
+	check(editor.scene_view.total_chunk_rebuilds == rebuilds_before_orbit, "pure orbit and zoom around stationary focus trigger zero LOD rebuilds")
+
 	# Verify exact native vertices exist in the near 2 m ArrayMesh
 	var near_inst: MeshInstance3D = editor.scene_view.meshes[near]
 	var arrays: Array = near_inst.mesh.surface_get_arrays(0)
@@ -1599,16 +1629,22 @@ func test_mission_studio(editor: Control, source: String, scratch: String) -> vo
 	var studio = editor.mission_studio
 	editor.mission_studio_button.pressed.emit()
 	check(studio.visible, "Mission Studio opens from toolbar")
-	# 1. Select VRV/VSR profile and check validation on Brave (missing 11Patrol2? No, VRV required list has Player_1, Enemy_11, edge_path, 11Patrol1, attack1, hold1, 11MLay1).
-	var vrv_idx := MissionProfiles.PROFILE_ORDER.find("vrv_vsr")
-	studio.profile_select.select(vrv_idx)
+	# 1. Verify decoupled Mod x Mission validation on Brave (VRV Strategy vs Stock Strategy vs VSR Duel)
+	var val_vrv: Dictionary = MissionProfiles.validate(doc, "strategy", "vrv")
+	var val_stock: Dictionary = MissionProfiles.validate(doc, "strategy", "stock")
+	check(val_vrv.has("missing_required") and val_vrv.has("warnings") and val_stock["ok"],
+		"Mission validation returns decoupled per-mod profile checks")
+	var strat_idx := MissionProfiles.MISSION_MODES.find("strategy")
+	studio.profile_select.select(strat_idx)
 	studio.refresh_all()
-	var val_brave: Dictionary = MissionProfiles.validate(doc, "vrv_vsr")
-	check(val_brave.has("missing_required") and val_brave.has("warnings"), "Mission validation returns structured profile checks")
 	# 2. Create a missing preset (e.g., Stage1 or unique custom preset) + propose edge_path + clone + multi-select transform + resample + snap.
 	var base_count := doc.path_indices().size()
-	var stage_idx := MissionProfiles.PRESET_ORDER.find("Stage1")
-	if not doc.path_indices().any(func(i: int): return String(doc.path_at(i)["name"]).nocasecmp_to("Stage1") == 0):
+	var stage_idx := -1
+	for i in studio.preset_list.item_count:
+		if String(studio.preset_list.get_item_metadata(i)) == "Stage1":
+			stage_idx = i
+			break
+	if stage_idx >= 0 and not doc.path_indices().any(func(i: int): return String(doc.path_at(i)["name"]).nocasecmp_to("Stage1") == 0):
 		studio.preset_list.select(stage_idx)
 		studio.create_selected_preset()
 	else:
@@ -1649,11 +1685,10 @@ func test_mission_studio(editor: Control, source: String, scratch: String) -> vo
 		check(absf(pt.x - snappedf(pt.x, 2.0)) < 0.001 and absf(pt.y - snappedf(pt.y, 2.0)) < 0.001,
 			"2 m grid snap aligns path coordinates")
 		break
-	# Validation catches missing spawns & team mismatch on a synthetic blank-paths check
-	var duel_idx := MissionProfiles.PROFILE_ORDER.find("duel")
-	var duel_val: Dictionary = MissionProfiles.validate(doc, MissionProfiles.PROFILE_ORDER[duel_idx])
+	# Validation catches missing spawns & team mismatch on VSR Duel profile
+	var duel_val: Dictionary = MissionProfiles.validate(doc, "duel", "vsr")
 	check(not duel_val["ok"] and not (duel_val["missing_required"] as Array).is_empty(),
-		"Duel profile reports missing Player_2 spawn on Strategy map")
+		"VSR Duel profile reports missing Player_2 spawn on Strategy map")
 	# BZMAG save/reopen + native export + independent reimport
 	var proj := scratch.path_join("mission-studio.bzmag")
 	check(writer.save_project(doc, proj), "save Mission Studio project")
@@ -1736,57 +1771,155 @@ func test_vrv_parity_wave7(editor: Control, source: String, scratch: String) -> 
 	tools.hide()
 	check(is_finite(after_rough), "VRV shapes leave finite terrain samples")
 
-	# 2. Structured Sound Point Editor + label rewrite + BZMAG + native BZN reimport
+	# 2. Sound Point semantic gating, Generic Object Label Editor, atomic Sound Point duplication
 	check(Document.format_sound_point({"sound": "bad name.wav", "volume": 70, "range": 150, "interval": 0, "jitter": 0, "pitch": 100, "near": 20})["label"] == "",
 		"format_sound_point rejects unsafe spaces")
 	var fmt := Document.format_sound_point({"sound": "ambient.wav", "volume": 80, "range": 300, "interval": 15, "jitter": 10, "pitch": 110, "near": 25})
 	check(fmt["label"] == "vrvsnd:ambient.wav:80:300:15:10:110:25", "format_sound_point builds exact vrvsnd label")
+	check(Document.is_sound_point_odf("vrv_sndpoint") and Document.is_sound_point_odf("VRV_SNDPOINT.odf")
+		and not Document.is_sound_point_odf("morock03") and not Document.is_sound_point_odf("ivscout_vsr"),
+		"is_sound_point_odf accepts only vrv_sndpoint")
 
-	var target_view := 0 if doc.object_count() > 0 else -1
-	check(target_view >= 0, "found object for Sound Point edit")
-	if target_view >= 0:
-		var orig_label := doc.object_label(target_view)
-		var base_objs := doc.object_count()
-		var base_paths := doc.path_indices().size()
-		var se = editor.sound_editor
-		se.begin(doc, target_view)
-		se.sound_field.text = "ambient.wav"
-		se.volume_spin.value = 80
-		se.range_spin.value = 300
-		se.interval_spin.value = 15
-		se.jitter_spin.value = 10
-		se.pitch_spin.value = 110
-		se.near_spin.value = 25
-		se.apply_sound_point()
-		check(doc.object_label(target_view) == "vrvsnd:ambient.wav:80:300:15:10:110:25",
-			"Sound Point dialog updates object label cleanly")
-		doc.undo()
-		check(doc.object_label(target_view) == orig_label, "Undo restores original object label")
-		doc.redo()
-		check(doc.object_label(target_view) == "vrvsnd:ambient.wav:80:300:15:10:110:25",
-			"Redo re-applies Sound Point label")
-		se.begin(doc, target_view)
-		se.duplicate_sound_point()
-		check(doc.object_count() == base_objs + 1 and doc.object_label(base_objs) == "vrvsnd:ambient.wav:80:300:15:10:110:25",
-			"Duplicate Sound Point appends copied object with vrvsnd label")
-		se.hide()
+	# 2a. Opening Sound Editor with NO selection never substitutes object 0
+	editor.object_tool.selected = -1
+	editor.open_sound_editor()
+	var se = editor.sound_editor
+	check(se.selected_view == -1 and se.get_ok_button().disabled and se.duplicate_btn.disabled,
+		"open_sound_editor without selection never auto-selects object 0")
+	se.hide()
 
-		var proj := scratch.path_join("wave7-sound.bzmag")
-		check(writer.save_project(doc, proj), "save Wave 7 BZMAG project")
-		var reopened := Document.new()
-		check(reopened.open(proj) and reopened.object_label(target_view) == "vrvsnd:ambient.wav:80:300:15:10:110:25"
-			and reopened.object_count() == base_objs + 1,
-			"BZMAG project round-trips edited and duplicated Sound Point labels")
-		var exp_dir := scratch.path_join("wave7-export")
-		check(writer.export_native(reopened, exp_dir), "export Wave 7 native TER+BZN: " + writer.error)
-		var reimported := Document.new()
-		check(reimported.open(exp_dir.path_join(reopened.package.bzn_name)),
-			"independently reimport Wave 7 native package")
-		check(reimported.object_count() == base_objs + 1 and reimported.path_indices().size() == base_paths,
-			"native BZN export preserves duplicated object count and shifted AiPath stream")
-		check(reimported.object_label(target_view) == "vrvsnd:ambient.wav:80:300:15:10:110:25"
-			and not Document.sound_point(reimported.object_label(target_view)).is_empty(),
-			"native BZN export round-trips Sound Point label")
+	# 2b. Selecting an ordinary non-sound-point object refuses Sound Point edits and duplication
+	var non_snd_view := 0
+	var orig_label := doc.object_label(non_snd_view)
+	var base_objs := doc.object_count()
+	var undo_before_refuse := doc.undo_stack.size()
+	se.begin(doc, non_snd_view)
+	check(se.get_ok_button().disabled and se.duplicate_btn.disabled and se.asset_status.text.contains("Incompatible ODF"),
+		"Sound Point dialog disables apply/duplicate on non-vrv_sndpoint object")
+	se.sound_field.text = "ambient.wav"
+	se.apply_sound_point()
+	se.duplicate_sound_point()
+	check(doc.object_label(non_snd_view) == orig_label and doc.object_count() == base_objs and doc.undo_stack.size() == undo_before_refuse,
+		"Sound Point dialog never modifies or duplicates an incompatible object")
+	check(not doc.set_sound_point_label(non_snd_view, "vrvsnd:ambient.wav:80:300:15:10:110:25"),
+		"MapDocument.set_sound_point_label refuses non-vrv_sndpoint object")
+	check(doc.duplicate_sound_point(non_snd_view, doc.object_position(non_snd_view) + Vector3(8, 0, 8), "vrvsnd:ambient.wav:80:300:15:10:110:25") < 0,
+		"MapDocument.duplicate_sound_point refuses non-vrv_sndpoint object")
+	se.hide()
+
+	# 2c. Generic Object Label Editor edits ordinary object names cleanly with Undo/Redo
+	editor.object_tool.selected = non_snd_view
+	editor.open_object_label_editor()
+	editor.object_label_field.text = "scout_alpha"
+	editor.apply_object_label_dialog()
+	check(doc.object_label(non_snd_view) == "scout_alpha", "Generic Object Label editor updates ordinary object label")
+	doc.undo()
+	check(doc.object_label(non_snd_view) == orig_label, "Undo restores ordinary object label")
+	doc.redo()
+	check(doc.object_label(non_snd_view) == "scout_alpha", "Redo re-applies ordinary object label")
+
+	# 2d. Real vrv_sndpoint fixture: structured Sound Point edit, atomic duplicate, picker, BZMAG & native BZN reimport
+	var snd_dir := scratch.path_join("wave7-sndpoint-src")
+	DirAccess.make_dir_recursive_absolute(snd_dir)
+	var src_folder := source.get_base_dir()
+	for member: String in doc.package.files:
+		DirAccess.copy_absolute(src_folder.path_join(member), snd_dir.path_join(member))
+	var snd_bzn_path := snd_dir.path_join(doc.package.bzn_name)
+	var raw_bzn := FileAccess.get_file_as_bytes(snd_bzn_path)
+	var raw_paths := BznPaths.new()
+	check(raw_paths.read(raw_bzn, 1196), "read Brave paths to craft private vrv_sndpoint fixture")
+	var raw_objs := BznObjects.new()
+	check(raw_objs.read(raw_bzn, 1196, raw_paths.table_start), "read Brave objects to craft private vrv_sndpoint fixture")
+	var tpl_entry: Dictionary = raw_objs.objects[15].duplicate()
+	tpl_entry["odf"] = "vrv_sndpoint"
+	var ptr_counts := raw_paths.pointer_counts(raw_bzn)
+	var snd_ptr := Snapshots.allocate_unique_pointer_id(ptr_counts, 900000)
+	var snd_seq := (int(tpl_entry["sequence"]) & ~0x800000) + 100
+	var snd_block := BznObjects.build_block(raw_bzn, tpl_entry, snd_seq, "vrvsnd:wind.wav:60:120:0:0:100:20", tpl_entry["transform"], snd_ptr)
+	var snd_patch := BznObjects.patch_objects(raw_bzn, raw_objs.objects, {}, [], [snd_block], raw_objs.count_offset, raw_objs.insert_offset)
+	check(not snd_patch.is_empty(), "patch private Brave copy with one vrv_sndpoint object")
+	var snd_out := FileAccess.open(snd_bzn_path, FileAccess.WRITE)
+	snd_out.store_buffer(snd_patch["bytes"])
+	snd_out.close()
+
+	var snd_doc := Document.new()
+	check(snd_doc.open(snd_bzn_path), "open private map containing genuine vrv_sndpoint: " + snd_doc.error)
+	var snd_views := snd_doc.sound_point_views()
+	check(snd_views.size() == 1, "sound_point_views discovers exactly the vrv_sndpoint object")
+	var snd_view := snd_views[0]
+	var snd_base_count := snd_doc.object_count()
+	var snd_base_paths := snd_doc.path_indices().size()
+
+	# Incompatible selection offers picker to switch to existing sound point
+	se.begin(snd_doc, 0)
+	check(se.get_ok_button().disabled and se.existing_row.visible and se.existing_select.item_count == 1,
+		"incompatible selection offers picker for existing vrv_sndpoint")
+	se.select_chosen_sound_point()
+	check(se.selected_view == snd_view and not se.get_ok_button().disabled and not se.duplicate_btn.disabled,
+		"selecting existing sound point enables Sound Point editor")
+	se.sound_field.text = "ambient.wav"
+	se.volume_spin.value = 80
+	se.range_spin.value = 300
+	se.interval_spin.value = 15
+	se.jitter_spin.value = 10
+	se.pitch_spin.value = 110
+	se.near_spin.value = 25
+	se.apply_sound_point()
+	check(snd_doc.object_label(snd_view) == "vrvsnd:ambient.wav:80:300:15:10:110:25",
+		"Sound Point dialog updates vrv_sndpoint label cleanly")
+	snd_doc.undo()
+	check(snd_doc.object_label(snd_view) == "vrvsnd:wind.wav:60:120:0:0:100:20", "Undo restores original vrv_sndpoint label")
+	snd_doc.redo()
+	check(snd_doc.object_label(snd_view) == "vrvsnd:ambient.wav:80:300:15:10:110:25", "Redo re-applies vrv_sndpoint label")
+
+	# Failed atomic duplicate leaves zero orphan objects and zero history entries
+	var stack_before_bad_dup := snd_doc.undo_stack.size()
+	check(snd_doc.duplicate_sound_point(snd_view, snd_doc.object_position(snd_view) + Vector3(8, 0, 8), "not_a_sound_label") < 0,
+		"duplicate_sound_point rejects invalid sound label syntax")
+	check(snd_doc.object_count() == snd_base_count and snd_doc.undo_stack.size() == stack_before_bad_dup,
+		"failed duplicate_sound_point leaves no partial object or history entry")
+
+	# Atomic valid duplicate commits in ONE undo step and preserves vrv_sndpoint class
+	var stack_before_dup := snd_doc.undo_stack.size()
+	se.begin(snd_doc, snd_view)
+	se.sound_field.text = "rain.ogg"
+	se.duplicate_sound_point()
+	check(snd_doc.object_count() == snd_base_count + 1 and snd_doc.undo_stack.size() == stack_before_dup + 1,
+		"Duplicate Sound Point commits object + label in one atomic undo step")
+	check(snd_doc.object_odf(snd_base_count) == "vrv_sndpoint"
+		and snd_doc.object_label(snd_base_count) == "vrvsnd:rain.ogg:80:300:15:10:110:25",
+		"duplicated sound point preserves vrv_sndpoint class and requested vrvsnd label")
+	# Duplicating an already-added sound point also works cleanly (regression for entry['template'] bug)
+	var dup2 := snd_doc.duplicate_sound_point(snd_base_count, snd_doc.object_position(snd_base_count) + Vector3(8, 0, 8),
+		"vrvsnd:wind.wav:50:100:0:0:100:20")
+	check(dup2 == snd_base_count + 1 and snd_doc.object_odf(dup2) == "vrv_sndpoint",
+		"duplicating an already-added sound point preserves its base template")
+	snd_doc.undo()
+	check(snd_doc.object_count() == snd_base_count + 1, "single Undo removes second duplicated sound point")
+	snd_doc.undo()
+	check(snd_doc.object_count() == snd_base_count, "single Undo atomically removes first duplicated sound point")
+	snd_doc.redo()
+	check(snd_doc.object_count() == snd_base_count + 1 and snd_doc.object_label(snd_base_count) == "vrvsnd:rain.ogg:80:300:15:10:110:25",
+		"single Redo restores duplicated sound point and its label")
+	se.hide()
+
+	var proj := scratch.path_join("wave7-sound.bzmag")
+	check(writer.save_project(snd_doc, proj), "save Wave 7 sound point BZMAG project")
+	var reopened := Document.new()
+	check(reopened.open(proj) and reopened.object_label(snd_view) == "vrvsnd:ambient.wav:80:300:15:10:110:25"
+		and reopened.object_count() == snd_base_count + 1 and reopened.object_label(snd_base_count) == "vrvsnd:rain.ogg:80:300:15:10:110:25",
+		"BZMAG project round-trips edited and duplicated Sound Point labels")
+	var exp_dir := scratch.path_join("wave7-export")
+	check(writer.export_native(reopened, exp_dir), "export Wave 7 native TER+BZN: " + writer.error)
+	var reimported := Document.new()
+	check(reimported.open(exp_dir.path_join(reopened.package.bzn_name)),
+		"independently reimport Wave 7 native package")
+	check(reimported.object_count() == snd_base_count + 1 and reimported.path_indices().size() == snd_base_paths,
+		"native BZN export preserves duplicated sound point count and shifted AiPath stream")
+	check(reimported.object_odf(snd_view) == "vrv_sndpoint" and reimported.object_odf(snd_base_count) == "vrv_sndpoint"
+		and reimported.object_label(snd_view) == "vrvsnd:ambient.wav:80:300:15:10:110:25"
+		and reimported.object_label(snd_base_count) == "vrvsnd:rain.ogg:80:300:15:10:110:25",
+		"native BZN export round-trips both vrv_sndpoint records and labels")
 
 	# 3. Wintage theme registry + compact mode + ConfigFile persistence + toolbar search
 	var saved_cfg_path: String = editor.settings_path
@@ -1809,3 +1942,334 @@ func test_vrv_parity_wave7(editor: Control, source: String, scratch: String) -> 
 	check(editor.slope_studio_button.visible and editor.undo_button.visible,
 		"clearing toolbar search restores all toolbar buttons")
 	print("Wave 7 VRV shapes, Sound Point editor & Wintage UI polish verified.")
+
+
+func test_batch_path_collisions(editor: Control, source: String, scratch: String) -> void:
+	check(editor.open_map(source), "reopen Brave for batch path collision checks")
+	var doc: Document = editor.document
+	var writer := Snapshots.new()
+	var idx_a := doc.create_path("BatchAlpha", PackedVector2Array([Vector2(10.0, 10.0), Vector2(30.0, 10.0)]), 0)
+	var idx_b := doc.create_path("BatchBeta", PackedVector2Array([Vector2(10.0, 30.0), Vector2(30.0, 30.0)]), 0)
+	check(idx_a >= 0 and idx_b >= 0, "create two fresh paths for batch collision tests")
+	var p_a := doc.path_at(idx_a)
+	var p_b := doc.path_at(idx_b)
+	var stack_before := doc.undo_stack.size()
+
+	# 1. Two paths renamed to same target name -> REFUSE
+	check(not doc.edit_paths_batch([
+		{"index": idx_a, "name": "BatchGamma", "points": p_a["points"], "type": 0},
+		{"index": idx_b, "name": "BatchGamma", "points": p_b["points"], "type": 0},
+	]), "batch refuses renaming two paths to the same target name")
+	check(doc.undo_stack.size() == stack_before and doc.path_at(idx_a)["name"] == "BatchAlpha" and doc.path_at(idx_b)["name"] == "BatchBeta",
+		"refused identical-name batch leaves document and history untouched")
+
+	# 2. Case-insensitive collision -> REFUSE
+	check(not doc.edit_paths_batch([
+		{"index": idx_a, "name": "BatchGamma", "points": p_a["points"], "type": 0},
+		{"index": idx_b, "name": "batchgamma", "points": p_b["points"], "type": 0},
+	]), "batch refuses case-insensitive target name collision")
+	check(doc.undo_stack.size() == stack_before, "refused case-insensitive collision adds no history entry")
+
+	# 3. Duplicate index in batch -> REFUSE
+	check(not doc.edit_paths_batch([
+		{"index": idx_a, "name": "BatchAlpha1", "points": p_a["points"], "type": 0},
+		{"index": idx_a, "name": "BatchAlpha2", "points": p_a["points"], "type": 0},
+	]), "batch refuses duplicate path index")
+	check(doc.undo_stack.size() == stack_before and doc.path_at(idx_a)["name"] == "BatchAlpha",
+		"refused duplicate-index batch leaves document untouched")
+
+	# 4. Invalid point rejects entire batch
+	check(not doc.edit_paths_batch([
+		{"index": idx_a, "name": "BatchValid", "points": p_a["points"], "type": 0},
+		{"index": idx_b, "name": "BatchInvalid", "points": PackedVector2Array([Vector2(NAN, 0.0)]), "type": 0},
+	]), "batch with one invalid point rejects the entire batch")
+	check(doc.undo_stack.size() == stack_before and doc.path_at(idx_a)["name"] == "BatchAlpha",
+		"rejected invalid-point batch leaves first item untouched")
+
+	# 5. Dropping a mission-referenced source path name (edge_path) -> REFUSE
+	var edge := doc.path_at(0)
+	check(edge["name"] == "edge_path", "path 0 is mission-referenced edge_path")
+	check(not doc.edit_paths_batch([
+		{"index": 0, "name": "renamed_edge_missing", "points": edge["points"], "type": int(edge["type"])},
+	]), "batch refuses dropping mission-referenced edge_path")
+	check(doc.undo_stack.size() == stack_before and doc.path_at(0)["name"] == "edge_path",
+		"refused mission-reference drop leaves edge_path intact")
+
+	# 6. Swapping names between two paths in one batch -> ALLOW + atomic Undo/Redo + BZMAG + native BZN reimport
+	check(doc.edit_paths_batch([
+		{"index": idx_a, "name": "BatchBeta", "points": p_a["points"], "type": 0},
+		{"index": idx_b, "name": "BatchAlpha", "points": p_b["points"], "type": 0},
+	]), "batch allows two paths to swap names atomically: " + doc.error)
+	check(doc.undo_stack.size() == stack_before + 1 and doc.path_at(idx_a)["name"] == "BatchBeta" and doc.path_at(idx_b)["name"] == "BatchAlpha",
+		"swapped path names commit as one undo entry")
+	doc.undo()
+	check(doc.path_at(idx_a)["name"] == "BatchAlpha" and doc.path_at(idx_b)["name"] == "BatchBeta",
+		"single Undo reverses swapped path names")
+	doc.redo()
+	check(doc.path_at(idx_a)["name"] == "BatchBeta" and doc.path_at(idx_b)["name"] == "BatchAlpha",
+		"single Redo re-applies swapped path names")
+
+	var proj := scratch.path_join("batch-swap.bzmag")
+	check(writer.save_project(doc, proj), "save batch-swap BZMAG project")
+	var reopened := Document.new()
+	check(reopened.open(proj) and reopened.path_at(idx_a)["name"] == "BatchBeta" and reopened.path_at(idx_b)["name"] == "BatchAlpha",
+		"BZMAG round-trips swapped path names")
+	var exp_dir := scratch.path_join("batch-swap-export")
+	check(writer.export_native(reopened, exp_dir), "export batch-swap native BZN: " + writer.error)
+	var reimported := Document.new()
+	check(reimported.open(exp_dir.path_join(reopened.package.bzn_name)), "reimport batch-swap native BZN")
+	var names := {}
+	for i in reimported.path_indices():
+		names[String(reimported.path_at(i)["name"])] = true
+	check(names.has("BatchBeta") and names.has("BatchAlpha"), "native BZN reimport preserves swapped path names")
+	print("Batch path collision and swap checks verified.")
+
+
+func test_empty_object_table(brave_source: String, blank_source: String, scratch: String) -> void:
+	# Build a genuinely framed 1-object 1192 package (blank BZN + companion TER) and remove its last object
+	# through the real codec/exporter to obtain an organically framed 0-object BZN.
+	var one_dir := scratch.path_join("empty-obj-one")
+	DirAccess.make_dir_recursive_absolute(one_dir)
+	var blank_folder := blank_source.get_base_dir()
+	var blank_stem := blank_source.get_file().get_basename()
+	for ext in ["bzn", "trn", "inf"]:
+		DirAccess.copy_absolute(blank_folder.path_join("%s.%s" % [blank_stem, ext]), one_dir.path_join("%s.%s" % [blank_stem, ext]))
+	var brave_ter := brave_source.get_base_dir().path_join(brave_source.get_file().get_basename() + ".ter")
+	DirAccess.copy_absolute(brave_ter, one_dir.path_join("%s.ter" % blank_stem))
+
+	var one_bzn_path := one_dir.path_join(blank_source.get_file())
+	var one_doc := Document.new()
+	check(one_doc.open(one_bzn_path) and one_doc.object_count() == 1, "open private 1-object 1192 fixture: " + one_doc.error)
+	var orig_bzn_bytes := FileAccess.get_file_as_bytes(one_bzn_path)
+	var orig_entry: Dictionary = one_doc.package.objects[0]
+	var orig_paths_count := one_doc.path_indices().size()
+
+	# 1. Remove last object -> export genuinely framed 0-object BZN -> reimport
+	check(one_doc.remove_object(0) and one_doc.object_count() == 0, "remove the last object from 1-object 1192 map")
+	var writer := Snapshots.new()
+	var zero_dir := scratch.path_join("empty-obj-zero")
+	check(writer.export_native(one_doc, zero_dir), "export 0-object 1192 BZN: " + writer.error)
+	var zero_bzn_path := zero_dir.path_join(blank_source.get_file())
+	var zero_bytes := FileAccess.get_file_as_bytes(zero_bzn_path)
+	var zero_paths := BznPaths.new()
+	check(zero_paths.read(zero_bytes, 1192) and zero_paths.paths.size() == orig_paths_count,
+		"0-object BZN preserves all 23 native paths")
+	var zero_objs := BznObjects.new()
+	check(zero_objs.read(zero_bytes, 1192, zero_paths.table_start) and zero_objs.object_count == 0 and zero_objs.objects.is_empty(),
+		"BznObjects.read accepts genuinely framed 0-object BZN")
+
+	# 2. Open 0-object package + no-op export (byte-identical)
+	var zero_doc := Document.new()
+	check(zero_doc.open(zero_bzn_path) and zero_doc.object_count() == 0, "MapDocument opens 0-object BZN cleanly")
+	var zero_noop_dir := scratch.path_join("empty-obj-zero-noop")
+	check(writer.export_native(zero_doc, zero_noop_dir), "no-op export on 0-object BZN: " + writer.error)
+	check(FileAccess.get_file_as_bytes(zero_noop_dir.path_join(blank_source.get_file())) == zero_bytes,
+		"0-object no-op export is byte-identical")
+
+	# 3. Direct patch_objects on 0-object BZN: add first object -> prefix, header, count, groupTargets, paths preserved!
+	var first_block := BznObjects.build_block(orig_bzn_bytes, orig_entry, int(orig_entry["sequence"]), String(orig_entry["label"]), orig_entry["transform"], int(orig_entry["flag8"]))
+	var patched_zero := BznObjects.patch_objects(zero_bytes, zero_objs.objects, {}, [], [first_block], zero_objs.count_offset, zero_objs.insert_offset)
+	check(not patched_zero.is_empty(), "patch_objects inserts first object into an empty object table")
+	var rebuilt_bytes: PackedByteArray = patched_zero["bytes"]
+	check(rebuilt_bytes.slice(0, zero_objs.count_offset) == zero_bytes.slice(0, zero_objs.count_offset),
+		"empty-table insertion preserves BZN header and mission prefix byte-for-byte")
+	check(rebuilt_bytes.decode_u32(zero_objs.count_offset) == 1, "empty-table insertion patches object count 0 -> 1")
+	var rebuilt_paths := BznPaths.new()
+	check(rebuilt_paths.read(rebuilt_bytes, 1192) and rebuilt_paths.paths.size() == orig_paths_count,
+		"empty-table insertion preserves AiPath table and trailer")
+	var rebuilt_objs := BznObjects.new()
+	check(rebuilt_objs.read(rebuilt_bytes, 1192, rebuilt_paths.table_start) and rebuilt_objs.objects.size() == 1
+		and rebuilt_objs.objects[0]["odf"] == orig_entry["odf"],
+		"re-inserted first object round-trips cleanly through BznObjects.read")
+	check(rebuilt_bytes.slice(rebuilt_objs.insert_offset, rebuilt_paths.table_start) == zero_bytes.slice(zero_objs.insert_offset, zero_paths.table_start),
+		"empty-table insertion preserves 640-byte groupTargets and mission DLL framing")
+
+	# 4. Add after remove-all (duplicate template 0 then remove base 0) + BZMAG + native export/reimport
+	var add_after_doc := Document.new()
+	check(add_after_doc.open(one_bzn_path), "reopen 1-object map for add-after-remove-all check")
+	var dup_view := add_after_doc.duplicate_object(0, add_after_doc.object_position(0) + Vector3(8, 0, 8))
+	check(dup_view == 1 and add_after_doc.remove_object(0) and add_after_doc.object_count() == 1,
+		"duplicate then remove original base object leaves 1 added object")
+	var aar_proj := scratch.path_join("empty-obj-aar.bzmag")
+	check(writer.save_project(add_after_doc, aar_proj), "save BZMAG with added object whose base template was removed")
+	var aar_reopened := Document.new()
+	check(aar_reopened.open(aar_proj) and aar_reopened.object_count() == 1,
+		"reopen BZMAG with added object whose base template was removed")
+	var aar_exp := scratch.path_join("empty-obj-aar-export")
+	check(writer.export_native(aar_reopened, aar_exp), "export add-after-remove-all BZN: " + writer.error)
+	var aar_reimp := Document.new()
+	check(aar_reimp.open(aar_exp.path_join(blank_source.get_file())) and aar_reimp.object_count() == 1,
+		"reimport add-after-remove-all native BZN")
+
+	# 5. Empty path table + object table insertion/removal
+	var empty_paths_bzn := zero_bytes.duplicate()
+	var ep_codec := BznPaths.new()
+	check(ep_codec.read(empty_paths_bzn, 1192), "read paths for empty-path-table test")
+	var rm_all_paths := {}
+	for i in ep_codec.paths.size():
+		rm_all_paths[i] = {}
+	var zero_both := ep_codec.patch(empty_paths_bzn, rm_all_paths)
+	var zb_paths := BznPaths.new()
+	var zb_objs := BznObjects.new()
+	check(zb_paths.read(zero_both, 1192) and zb_paths.paths.is_empty(), "empty path table reads cleanly with 0 paths")
+	check(zb_objs.read(zero_both, 1192, zb_paths.table_start) and zb_objs.objects.is_empty(),
+		"0-object + 0-path BZN reads cleanly")
+	var zb_patched := BznObjects.patch_objects(zero_both, zb_objs.objects, {}, [], [first_block], zb_objs.count_offset, zb_objs.insert_offset)
+	var zb_paths2 := BznPaths.new()
+	var zb_objs2 := BznObjects.new()
+	check(not zb_patched.is_empty() and zb_paths2.read(zb_patched["bytes"], 1192) and zb_paths2.paths.is_empty()
+		and zb_objs2.read(zb_patched["bytes"], 1192, zb_paths2.table_start) and zb_objs2.objects.size() == 1,
+		"inserting first object on 0-object + 0-path BZN re-reads cleanly")
+
+	# 6. Pointer ID exhaustion / wraparound and MAX_OBJECTS limit checks
+	var full_used := {4294967294: 1, 4294967295: 1, 1: 1}
+	check(Snapshots.allocate_unique_pointer_id(full_used, 4294967294, 16) == 2,
+		"pointer ID allocator wraps cleanly past u32 max and skips used IDs")
+	var exhausted := {1: 1, 2: 1, 3: 1, 4: 1}
+	check(Snapshots.allocate_unique_pointer_id(exhausted, 1, 4) == -1,
+		"pointer ID allocator reports exhaustion cleanly instead of colliding")
+	var too_many: Array = []
+	for _i in range(BznObjects.MAX_OBJECTS + 1):
+		too_many.append(PackedByteArray([1]))
+	check(BznObjects.patch_objects(zero_bytes, zero_objs.objects, {}, [], too_many, zero_objs.count_offset, zero_objs.insert_offset).is_empty(),
+		"patch_objects refuses exceeding MAX_OBJECTS")
+	print("Empty object table, empty path table and pointer exhaustion checks verified.")
+
+
+func test_universal_mod_architecture(editor: Control, brave_source: String, blank_source: String, scratch: String) -> void:
+	# 1. Built-in ModRegistry manifests keep Stock, VSR (1325933293) and VRV (3820486276) strictly separate
+	var reg := ModRegistry.new()
+	check(reg.has_profile("stock") and reg.has_profile("vsr") and reg.has_profile("vrv"),
+		"ModRegistry provides separate stock, vsr and vrv profiles")
+	check(String(reg.get_profile("vsr")["workshopId"]) == "1325933293"
+		and String(reg.get_profile("vrv")["workshopId"]) == "3820486276",
+		"VSR and VRV carry distinct verified Workshop IDs")
+	check(ModRegistry.validate_manifest(reg.get_profile("stock")).is_empty()
+		and ModRegistry.validate_manifest(reg.get_profile("vsr")).is_empty()
+		and ModRegistry.validate_manifest(reg.get_profile("vrv")).is_empty(),
+		"built-in mod profiles pass schema validation")
+
+	# 2. Synthetic Workshop discovery (VSR + VRV + Unknown custom Workshop mod) + cycle detection
+	var fake_ws := scratch.path_join("fake-workshop")
+	for spec in [
+		{"id": "1325933293", "name": "Vet Strat Recycler Variant", "type": "config", "deps": "3532748119", "dll": "Strategy02.dll"},
+		{"id": "3532748119", "name": "VSR Asset Pack", "type": "asset", "deps": "", "dll": ""},
+		{"id": "3820486276", "name": "VRV - Vacuum Recycler Variant", "type": "config", "deps": "3532748119", "dll": "Strategy02.dll"},
+		{"id": "9990001111", "name": "Custom Arena Mod", "type": "config", "deps": "", "dll": "ArenaCustom.dll"},
+	]:
+		var d := fake_ws.path_join(String(spec["id"]))
+		DirAccess.make_dir_recursive_absolute(d)
+		var f := FileAccess.open(d.path_join(String(spec["id"]) + ".ini"), FileAccess.WRITE)
+		f.store_string("[WORKSHOP]\nmodName = \"%s\"\nmodType = \"%s\"\nassetDependencies = \"%s\"\n" % [
+			spec["name"], spec["type"], spec["deps"]])
+		f.close()
+		if not String(spec["dll"]).is_empty():
+			var mdir := d.path_join("Missions")
+			DirAccess.make_dir_recursive_absolute(mdir)
+			var df := FileAccess.open(mdir.path_join(String(spec["dll"])), FileAccess.WRITE)
+			df.store_buffer(PackedByteArray([77, 90]))
+			df.close()
+	var disc := reg.discover_installed("", "", fake_ws)
+	check(int(disc["count"]) >= 4 and (disc["cycles"] as Array).is_empty(),
+		"Workshop discovery finds built-ins plus unknown Workshop mod with zero cycles")
+	check(bool(reg.get_profile("vsr")["installed"]) and bool(reg.get_profile("vrv")["installed"])
+		and reg.has_profile("custom:ws-9990001111"),
+		"discovery populates VSR, VRV and custom Workshop mod independently")
+	var custom_res := reg.register_custom_mod("cycle_a", "Cycle A", fake_ws, ["custom:cycle_b"])
+	var custom_res2 := reg.register_custom_mod("cycle_b", "Cycle B", fake_ws, ["custom:cycle_a"])
+	check(not custom_res.has("error") and not custom_res2.has("error") and not reg.detect_dependency_cycles().is_empty(),
+		"dependency graph detects cycles cleanly")
+
+	# 3. Stock-first native flat map creation WITHOUT VRV templates
+	var flat_bytes := Terrain.create_flat(Vector2i(-256, -256), Vector2i(512, 512), 100.0, 0)
+	var flat_ter := Terrain.new()
+	check(flat_ter.decode(flat_bytes) and flat_ter.dimensions == Vector2i(512, 512) and absf(flat_ter.min_height - 100.0) < 0.001,
+		"Terrain.create_flat generates a valid native TER v5 without VRV")
+	var stock_out := scratch.path_join("stock-native-new")
+	var writer := Snapshots.new()
+	check(writer.create_native_flat_map(blank_source, stock_out, 1024, 100.0),
+		"create_native_flat_map creates a verified 1024 m map without VRV template: " + writer.error)
+	var stock_bzn := stock_out.path_join(blank_source.get_file())
+	var stock_doc := Document.new()
+	check(stock_doc.open(stock_bzn) and stock_doc.package.terrain.dimensions == Vector2i(512, 512),
+		"native-generated flat map opens and validates cleanly")
+
+	# 4. Open-map auto-detection: Stock-only 0-object map detects 'stock' (NEVER VRV!), Brave detects VSR/Strategy02
+	check(stock_doc.remove_object(0), "remove VSR craft to form a clean Stock-only map")
+	var pure_stock_dir := scratch.path_join("pure-stock-map")
+	check(writer.export_native(stock_doc, pure_stock_dir), "export pure Stock map: " + writer.error)
+	var pure_stock_bzn := pure_stock_dir.path_join(blank_source.get_file())
+	var pure_doc := Document.new()
+	check(pure_doc.open(pure_stock_bzn), "open pure Stock map")
+	check(pure_doc.mod_profile == "stock" and String(pure_doc.detected_profile_info["recommendedMod"]) == "stock",
+		"pure Stock map auto-detects as 'stock' and never silently selects VRV")
+
+	check(editor.open_map(brave_source), "open Brave to verify auto-detection and profile switching")
+	var brave_doc: Document = editor.document
+	check(brave_doc.package.mission_dll.to_lower() == "strategy02.dll"
+		and brave_doc.mod_profile in ["vsr", "vrv"] and brave_doc.mission_profile == "strategy",
+		"Brave auto-detects strategy02.dll and VSR/VRV candidate from real BZN evidence")
+
+	# 5. Hot-swappable Stock -> VSR -> Stock editing environment: undoable, non-destructive, Mission Studio synced
+	var src_bzn_hash := FileAccess.get_sha256(brave_source)
+	var orig_mod := brave_doc.mod_profile
+	var orig_mis := brave_doc.mission_profile
+	var stack_before := brave_doc.undo_stack.size()
+	check(not brave_doc.set_target_profile("INVALID MOD!", "strategy"), "reject invalid mod profile ID without mutating")
+	check(not brave_doc.set_target_profile("stock", "nonexistent_mode"), "reject invalid mission profile ID without mutating")
+	check(brave_doc.undo_stack.size() == stack_before, "rejected profile switches add zero history entries")
+
+	check(brave_doc.set_target_profile("stock", "instant"), "switch editing environment to Stock / Instant")
+	check(brave_doc.mod_profile == "stock" and brave_doc.mission_profile == "instant" and brave_doc.profile_explicit,
+		"document records explicit Stock / Instant target profile")
+	check(FileAccess.get_sha256(brave_source) == src_bzn_hash, "switching profile never alters native source BZN bytes")
+	editor.mission_studio.begin(brave_doc, Vector2.ZERO)
+	check(editor.mission_studio.current_profile_id() == "instant" and editor.mission_studio.mod_badge.text.contains("stock"),
+		"Mission Studio binds to active document profile instead of hardcoded Strategy default")
+	var stock_inst_val := MissionProfiles.validate(brave_doc, "instant", "stock")
+	check("RecyclerEnemy" in stock_inst_val["missing_required"],
+		"Stock Instant rules require RecyclerEnemy (distinct from VRV Strategy rules)")
+	editor.mission_studio.hide()
+
+	check(brave_doc.set_target_profile("vsr", "strategy"), "switch editing environment to VSR / Strategy")
+	var conv_report := reg.analyze_conversion(brave_doc, "stock", "strategy", MissionProfiles)
+	check(not (conv_report["incompatibleOdfs"] as Array).is_empty() and bool(conv_report["requiresExplicitSaveAs"]),
+		"dry-run VSR -> Stock conversion analysis reports incompatible _vsr ODFs without mutating map")
+	check(brave_doc.mod_profile == "vsr" and FileAccess.get_sha256(brave_source) == src_bzn_hash,
+		"dry-run analysis never mutates document or source files")
+
+	brave_doc.undo()
+	check(brave_doc.mod_profile == "stock" and brave_doc.mission_profile == "instant", "Undo reverses target profile switch")
+	brave_doc.undo()
+	check(brave_doc.mod_profile == orig_mod and brave_doc.mission_profile == orig_mis, "second Undo restores auto-detected profile")
+	brave_doc.redo()
+	check(brave_doc.mod_profile == "stock" and brave_doc.mission_profile == "instant", "Redo restores explicit target profile")
+
+	# 6. BZMAG target profile persistence + backward-compatible legacy BZMAG migration
+	var new_proj := scratch.path_join("universal-target.bzmag")
+	check(writer.save_project(brave_doc, new_proj), "save BZMAG with target profile metadata")
+	var reopened_target := Document.new()
+	check(reopened_target.open(new_proj) and reopened_target.mod_profile == "stock"
+		and reopened_target.mission_profile == "instant" and reopened_target.profile_explicit,
+		"BZMAG round-trips explicit target engine/mod/mission profile")
+
+	# Legacy schema-1 BZMAG without 'target' block (with legacy assetProfile)
+	var legacy_proj := scratch.path_join("legacy-no-target.bzmag")
+	var pure_json_path := scratch.path_join("legacy-base.bzmag")
+	var dummy_profile := scratch.path_join("legacy-assets.json")
+	var pf := FileAccess.open(dummy_profile, FileAccess.WRITE)
+	pf.store_string("{\"folders\":[]}")
+	pf.close()
+	pure_doc.asset_profile = dummy_profile
+	check(writer.save_project(pure_doc, pure_json_path), "save base project to strip into legacy format")
+	var parsed_legacy: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(pure_json_path))
+	parsed_legacy.erase("target")
+	parsed_legacy.erase("dependencies")
+	var lf := FileAccess.open(legacy_proj, FileAccess.WRITE)
+	lf.store_string(JSON.stringify(parsed_legacy, "", true, true))
+	lf.close()
+	var migrated := Document.new()
+	check(migrated.open(legacy_proj) and migrated.asset_profile == dummy_profile
+		and migrated.mod_profile == "stock" and not migrated.profile_explicit,
+		"legacy BZMAG migrates cleanly, preserves assetProfile and infers Stock without auto-selecting VRV")
+	print("Universal mod-agnostic architecture, Stock-first New Map, profile switching & legacy migration verified.")

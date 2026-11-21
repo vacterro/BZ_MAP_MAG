@@ -10,6 +10,7 @@ const MAX_STEP := 4
 const LOD_NEAR_SAMPLES := 160.0
 const LOD_MID_SAMPLES := 384.0
 const LOD_BUDGET_PER_MOVE := 16
+const LOD_BUDGET_PER_FRAME := 12
 
 var document: Document
 var palette: Dictionary
@@ -36,6 +37,13 @@ var meshes := {}
 var chunk_steps := {}
 var brush_focus := Vector2(-1, -1)
 var lod_rebuilds_last := 0
+var lod_queue: Array[Vector2i] = []
+var lod_revision := 0
+var lod_pending_count := 0
+var total_chunk_rebuilds := 0
+var _last_lod_cam_sample := Vector2(INF, INF)
+var _last_lod_brush := Vector2(INF, INF)
+var _index_cache := {}
 var center := Vector3.ZERO
 var yaw := 0.55
 var pitch := 0.78
@@ -90,6 +98,15 @@ func _ready() -> void:
 	accent.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	outline.material = accent
 	object_cursor.mesh = outline
+	set_process(false)
+
+
+func _process(_delta: float) -> void:
+	if lod_queue.is_empty():
+		lod_pending_count = 0
+		set_process(false)
+		return
+	step_lod_queue(LOD_BUDGET_PER_FRAME)
 
 
 func bind(value: Document) -> void:
@@ -108,7 +125,13 @@ func bind(value: Document) -> void:
 		mesh.queue_free()
 	meshes.clear()
 	chunk_steps.clear()
+	lod_queue.clear()
+	lod_pending_count = 0
+	lod_revision += 1
+	_last_lod_cam_sample = Vector2(INF, INF)
+	_last_lod_brush = Vector2(INF, INF)
 	brush_focus = Vector2(-1, -1)
+	set_process(false)
 	var terrain := document.package.terrain
 	var size := terrain.dimensions - Vector2i.ONE
 	center = point_world(Vector2(size) * 0.5)
@@ -189,35 +212,112 @@ func exact_sample_info(sample: Vector2) -> Dictionary:
 	}
 
 
-func update_lod(budget: int = LOD_BUDGET_PER_MOVE) -> int:
+func schedule_lod(force := false) -> int:
 	if document == null or meshes.is_empty():
+		lod_queue.clear()
+		lod_pending_count = 0
+		set_process(false)
 		return 0
-	var to_update: Array[Vector2i] = []
+	var terrain := document.package.terrain
+	var cam_sample := Vector2(center.x, center.z) / terrain.SPACING - Vector2(terrain.origin)
+	if not force and _last_lod_cam_sample.is_finite():
+		var cam_moved := cam_sample.distance_squared_to(_last_lod_cam_sample) >= float(CHUNK * CHUNK) * 0.0625
+		var brush_moved := (brush_focus.x >= 0.0) != (_last_lod_brush.x >= 0.0) or (brush_focus.x >= 0.0 and brush_focus.distance_squared_to(_last_lod_brush) >= float(CHUNK * CHUNK) * 0.0625)
+		if not cam_moved and not brush_moved:
+			return lod_queue.size()
+	_last_lod_cam_sample = cam_sample
+	_last_lod_brush = brush_focus
+	lod_revision += 1
+	var queued: Array[Vector2i] = []
 	for start: Vector2i in meshes:
 		var wanted := desired_lod_step(start)
 		if int(chunk_steps.get(start, -1)) != wanted:
-			to_update.append(start)
-	if to_update.is_empty():
-		lod_rebuilds_last = 0
+			queued.append(start)
+	if queued.is_empty():
+		lod_queue.clear()
+		lod_pending_count = 0
+		set_process(false)
 		return 0
-	var cam_sample := Vector2(center.x, center.z) / document.package.terrain.SPACING - Vector2(document.package.terrain.origin)
-	to_update.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-		return Vector2(a).distance_squared_to(cam_sample) < Vector2(b).distance_squared_to(cam_sample)
+	queued.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		var ca := Vector2(a) + Vector2(CHUNK, CHUNK) * 0.5
+		var cb := Vector2(b) + Vector2(CHUNK, CHUNK) * 0.5
+		var da := ca.distance_squared_to(cam_sample)
+		var db := cb.distance_squared_to(cam_sample)
+		if brush_focus.x >= 0.0:
+			da = minf(da, ca.distance_squared_to(brush_focus))
+			db = minf(db, cb.distance_squared_to(brush_focus))
+		return da < db
 	)
-	var count := mini(budget, to_update.size()) if budget > 0 else to_update.size()
+	lod_queue = queued
+	lod_pending_count = lod_queue.size()
+	set_process(true)
+	return lod_pending_count
+
+
+func step_lod_queue(budget: int = LOD_BUDGET_PER_FRAME) -> int:
+	if document == null or meshes.is_empty() or lod_queue.is_empty():
+		lod_queue.clear()
+		lod_pending_count = 0
+		lod_rebuilds_last = 0
+		set_process(false)
+		return 0
+	var limit := budget if budget > 0 else lod_queue.size()
 	var dirty_neighbors := {}
-	for i in count:
-		var start: Vector2i = to_update[i]
-		chunk_steps[start] = desired_lod_step(start)
+	var processed := 0
+	var cursor := 0
+	while cursor < lod_queue.size() and processed < limit:
+		var start: Vector2i = lod_queue[cursor]
+		cursor += 1
+		if not meshes.has(start):
+			continue
+		var wanted := desired_lod_step(start)
+		if int(chunk_steps.get(start, -1)) == wanted:
+			continue
+		chunk_steps[start] = wanted
 		dirty_neighbors[start] = true
 		for offset: Vector2i in [Vector2i(-CHUNK, 0), Vector2i(CHUNK, 0), Vector2i(0, -CHUNK), Vector2i(0, CHUNK)]:
 			var nb := start + offset
 			if meshes.has(nb):
 				dirty_neighbors[nb] = true
+		processed += 1
+	if cursor >= lod_queue.size():
+		lod_queue.clear()
+	else:
+		lod_queue = lod_queue.slice(cursor)
+	lod_pending_count = lod_queue.size()
+	set_process(lod_pending_count > 0)
 	for start: Vector2i in dirty_neighbors:
 		build_chunk(start)
 	lod_rebuilds_last = dirty_neighbors.size()
 	return lod_rebuilds_last
+
+
+func update_lod(budget: int = LOD_BUDGET_PER_MOVE) -> int:
+	if document == null or meshes.is_empty():
+		return 0
+	schedule_lod(true)
+	return step_lod_queue(budget)
+
+
+func _cached_indices(nx: int, nz: int) -> PackedInt32Array:
+	var key := Vector2i(nx, nz)
+	if _index_cache.has(key):
+		return _index_cache[key]
+	var indices := PackedInt32Array()
+	indices.resize((nx - 1) * (nz - 1) * 6)
+	var k := 0
+	for j in nz - 1:
+		for i in nx - 1:
+			var a := j * nx + i
+			indices[k] = a
+			indices[k + 1] = a + 1
+			indices[k + 2] = a + nx
+			indices[k + 3] = a + 1
+			indices[k + 4] = a + nx + 1
+			indices[k + 5] = a + nx
+			k += 6
+	_index_cache[key] = indices
+	return indices
 
 
 func point_world(point: Vector2) -> Vector3:
@@ -253,17 +353,19 @@ func build_chunk(start: Vector2i, step_override: int = 0) -> void:
 	var points := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var colors := PackedColorArray()
-	var indices := PackedInt32Array()
 	points.resize(nx * nz)
 	normals.resize(nx * nz)
 	colors.resize(nx * nz)
 	var amplitude := maxf(0.1, terrain.max_height - terrain.min_height)
+	var inv_amplitude := 1.0 / amplitude
 	var need_seam := (left_step > step) or (right_step > step) or (top_step > step) or (bottom_step > step)
 	var color_preview := graph_preview_layer == Terrain.Layer.COLOR or (graph_preview_layer < 0 and use_vertex_colors)
 	var tile_preview := graph_preview_layer == Terrain.Layer.TILES
 	var base_col: Color = palette["surface"]
 	var hi_col: Color = palette["textPrimary"]
 	var min_h := terrain.min_height
+	var last_i := nx - 1
+	var last_j := nz - 1
 	for j in nz:
 		var z := mini(start.y + j * step, end.y)
 		var z_lo := maxi(z - step, 0)
@@ -272,43 +374,33 @@ func build_chunk(start: Vector2i, step_override: int = 0) -> void:
 		var z_row := z * row
 		var z_lo_row := z_lo * row
 		var z_hi_row := z_hi * row
+		var on_z_edge := (j == 0 or j == last_j)
+		var row_base := j * nx
 		for i in nx:
 			var x := mini(start.x + i * step, end.x)
 			var x_lo := maxi(x - step, 0)
 			var x_hi := mini(x + step, max_x)
 			var dx_world := float(x_hi - x_lo) * spacing
-			var py := seam_snapped_height(x, z, start, end, step, left_step, right_step, top_step, bottom_step, heights, row) if need_seam else heights[z_row + x]
-			var p := Vector3(float(x + ox) * spacing, py, float(z + oz) * spacing)
+			var py := seam_snapped_height(x, z, start, end, step, left_step, right_step, top_step, bottom_step, heights, row) if (need_seam and (on_z_edge or i == 0 or i == last_i)) else heights[z_row + x]
+			var index := row_base + i
+			points[index] = Vector3(float(x + ox) * spacing, py, float(z + oz) * spacing)
 			var dhy := heights[z_row + x_hi] - heights[z_row + x_lo]
 			var dhz := heights[z_hi_row + x] - heights[z_lo_row + x]
-			var index := j * nx + i
-			points[index] = p
 			normals[index] = Vector3(-dhy * dz_world, dx_world * dz_world, -dhz * dx_world).normalized()
-			var fraction := clampf((py - min_h) / amplitude, 0.0, 1.0)
-			colors[index] = base_col.lerp(hi_col, 0.25 + 0.69 * fraction)
 			if tile_preview:
 				var slot := terrain.material_value(Terrain.Layer.TILES, terrain.block_at(Vector2i(x, z))) & 15
 				colors[index] = base_col.lerp(hi_col, slot / 15.0)
 			elif color_preview:
 				colors[index] = terrain.color_at(x, z)
-	indices.resize((nx - 1) * (nz - 1) * 6)
-	var k := 0
-	for j in nz - 1:
-		for i in nx - 1:
-			var a := j * nx + i
-			indices[k] = a
-			indices[k + 1] = a + 1
-			indices[k + 2] = a + nx
-			indices[k + 3] = a + 1
-			indices[k + 4] = a + nx + 1
-			indices[k + 5] = a + nx
-			k += 6
+			else:
+				var fraction := clampf((py - min_h) * inv_amplitude, 0.0, 1.0)
+				colors[index] = base_col.lerp(hi_col, 0.25 + 0.69 * fraction)
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = points
 	arrays[Mesh.ARRAY_NORMAL] = normals
 	arrays[Mesh.ARRAY_COLOR] = colors
-	arrays[Mesh.ARRAY_INDEX] = indices
+	arrays[Mesh.ARRAY_INDEX] = _cached_indices(nx, nz)
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	mesh.surface_set_material(0, active_terrain_material())
@@ -317,6 +409,7 @@ func build_chunk(start: Vector2i, step_override: int = 0) -> void:
 		world.add_child(instance)
 		meshes[start] = instance
 	meshes[start].mesh = mesh
+	total_chunk_rebuilds += 1
 
 
 func refresh(region: Rect2i) -> void:
@@ -336,7 +429,8 @@ func update_camera() -> void:
 	var offset := Vector3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch))
 	camera.position = center + offset * distance
 	camera.look_at(center)
-	update_lod()
+	if schedule_lod() > 0:
+		step_lod_queue(LOD_BUDGET_PER_MOVE)
 
 
 func orbit(relative: Vector2) -> void:
@@ -550,8 +644,8 @@ func show_cursor(point: Vector2) -> void:
 	if point.x >= 0.0:
 		var moved := brush_focus.distance_to(point) >= CHUNK * 0.5 or brush_focus.x < 0.0
 		brush_focus = point
-		if moved:
-			update_lod(8)
+		if moved and schedule_lod() > 0:
+			step_lod_queue(8)
 	marker.visible = point.x >= 0
 	if not marker.visible:
 		return

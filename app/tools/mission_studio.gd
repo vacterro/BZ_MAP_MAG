@@ -14,6 +14,7 @@ signal status_message(text: String)
 
 var document: Document
 var anchor := Vector2.INF
+var mod_badge := Label.new()
 var profile_select := OptionButton.new()
 var profile_note := Label.new()
 var preset_list := ItemList.new()
@@ -48,13 +49,12 @@ func _ready() -> void:
 	var top := HBoxContainer.new()
 	root.add_child(top)
 	var prof_lbl := Label.new()
-	prof_lbl.text = "Mission Profile:"
+	prof_lbl.text = "Mission Mode:"
 	top.add_child(prof_lbl)
-	for id: String in MissionProfiles.PROFILE_ORDER:
-		profile_select.add_item(String(MissionProfiles.PROFILES[id]["label"]))
+	for id: String in MissionProfiles.MISSION_MODES:
+		profile_select.add_item(String(MissionProfiles.MODE_LABELS.get(id, id)))
 		profile_select.set_item_metadata(profile_select.item_count - 1, id)
-	profile_select.select(1) # Strategy default
-	profile_select.item_selected.connect(func(_idx): refresh_all())
+	profile_select.item_selected.connect(_on_mission_mode_selected)
 	top.add_child(profile_select)
 	generate_profile_button = add_btn(top, "Generate Required", generate_missing_required)
 	propose_edge_button = add_btn(top, "Propose edge_path", create_proposed_edge_path)
@@ -62,6 +62,8 @@ func _ready() -> void:
 	snap_check.toggled.connect(func(on: bool): snap_toggled.emit(on))
 	top.add_child(snap_check)
 
+	mod_badge.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	root.add_child(mod_badge)
 	profile_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	root.add_child(profile_note)
 
@@ -145,9 +147,32 @@ func current_profile_id() -> String:
 	return String(profile_select.get_item_metadata(idx))
 
 
+func current_mod_id() -> String:
+	return document.mod_profile if document != null else "stock"
+
+
+func _sync_profile_select() -> void:
+	if document == null:
+		return
+	var target := document.mission_profile
+	var idx := MissionProfiles.MISSION_MODES.find(target)
+	if idx >= 0:
+		profile_select.select(idx)
+
+
+func _on_mission_mode_selected(_idx: int) -> void:
+	if _rebuilding or document == null:
+		return
+	var next_mode := current_profile_id()
+	if document.mission_profile != next_mode:
+		document.set_target_profile(document.mod_profile, next_mode)
+	refresh_all()
+
+
 func begin(doc: Document, world_anchor: Vector2) -> void:
 	document = doc
 	anchor = world_anchor
+	_sync_profile_select()
 	refresh_all()
 	popup_centered()
 
@@ -156,8 +181,16 @@ func refresh_all() -> void:
 	if document == null or _rebuilding:
 		return
 	_rebuilding = true
+	_sync_profile_select()
 	var profile_id := current_profile_id()
-	var validation := MissionProfiles.validate(document, profile_id)
+	var mod_id := current_mod_id()
+	var validation := MissionProfiles.validate(document, profile_id, mod_id)
+	var contract := MissionProfiles.contract_for(profile_id, mod_id)
+	var dll_text := String(document.package.mission_dll)
+	if dll_text.is_empty():
+		dll_text = "(none in BZN)"
+	mod_badge.text = "Target Mod: %s  |  BZN DLL: %s  |  Rule Semantics: %s" % [
+		mod_id, dll_text, String(validation.get("semantics", "UNKNOWN"))]
 	profile_note.text = String(validation["dll_note"])
 
 	var active_names := {}
@@ -168,13 +201,13 @@ func refresh_all() -> void:
 	var prev_preset := preset_list.get_selected_items()[0] if not preset_list.get_selected_items().is_empty() else 0
 	preset_list.clear()
 	var req_set := {}
-	for r: String in MissionProfiles.PROFILES[profile_id]["required"]:
+	for r: String in contract.get("required", []):
 		req_set[r.to_lower()] = true
 	var rec_set := {}
-	for r: String in MissionProfiles.PROFILES[profile_id]["recommended"]:
+	for r: String in contract.get("recommended", []):
 		rec_set[r.to_lower()] = true
 
-	for pname: String in MissionProfiles.PRESET_ORDER:
+	for pname: String in MissionProfiles.presets_for(profile_id, mod_id):
 		var key := pname.to_lower()
 		var badge := "[OK]" if active_names.has(key) else ("[REQ]" if req_set.has(key) else ("[REC]" if rec_set.has(key) else "[OPT]"))
 		preset_list.add_item("%s %s (%s)" % [badge, pname, MissionProfiles.PRESETS[pname]["category"]])
@@ -282,7 +315,7 @@ func generate_missing_required() -> void:
 	if document == null:
 		return
 	var profile_id := current_profile_id()
-	var validation := MissionProfiles.validate(document, profile_id)
+	var validation := MissionProfiles.validate(document, profile_id, current_mod_id())
 	var missing: Array = validation["missing_required"]
 	if missing.is_empty():
 		status_message.emit("All required paths for %s already exist." % validation["label"])

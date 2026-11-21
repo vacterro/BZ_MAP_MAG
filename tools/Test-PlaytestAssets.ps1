@@ -51,6 +51,18 @@ if (Test-Path -LiteralPath $vsrDeps -PathType Container) {
     if ($separated.LaunchRoute -ne 'native' -or $separated.ConverterRoot -ne '' -or -not $separated.ResolvedOdfs.ContainsKey('ivtank_vsr.odf')) {
         throw '1192 native launch failed to resolve ODFs through explicit -AssetRoots without -VrvSource.'
     }
+    # Strict Stock isolation: -ModProfile 'stock' must NEVER mount VRV/VSR assets even if -Converter or -VrvSource is provided.
+    Expect-Refusal 'Missing object ODF dependencies: ivtank_vsr.odf' {
+        & $launcher -Game $Game -Godot $Godot -ModProfile 'stock' -Converter $VrvSource -VrvSource $VrvSource -Mission $flat -ValidateOnly
+    }
+    # Separate -ModProfile 'vsr' resolves VSR ODFs via Workshop 1325933293 without requiring -VrvSource.
+    $vsrWs = [IO.Path]::GetFullPath((Join-Path $Game '../../workshop/content/624970/1325933293'))
+    if (Test-Path -LiteralPath $vsrWs -PathType Container) {
+        $vsrPlan = & $launcher -Game $Game -Godot $Godot -ModProfile 'vsr' -Mission $flat -ValidateOnly
+        if ($vsrPlan.LaunchRoute -ne 'native' -or $vsrPlan.ConverterRoot -ne '' -or -not $vsrPlan.ResolvedOdfs.ContainsKey('ivtank_vsr.odf')) {
+            throw 'ModProfile vsr failed to resolve VSR ODFs independently of -VrvSource.'
+        }
+    }
 }
 # Cached ODF index reuse + invalidation + ambiguity + packed DOCP .pak support.
 . (Join-Path $PSScriptRoot 'Playtest-Assets.ps1')

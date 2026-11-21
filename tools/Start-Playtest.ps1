@@ -4,6 +4,9 @@ param(
     [Parameter(Mandatory)] [string] $Mission,
     [string] $Godot,
     [string] $VrvSource,
+    [string] $Converter,
+    [string] $ModProfile,
+    [string] $MissionProfile,
     [string[]] $AssetRoots = @(),
     [string] $AssetProfile,
     [string] $ResultFile,
@@ -124,10 +127,16 @@ if ($launchRoute -eq 'convert' -and $KeepBznLayout) {
     throw '-KeepBznLayout requires a confirmed native 2.0.185 layout (version 1192). This map is version 1196 and needs the verified conversion.'
 }
 if ($launchRoute -eq 'convert') {
-    if (-not $VrvSource) {
-        throw 'This 1196 map needs the verified VRV conversion adapter. Pass -VrvSource pointing at the VRV checkout with tools/bzn_compat.py.'
+    $converterArg = if ($Converter) { $Converter } else { $VrvSource }
+    if (-not $converterArg) {
+        throw 'This 1196 map needs the verified VRV conversion adapter. Pass -Converter (or legacy -VrvSource) pointing at the converter checkout with tools/bzn_compat.py.'
     }
-    $converter = Join-Path (Resolve-Path -LiteralPath $VrvSource).Path 'tools/bzn_compat.py'
+    $resolvedConv = (Resolve-Path -LiteralPath $converterArg).Path
+    $converter = if ((Test-Path -LiteralPath $resolvedConv -PathType Leaf) -and $resolvedConv.EndsWith('.py', [StringComparison]::OrdinalIgnoreCase)) {
+        $resolvedConv
+    } else {
+        Join-Path $resolvedConv 'tools/bzn_compat.py'
+    }
     if (-not (Test-Path -LiteralPath $converter -PathType Leaf)) {
         throw "The VRV layout converter is missing at $converter."
     }
@@ -137,11 +146,12 @@ if ($launchRoute -eq 'convert') {
 }
 
 $odfs = if ($package.PSObject.Properties.Name -contains 'odfs') { @($package.odfs) } else { @() }
-$assetPlan = Get-PlaytestAssetPlan $Game $Mission $AssetProfile $VrvSource ([bool]$WithoutMissionScript) $AssetRoots $odfs
+$assetPlan = Get-PlaytestAssetPlan $Game $Mission $AssetProfile $VrvSource ([bool]$WithoutMissionScript) $AssetRoots $odfs '' $ModProfile $Converter
 if ($ValidateOnly) {
     return $assetPlan | Add-Member -PassThru -NotePropertyMembers @{
         LaunchRoute = $launchRoute
         BznVersion = $bznVersion
+        MissionProfile = $MissionProfile
         KeepRequested = [bool]$KeepBznLayout
         VrvConverterRequired = ($launchRoute -eq 'convert')
     }
