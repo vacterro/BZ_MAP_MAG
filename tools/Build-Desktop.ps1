@@ -39,15 +39,24 @@ $gitDirty = ($dirtyRaw.Count -gt 0)
 $godotVer = try { (& $Godot --version 2>$null | Out-String).Trim() } catch { '4.7.2.stable' }
 $srcDigest = Get-BzmagAppSourceDigest $app
 $impDigest = Get-BzmagImportDigest $app
+$helperProv = Get-BzmagHelperProvenance $repo
 $pckHash = (Get-FileHash -LiteralPath $pack -Algorithm SHA256).Hash.ToLowerInvariant()
 $exeHash = (Get-FileHash -LiteralPath $stageExe -Algorithm SHA256).Hash.ToLowerInvariant()
 $stateTag = if ($gitDirty) { 'dirty' } else { 'clean' }
 $buildRev = "$gitShort-$($srcDigest.Substring(0, 12))-$stateTag"
+$builtAtUtc = [DateTime]::UtcNow.ToString('o')
 $manifest = [ordered]@{
-    schema = 'bzmag.build-manifest/2'
+    schema = 'bzmag.build-manifest/3'
     buildRevision = $buildRev
     sourceDigest = $srcDigest
     importDigest = $impDigest
+    helpersDigest = $helperProv.Digest
+    helpers = $helperProv.Helpers
+    schemas = [ordered]@{
+        manifest = 'bzmag.build-manifest/3'
+        compatibility = 'bzmag.compatibility-result/1'
+        project = 1
+    }
     pckSha256 = $pckHash
     exeSha256 = $exeHash
     gitHead = $gitHead
@@ -56,9 +65,9 @@ $manifest = [ordered]@{
     godotVersion = $godotVer
     buildMode = 'release'
     buildTarget = if ($ToRoot) { 'root-executable' } else { 'portable-desktop' }
-    builtAtUtc = [DateTime]::UtcNow.ToString('o')
+    builtAtUtc = $builtAtUtc
 }
-[IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 4), [Text.Encoding]::UTF8)
+[IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 5), [Text.Encoding]::UTF8)
 
 # Validate staged binary + pack before publishing
 $smokeLog = Join-Path $stage 'smoke.log'
@@ -68,10 +77,48 @@ if ($smokeProc.ExitCode -ne 0) {
 }
 
 if ($ToRoot) {
+    # Stage an immutable versioned release directory before publishing root pointers
+    $releasesRoot = (New-Item -ItemType Directory -Path (Join-Path $repo 'build/releases') -Force).FullName
+    $releaseDir = Join-Path $releasesRoot $buildRev
+    if (-not $SimulatePublishFailure -and -not (Test-Path -LiteralPath $releaseDir -PathType Container)) {
+        $relTemp = Join-Path $releasesRoot ('.stage-' + [guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $relTemp -Force
+        try {
+            Copy-Item -LiteralPath $pack -Destination (Join-Path $relTemp 'BZ_MAP_MAG.pck') -Force
+            Copy-Item -LiteralPath $stageExe -Destination (Join-Path $relTemp 'BZ_MAP_MAG.exe') -Force
+            Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $relTemp 'BZ_MAP_MAG.manifest.json') -Force
+            $relTools = (New-Item -ItemType Directory -Path (Join-Path $relTemp 'tools') -Force).FullName
+            foreach ($name in 'Start-Playtest.ps1','Playtest-Assets.ps1','Run-Ownership.ps1','Find-Bzcc.ps1','New-FlatTerrainSnapshot.ps1') {
+                Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $relTools -Force
+            }
+            $meshPreview = Join-Path $repo 'build/object-preview/mesh-preview.exe'
+            if (Test-Path -LiteralPath $meshPreview -PathType Leaf) {
+                Copy-Item -LiteralPath $meshPreview -Destination $relTools -Force
+            }
+            Move-Item -LiteralPath $relTemp -Destination $releaseDir
+        } catch {
+            Remove-Item -LiteralPath $relTemp -Recurse -Force -ErrorAction SilentlyContinue
+            throw
+        }
+    }
+    $releasePointerPath = Join-Path $stage 'BZ_MAP_MAG.release.json'
+    $releasePointer = [ordered]@{
+        schema = 'bzmag.release-pointer/1'
+        buildRevision = $buildRev
+        releaseDir = "build/releases/$buildRev"
+        pckSha256 = $pckHash
+        exeSha256 = $exeHash
+        sourceDigest = $srcDigest
+        helpersDigest = $helperProv.Digest
+        publishedAtUtc = $builtAtUtc
+    }
+    [IO.File]::WriteAllText($releasePointerPath, ($releasePointer | ConvertTo-Json -Depth 4), [Text.Encoding]::UTF8)
+
     $items = @(
         @{ Name = 'BZ_MAP_MAG.pck'; Staged = $pack; Hash = $pckHash },
         @{ Name = 'BZ_MAP_MAG.exe'; Staged = $stageExe; Hash = $exeHash },
-        @{ Name = 'BZ_MAP_MAG.manifest.json'; Staged = $manifestPath; Hash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() }
+        @{ Name = 'BZ_MAP_MAG.manifest.json'; Staged = $manifestPath; Hash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() },
+        @{ Name = 'BZ_MAP_MAG.release.json'; Staged = $releasePointerPath; Hash = (Get-FileHash -LiteralPath $releasePointerPath -Algorithm SHA256).Hash.ToLowerInvariant() }
     )
     $hadExisting = @{}
     try {
@@ -133,7 +180,7 @@ if ($ToRoot) {
     } finally {
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     }
-    Get-Item -LiteralPath (Join-Path $repo 'BZ_MAP_MAG.exe'), (Join-Path $repo 'BZ_MAP_MAG.pck'), (Join-Path $repo 'BZ_MAP_MAG.manifest.json') | Select-Object Name,Length
+    Get-Item -LiteralPath (Join-Path $repo 'BZ_MAP_MAG.exe'), (Join-Path $repo 'BZ_MAP_MAG.pck'), (Join-Path $repo 'BZ_MAP_MAG.manifest.json'), (Join-Path $repo 'BZ_MAP_MAG.release.json') | Select-Object Name,Length
     $repo
     return
 }

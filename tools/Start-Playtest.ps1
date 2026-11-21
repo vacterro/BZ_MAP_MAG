@@ -74,9 +74,11 @@ function Get-ValidatedPackage([string] $MissionPath) {
             $liveDigest = Get-BzmagAppSourceDigest $app
             $livePckHash = (Get-FileHash -LiteralPath $pckFile -Algorithm SHA256).Hash.ToLowerInvariant()
             $liveExeHash = (Get-FileHash -LiteralPath $validator -Algorithm SHA256).Hash.ToLowerInvariant()
+            $liveHelperProv = Get-BzmagHelperProvenance $root
             $exeMismatch = ($manifest.PSObject.Properties.Name -contains 'exeSha256') -and $manifest.exeSha256 -and ($manifest.exeSha256 -ne $liveExeHash)
-            if ($manifest.sourceDigest -ne $liveDigest -or $manifest.pckSha256 -ne $livePckHash -or $exeMismatch) {
-                throw 'Stale or unverified packaged validator: BZ_MAP_MAG.pck or BZ_MAP_MAG.exe does not match live app/ sources. Rebuild with tools/Build-Desktop.ps1 -ToRoot or pass -Godot.'
+            $helperMismatch = ($manifest.PSObject.Properties.Name -contains 'helpersDigest') -and $manifest.helpersDigest -and ($manifest.helpersDigest -ne $liveHelperProv.Digest)
+            if ($manifest.sourceDigest -ne $liveDigest -or $manifest.pckSha256 -ne $livePckHash -or $exeMismatch -or $helperMismatch) {
+                throw 'Stale or unverified packaged validator: BZ_MAP_MAG.pck, BZ_MAP_MAG.exe or runtime helpers do not match live workspace sources. Rebuild with tools/Build-Desktop.ps1 -ToRoot or pass -Godot.'
             }
         }
     } elseif (-not $validator) {

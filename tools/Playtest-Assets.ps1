@@ -33,6 +33,45 @@ function Get-BzmagImportDigest([string] $AppDir) {
     return Get-StringSha256 ($parts -join "`n")
 }
 
+function Get-BzmagHelperProvenance([string] $RepoRoot) {
+    $resolved = (Resolve-Path -LiteralPath $RepoRoot).Path
+    $helpers = [ordered]@{}
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $helperList = @(
+        'tools/Start-Playtest.ps1',
+        'tools/Playtest-Assets.ps1',
+        'tools/Run-Ownership.ps1',
+        'tools/Find-Bzcc.ps1',
+        'tools/New-FlatTerrainSnapshot.ps1'
+    )
+    foreach ($rel in $helperList) {
+        $full = Join-Path $resolved $rel
+        if (Test-Path -LiteralPath $full -PathType Leaf) {
+            $h = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
+            $helpers[$rel] = $h
+            $parts.Add("${rel}:${h}")
+        }
+    }
+    $previewRel = ''
+    $previewBuilt = Join-Path $resolved 'build/object-preview/mesh-preview.exe'
+    $previewBundled = Join-Path $resolved 'tools/mesh-preview.exe'
+    if (Test-Path -LiteralPath $previewBuilt -PathType Leaf) {
+        $previewRel = 'mesh-preview.exe'
+        $h = (Get-FileHash -LiteralPath $previewBuilt -Algorithm SHA256).Hash.ToLowerInvariant()
+        $helpers[$previewRel] = $h
+        $parts.Add("${previewRel}:${h}")
+    } elseif (Test-Path -LiteralPath $previewBundled -PathType Leaf) {
+        $previewRel = 'mesh-preview.exe'
+        $h = (Get-FileHash -LiteralPath $previewBundled -Algorithm SHA256).Hash.ToLowerInvariant()
+        $helpers[$previewRel] = $h
+        $parts.Add("${previewRel}:${h}")
+    }
+    return [pscustomobject]@{
+        Helpers = $helpers
+        Digest = if ($parts.Count -gt 0) { Get-StringSha256 ($parts -join "`n") } else { '' }
+    }
+}
+
 function Get-LinkedAssetFolders([string] $AssetProfile) {
     if (-not $AssetProfile) { return }
     $profileFile = Get-Item -LiteralPath $AssetProfile
