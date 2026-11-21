@@ -5,6 +5,10 @@ extends ConfirmationDialog
 ## Ordinary object names belong in the generic Object Label editor.
 
 const Document := preload("res://core/map_document.gd")
+const Wintage := preload("res://themes/wintage.gd")
+const ChoiceGroup := preload("res://themes/choice_group.gd")
+const SliderField := preload("res://themes/slider_field.gd")
+const DIALOG_WIDTH := 460
 
 signal updated(message: String)
 signal sound_point_selected(view_index: int)
@@ -13,17 +17,19 @@ var document: Document
 var selected_view := -1
 var game_dir := ""
 var vrv_dir := ""
+var extra_sound_roots: Array = []
 var target_label := Label.new()
-var existing_row := HBoxContainer.new()
-var existing_select := OptionButton.new()
+var existing_row := VBoxContainer.new()
+var existing_select := ChoiceGroup.new(0)
 var select_existing_btn := Button.new()
+var editor_fields := VBoxContainer.new()
 var sound_field := LineEdit.new()
-var volume_spin := SpinBox.new()
-var range_spin := SpinBox.new()
-var interval_spin := SpinBox.new()
-var jitter_spin := SpinBox.new()
-var pitch_spin := SpinBox.new()
-var near_spin := SpinBox.new()
+var volume_spin := SliderField.new()
+var range_spin := SliderField.new()
+var interval_spin := SliderField.new()
+var jitter_spin := SliderField.new()
+var pitch_spin := SliderField.new()
+var near_spin := SliderField.new()
 var asset_status := Label.new()
 var duplicate_btn: Button
 
@@ -32,44 +38,50 @@ func _ready() -> void:
 	title = "Sound Point Editor"
 	ok_button_text = "Apply Sound Point"
 	dialog_hide_on_ok = false
-	min_size = Vector2i(480, 420)
 	var layout := VBoxContainer.new()
-	layout.add_theme_constant_override("separation", 6)
+	layout.custom_minimum_size.x = DIALOG_WIDTH - 24
+	layout.add_theme_constant_override("separation", 4)
 	add_child(layout)
 
 	target_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	target_label.custom_minimum_size.x = DIALOG_WIDTH - 24
 	layout.add_child(target_label)
 
+	var existing_hdr := HBoxContainer.new()
 	var existing_lbl := Label.new()
 	existing_lbl.text = "Existing sound points"
-	existing_row.add_child(existing_lbl)
-	existing_select.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	existing_row.add_child(existing_select)
+	existing_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	existing_hdr.add_child(existing_lbl)
 	select_existing_btn.text = "Select"
 	select_existing_btn.pressed.connect(select_chosen_sound_point)
-	existing_row.add_child(select_existing_btn)
+	existing_hdr.add_child(select_existing_btn)
+	existing_row.add_child(existing_hdr)
+	existing_select.item_selected.connect(func(_idx: int): select_chosen_sound_point())
+	existing_row.add_child(existing_select)
 	existing_row.hide()
 	layout.add_child(existing_row)
 
+	editor_fields.add_theme_constant_override("separation", 3)
+	layout.add_child(editor_fields)
 	var sound_row := HBoxContainer.new()
-	layout.add_child(sound_row)
+	editor_fields.add_child(sound_row)
 	var slbl := Label.new()
 	slbl.text = "Sound file (.wav/.ogg)"
-	slbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	slbl.custom_minimum_size.x = 140
 	sound_row.add_child(slbl)
-	sound_field.custom_minimum_size.x = 200
+	sound_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	sound_field.text_changed.connect(func(_t): refresh_asset_status())
 	sound_row.add_child(sound_field)
 
-	add_spin(layout, "Volume (%)", volume_spin, 0, 100, 70)
-	add_spin(layout, "Range (m)", range_spin, 10, 2000, 150)
-	add_spin(layout, "Interval (s, 0=loop)", interval_spin, 0, 600, 0)
-	add_spin(layout, "Jitter (%)", jitter_spin, 0, 100, 0)
-	add_spin(layout, "Pitch (%)", pitch_spin, 25, 200, 100)
-	add_spin(layout, "Near full-vol (%)", near_spin, 0, 90, 20)
+	add_spin(editor_fields, "Volume (%)", volume_spin, 0, 100, 70, "%")
+	add_spin(editor_fields, "Range (m)", range_spin, 10, 2000, 150, "m")
+	add_spin(editor_fields, "Interval (s, 0=loop)", interval_spin, 0, 600, 0, "s")
+	add_spin(editor_fields, "Jitter (%)", jitter_spin, 0, 100, 0, "%")
+	add_spin(editor_fields, "Pitch (%)", pitch_spin, 25, 200, 100, "%")
+	add_spin(editor_fields, "Near full-vol (%)", near_spin, 0, 90, 20, "%")
 
 	asset_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	asset_status.custom_minimum_size.y = 48
+	asset_status.custom_minimum_size = Vector2(DIALOG_WIDTH - 24, 0)
 	layout.add_child(asset_status)
 
 	duplicate_btn = add_button("Duplicate Sound Point", true, "dup")
@@ -80,18 +92,21 @@ func _ready() -> void:
 	confirmed.connect(apply_sound_point)
 
 
-func add_spin(parent: Control, caption: String, spin: SpinBox, lo: int, hi: int, initial: int) -> void:
+func add_spin(parent: Control, caption: String, spin: SliderField, lo: int, hi: int, initial: int, unit: String = "") -> void:
 	var row := HBoxContainer.new()
 	parent.add_child(row)
 	var lbl := Label.new()
 	lbl.text = caption
-	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	lbl.custom_minimum_size.x = 140
 	row.add_child(lbl)
 	spin.min_value = lo
 	spin.max_value = hi
 	spin.step = 1
+	if not unit.is_empty():
+		spin.set_unit_suffix(unit)
 	spin.value = initial
-	spin.custom_minimum_size.x = 120
+	spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	spin.value_changed.connect(func(_v: float): refresh_asset_status())
 	row.add_child(spin)
 
 
@@ -119,14 +134,15 @@ func select_chosen_sound_point() -> void:
 	if not document.object_is_sound_point(chosen):
 		return
 	sound_point_selected.emit(chosen)
-	begin(document, chosen, game_dir, vrv_dir)
+	begin(document, chosen, game_dir, vrv_dir, extra_sound_roots)
 
 
-func begin(doc: Document, view_index: int, game_path: String = "", vrv_path: String = "") -> void:
+func begin(doc: Document, view_index: int, game_path: String = "", vrv_path: String = "", sound_roots: Array = []) -> void:
 	document = doc
 	selected_view = view_index
 	game_dir = game_path
 	vrv_dir = vrv_path
+	extra_sound_roots = sound_roots.duplicate()
 	_refresh_existing_picker()
 	if document == null or not document.valid_view_object(selected_view):
 		var available := document.sound_point_views().size() if document != null else 0
@@ -136,8 +152,9 @@ func begin(doc: Document, view_index: int, game_path: String = "", vrv_path: Str
 			if available > 0 else
 			"[ERR] No %s sound points exist in this map. Playback requires VRV runtime." % Document.SOUND_POINT_ODF
 		)
+		editor_fields.hide()
 		ok_button_disabled(true)
-		popup_centered()
+		Wintage.popup_fit(self, DIALOG_WIDTH)
 		return
 	var odf := document.object_odf(selected_view)
 	var current := document.object_label(selected_view)
@@ -149,9 +166,11 @@ func begin(doc: Document, view_index: int, game_path: String = "", vrv_path: Str
 			if available > 0 else
 			"[ERR] Incompatible ODF '%s': this map has no %s sound points. Use Object Label for ordinary object names." % [odf, Document.SOUND_POINT_ODF]
 		)
+		editor_fields.hide()
 		ok_button_disabled(true)
-		popup_centered()
+		Wintage.popup_fit(self, DIALOG_WIDTH)
 		return
+	editor_fields.show()
 	ok_button_disabled(false)
 	target_label.text = "Sound Point #%d (%s) · Current label: %s" % [selected_view, odf, current if not current.is_empty() else "(none)"]
 	var parsed := Document.sound_point(current)
@@ -172,7 +191,7 @@ func begin(doc: Document, view_index: int, game_path: String = "", vrv_path: Str
 		pitch_spin.value = 100
 		near_spin.value = 20
 	refresh_asset_status()
-	popup_centered()
+	Wintage.popup_fit(self, DIALOG_WIDTH)
 
 
 func ok_button_disabled(flag: bool) -> void:
@@ -200,10 +219,14 @@ func find_sound_asset(filename: String) -> String:
 	if filename.to_lower().ends_with(".wav"):
 		candidates.append(filename.substr(0, filename.length() - 4) + ".ogg")
 	var roots: Array[String] = [document.package.source_path.get_base_dir()]
+	for r_v in extra_sound_roots:
+		var r := String(r_v)
+		if not r.is_empty() and not (r in roots):
+			roots.append(r)
 	if not game_dir.is_empty():
 		roots.append(game_dir.path_join("bz2r_res/audio"))
 		roots.append(game_dir.path_join("bz2r_res"))
-		if not vrv_dir.is_empty():
+		if document.mod_profile != "stock" and not vrv_dir.is_empty():
 			roots.append(game_dir.path_join("VRV/deps/VSR"))
 	for root in roots:
 		if not DirAccess.dir_exists_absolute(root):

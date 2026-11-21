@@ -1,6 +1,10 @@
 extends ConfirmationDialog
 
 const Document := preload("res://core/map_document.gd")
+const Wintage := preload("res://themes/wintage.gd")
+const ChoiceGroup := preload("res://themes/choice_group.gd")
+const SliderField := preload("res://themes/slider_field.gd")
+const DIALOG_WIDTH := 460
 
 signal path_created(index: int)
 signal path_removed(label: String)
@@ -9,10 +13,10 @@ var document: Document
 var route_index := -1
 var points := PackedVector2Array()
 var path_name := LineEdit.new()
-var kind := OptionButton.new()
+var kind := ChoiceGroup.new(0)
 var list := ItemList.new()
-var position_x := SpinBox.new()
-var position_z := SpinBox.new()
+var position_x := SliderField.new()
+var position_z := SliderField.new()
 var message := Label.new()
 var selected_point := 0
 var showing_fields := false
@@ -27,27 +31,34 @@ func _ready() -> void:
 	title = "Native AI Path"
 	ok_button_text = "Apply"
 	dialog_hide_on_ok = false
-	min_size = Vector2i(440, 395)
 	var content := VBoxContainer.new()
+	content.custom_minimum_size.x = DIALOG_WIDTH - 24
+	content.add_theme_constant_override("separation", 4)
 	add_child(content)
 	var fields := HBoxContainer.new()
 	content.add_child(fields)
 	label(fields, "Name")
 	path_name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	fields.add_child(path_name)
-	label(fields, "Type")
-	fields.add_child(kind)
-	list.custom_minimum_size.y = 185
+	var type_row := HBoxContainer.new()
+	content.add_child(type_row)
+	label(type_row, "Type")
+	kind.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	type_row.add_child(kind)
+	list.custom_minimum_size.y = 120
 	list.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	content.add_child(list)
 	list.item_selected.connect(inspect_point)
-	var coordinates := HBoxContainer.new()
-	content.add_child(coordinates)
-	label(coordinates, "X (m)")
-	configure_coordinate(coordinates, position_x)
-	label(coordinates, "Z (m)")
-	configure_coordinate(coordinates, position_z)
-	var controls := HBoxContainer.new()
+	var coord_x_row := HBoxContainer.new()
+	content.add_child(coord_x_row)
+	label(coord_x_row, "X (m)")
+	configure_coordinate(coord_x_row, position_x)
+	var coord_z_row := HBoxContainer.new()
+	content.add_child(coord_z_row)
+	label(coord_z_row, "Z (m)")
+	configure_coordinate(coord_z_row, position_z)
+	var controls := HFlowContainer.new()
+	controls.add_theme_constant_override("h_separation", 4)
 	content.add_child(controls)
 	insert_button = button(controls, "Insert After", insert_point)
 	remove_button = button(controls, "Remove Point", remove_point)
@@ -55,16 +66,27 @@ func _ready() -> void:
 	later_button = button(controls, "Move Down", move_point.bind(1))
 	delete_path_button = button(controls, "Remove Path", remove_route)
 	message.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	message.custom_minimum_size.y = 31
+	message.custom_minimum_size = Vector2(DIALOG_WIDTH - 24, 0)
 	content.add_child(message)
 	position_x.value_changed.connect(coordinate_changed)
 	position_z.value_changed.connect(coordinate_changed)
 	confirmed.connect(apply_path)
 
 
+func _sync_coord_bounds() -> void:
+	if document == null or document.package == null or document.package.terrain == null:
+		return
+	var terrain := document.package.terrain
+	var lo := Vector2(terrain.origin) * terrain.SPACING
+	var hi := Vector2(terrain.origin + terrain.dimensions) * terrain.SPACING
+	position_x.set_slider_range(lo.x, hi.x)
+	position_z.set_slider_range(lo.y, hi.y)
+
+
 func show_path(value: Document, index: int) -> void:
 	document = value
 	route_index = index
+	_sync_coord_bounds()
 	var route := document.path_at(index)
 	path_name.text = route["name"]
 	points = route["points"].duplicate()
@@ -72,19 +94,20 @@ func show_path(value: Document, index: int) -> void:
 	delete_path_button.disabled = not document.package.path_codec.can_resize
 	message.text = "Mission scripts and AI plans may refer to this path by name."
 	refresh_points(0)
-	popup_centered()
+	Wintage.popup_fit(self, DIALOG_WIDTH)
 
 
 func show_new_path(value: Document, start: Vector2) -> void:
 	document = value
 	route_index = -1
+	_sync_coord_bounds()
 	path_name.clear()
 	points = PackedVector2Array([start])
 	configure_types(0)
 	delete_path_button.disabled = true
 	message.text = "Name the path and set its points."
 	refresh_points(0)
-	popup_centered()
+	Wintage.popup_fit(self, DIALOG_WIDTH)
 	path_name.grab_focus()
 
 
@@ -102,16 +125,20 @@ func configure_types(current: int) -> void:
 func label(parent: Control, text: String) -> void:
 	var control := Label.new()
 	control.text = text
+	control.custom_minimum_size.x = 46
 	parent.add_child(control)
 
 
-func configure_coordinate(parent: Control, control: SpinBox) -> void:
+func configure_coordinate(parent: Control, control: SliderField) -> void:
 	control.min_value = -65536
 	control.max_value = 65536
 	control.allow_lesser = true
 	control.allow_greater = true
 	control.step = 0.0
-	control.custom_minimum_size.x = 116
+	control.set_slider_range(-2048.0, 2048.0)
+	control.set_unit_suffix("m")
+	control.set_readout_width(68.0)
+	control.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	parent.add_child(control)
 
 

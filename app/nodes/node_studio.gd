@@ -3,6 +3,8 @@ extends Window
 const Graph := preload("res://nodes/height_graph.gd")
 const Document := preload("res://core/map_document.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
+const ChoiceGroup := preload("res://themes/choice_group.gd")
+const SliderField := preload("res://themes/slider_field.gd")
 
 signal updated(message: String)
 signal preview_display(layer: int)
@@ -12,16 +14,16 @@ var working: Array
 var selected := 0
 var focus: Vector2i
 var nodes := GraphEdit.new()
-var layer_select := OptionButton.new()
+var layer_select := ChoiceGroup.new(0)
 var enabled := CheckButton.new()
 var parameters := {}
 var color_parameters := {}
-var range_field := SpinBox.new()
+var range_field := SliderField.new()
 var message := Label.new()
 var bake_button: Button
 var preview_button: Button
 var keep_button: Button
-var preview_channel := OptionButton.new()
+var preview_channel := ChoiceGroup.new(0)
 var loading := false
 var worker := Thread.new()
 var job_graph: Graph
@@ -36,13 +38,15 @@ func _ready() -> void:
 	transient = true
 	exclusive = true
 	unresizable = false
-	min_size = Vector2i(620, 410)
-	size = Vector2i(730, 500)
+	min_size = Vector2i(600, 390)
+	size = Vector2i(720, 480)
 	close_requested.connect(close_studio)
 	var layout := VBoxContainer.new()
 	layout.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT, Control.PRESET_MODE_MINSIZE, 6)
+	layout.add_theme_constant_override("separation", 3)
 	add_child(layout)
 	var layers_bar := HBoxContainer.new()
+	layers_bar.add_theme_constant_override("separation", 4)
 	layout.add_child(layers_bar)
 	layers_bar.add_child(layer_select)
 	layer_select.item_selected.connect(load_layer)
@@ -53,31 +57,39 @@ func _ready() -> void:
 	enabled.text = "Visible"
 	layers_bar.add_child(enabled)
 	enabled.toggled.connect(func(on): set_parameter("enabled", on))
-	var bar := HBoxContainer.new()
+	var bar := HFlowContainer.new()
+	bar.add_theme_constant_override("h_separation", 4)
+	bar.add_theme_constant_override("v_separation", 2)
 	layout.add_child(bar)
 	parameter(bar, "Opacity", "opacity", 0, 1, 0.05)
-	parameter(bar, "Seed", "seed", 0, 999999, 1)
-	parameter(bar, "Scale (m)", "scale", 2, 512, 1)
-	parameter(bar, "Noise (m)", "amplitude", 0, 100, 0.5)
-	var limits := HBoxContainer.new()
+	parameter(bar, "Seed", "seed", 0, 999999, 1, "", 0, 9999)
+	parameter(bar, "Scale", "scale", 2, 512, 1, "m")
+	parameter(bar, "Noise", "amplitude", 0, 100, 0.5, "m")
+	var limits := HFlowContainer.new()
+	limits.add_theme_constant_override("h_separation", 4)
+	limits.add_theme_constant_override("v_separation", 2)
 	layout.add_child(limits)
-	parameter(limits, "Min (m)", "low", -3000, 3000, 1)
-	parameter(limits, "Max (m)", "high", -3000, 3000, 1)
-	label(limits, "Preview radius (m)")
-	spin(limits, range_field, 32, 256, 16)
+	parameter(limits, "Min", "low", -3000, 3000, 1, "m", -200, 500)
+	parameter(limits, "Max", "high", -3000, 3000, 1, "m", -200, 500)
+	label(limits, "Radius")
+	spin(limits, range_field, 32, 256, 16, "m")
 	range_field.value = 128
 	range_field.value_changed.connect(func(_value): invalidate())
 	var materials := HFlowContainer.new()
+	materials.add_theme_constant_override("h_separation", 4)
+	materials.add_theme_constant_override("v_separation", 2)
 	layout.add_child(materials)
 	color_parameter(materials, "RGB low", "color_low")
 	color_parameter(materials, "RGB high", "color_high")
 	parameter(materials, "Tile below", "tile_low", 0, 15, 1)
 	parameter(materials, "Tile above", "tile_high", 0, 15, 1)
-	parameter(materials, "At (m)", "tile_height", -100000, 100000, 1)
+	parameter(materials, "At", "tile_height", -100000, 100000, 1, "m", -200, 500)
 	var masks := HFlowContainer.new()
+	masks.add_theme_constant_override("h_separation", 4)
+	masks.add_theme_constant_override("v_separation", 2)
 	layout.add_child(masks)
-	parameter(masks, "Slope min (°)", "slope_low", 0, 90, 1)
-	parameter(masks, "Slope max (°)", "slope_high", 0, 90, 1)
+	parameter(masks, "Slope min", "slope_low", 0, 90, 1, "°")
+	parameter(masks, "Slope max", "slope_high", 0, 90, 1, "°")
 	parameter(masks, "Mask weight", "mask_weight", 0, 1, 0.05)
 	nodes.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	nodes.right_disconnects = true
@@ -88,17 +100,23 @@ func _ready() -> void:
 	make_graph()
 	nodes.connection_request.connect(connect_nodes)
 	nodes.disconnection_request.connect(disconnect_nodes)
-	var actions := HFlowContainer.new()
+	var actions := HBoxContainer.new()
+	actions.add_theme_constant_override("separation", 4)
 	layout.add_child(actions)
 	preview_button = button(actions, "Preview", preview)
 	bake_button = button(actions, "Bake to Terrain", bake)
 	keep_button = button(actions, "Keep Layers", keep_layers)
 	button(actions, "Close", close_studio)
+	var view_row := HBoxContainer.new()
+	view_row.add_theme_constant_override("separation", 6)
+	layout.add_child(view_row)
+	label(view_row, "Preview view:")
 	for name in ["Automatic view", "Height view", "Color view", "Base tile view"]:
 		preview_channel.add_item(name)
 	preview_channel.disabled = true
+	preview_channel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	preview_channel.item_selected.connect(func(_index): show_preview_channel())
-	actions.add_child(preview_channel)
+	view_row.add_child(preview_channel)
 	message.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	layout.add_child(message)
 
@@ -127,18 +145,23 @@ func label(parent: Control, caption: String) -> void:
 	parent.add_child(control)
 
 
-func spin(parent: Control, field: SpinBox, minimum: float, maximum: float, step: float) -> void:
+func spin(parent: Control, field: SliderField, minimum: float, maximum: float, step: float, unit: String = "", slider_lo: float = NAN, slider_hi: float = NAN) -> void:
 	field.min_value = minimum
 	field.max_value = maximum
 	field.step = step
-	field.custom_minimum_size.x = 68
+	if is_finite(slider_lo) and is_finite(slider_hi):
+		field.set_slider_range(slider_lo, slider_hi)
+	if not unit.is_empty():
+		field.set_unit_suffix(unit)
+	field.set_readout_width(42.0)
+	field.custom_minimum_size.x = 100
 	parent.add_child(field)
 
 
-func parameter(bar: Control, caption: String, key: String, minimum: float, maximum: float, step: float) -> void:
+func parameter(bar: Control, caption: String, key: String, minimum: float, maximum: float, step: float, unit: String = "", slider_lo: float = NAN, slider_hi: float = NAN) -> void:
 	label(bar, caption)
-	var field := SpinBox.new()
-	spin(bar, field, minimum, maximum, step)
+	var field := SliderField.new()
+	spin(bar, field, minimum, maximum, step, unit, slider_lo, slider_hi)
 	field.value_changed.connect(func(value): set_parameter(key, value))
 	parameters[key] = field
 
@@ -146,7 +169,7 @@ func parameter(bar: Control, caption: String, key: String, minimum: float, maxim
 func color_parameter(bar: Control, caption: String, key: String) -> void:
 	label(bar, caption)
 	var field := ColorPickerButton.new()
-	field.custom_minimum_size = Vector2(36, 20)
+	field.custom_minimum_size = Vector2(34, 20)
 	field.edit_alpha = false
 	field.color_changed.connect(func(color: Color): set_parameter(key, Terrain.rgb_word(color)))
 	bar.add_child(field)

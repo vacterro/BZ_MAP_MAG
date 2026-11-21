@@ -1,14 +1,18 @@
 extends ConfirmationDialog
 
 const Document := preload("res://core/map_document.gd")
+const Wintage := preload("res://themes/wintage.gd")
+const ChoiceGroup := preload("res://themes/choice_group.gd")
+const SliderField := preload("res://themes/slider_field.gd")
+const DIALOG_WIDTH := 440
 
 signal updated(message: String)
 signal painting_changed
 
 var document: Document
-var layer_button := OptionButton.new()
-var elevation := SpinBox.new()
-var radius := SpinBox.new()
+var layer_button := ChoiceGroup.new(2, true)
+var elevation := SliderField.new()
+var radius := SliderField.new()
 var paint_toggle := CheckButton.new()
 var message := Label.new()
 
@@ -17,8 +21,9 @@ func _ready() -> void:
 	title = "Edit Water"
 	ok_button_text = "Apply Elevation"
 	dialog_hide_on_ok = false
-	min_size = Vector2i(430, 290)
 	var layout := VBoxContainer.new()
+	layout.custom_minimum_size.x = DIALOG_WIDTH - 24
+	layout.add_theme_constant_override("separation", 4)
 	add_child(layout)
 	var caption := Label.new()
 	caption.text = "Water layer"
@@ -28,39 +33,45 @@ func _ready() -> void:
 	elevation.min_value = -100000.0
 	elevation.max_value = 100000.0
 	elevation.step = 0.1
+	elevation.set_slider_range(-100.0, 400.0)
+	elevation.set_unit_suffix("m")
 	elevation.value_changed.connect(func(_value: float): message.text = "Apply keeps the new elevation and records one undo step.")
 	add_field(layout, "Elevation (m)", elevation)
 	radius.min_value = 1.0
 	radius.max_value = 1024.0
+	radius.set_slider_range(1.0, 256.0)
+	radius.set_unit_suffix("m")
 	radius.value = 32.0
-	add_field(layout, "Coverage brush radius (m)", radius)
+	add_field(layout, "Coverage radius (m)", radius)
 	paint_toggle.text = "Paint coverage with left drag (Shift erases)"
 	paint_toggle.toggled.connect(func(_pressed: bool): painting_changed.emit())
 	layout.add_child(paint_toggle)
 	message.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	message.custom_minimum_size.y = 36
+	message.custom_minimum_size = Vector2(DIALOG_WIDTH - 24, 0)
 	layout.add_child(message)
 	confirmed.connect(apply_elevation)
 	canceled.connect(func(): hide())
 	visibility_changed.connect(func(): painting_changed.emit())
 
 
-func add_field(parent: Control, caption: String, field: SpinBox) -> void:
+func add_field(parent: Control, caption: String, field: SliderField) -> void:
 	var row := HBoxContainer.new()
 	parent.add_child(row)
 	var label := Label.new()
 	label.text = caption
-	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	label.custom_minimum_size.x = 135
 	row.add_child(label)
-	field.custom_minimum_size.x = 110
+	field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(field)
 
 
 func begin(value: Document) -> void:
 	document = value
+	var terrain := document.package.terrain
+	elevation.set_slider_range(terrain.min_height - 50.0, terrain.max_height + 100.0)
 	refresh_layers()
 	choose_layer()
-	popup_centered()
+	Wintage.popup_fit(self, DIALOG_WIDTH)
 	painting_changed.emit()
 
 
@@ -68,7 +79,7 @@ func refresh_layers() -> void:
 	var selected := layer_button.selected
 	layer_button.clear()
 	for layer in document.WATER_LAYERS:
-		layer_button.add_item("Layer %d · %.1f m · %d blocks" % [layer + 1, document.water_layer_height(layer), document.water_cover_count(layer)])
+		layer_button.add_item("L%d · %.1f m (%d)" % [layer + 1, document.water_layer_height(layer), document.water_cover_count(layer)])
 	layer_button.select(clampi(selected, 0, layer_button.item_count - 1))
 
 

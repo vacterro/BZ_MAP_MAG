@@ -6,6 +6,11 @@ extends AcceptDialog
 
 const Document := preload("res://core/map_document.gd")
 const MissionProfiles := preload("res://core/mission_profiles.gd")
+const Wintage := preload("res://themes/wintage.gd")
+const ChoiceGroup := preload("res://themes/choice_group.gd")
+const SliderField := preload("res://themes/slider_field.gd")
+const DIALOG_WIDTH := 700
+const DIALOG_MIN_HEIGHT := 400
 
 signal paths_selection_changed(indices: Array[int])
 signal path_focused(index: int)
@@ -15,7 +20,7 @@ signal status_message(text: String)
 var document: Document
 var anchor := Vector2.INF
 var mod_badge := Label.new()
-var profile_select := OptionButton.new()
+var profile_select := ChoiceGroup.new(0)
 var profile_note := Label.new()
 var preset_list := ItemList.new()
 var preset_detail := Label.new()
@@ -23,10 +28,11 @@ var create_preset_button: Button
 var generate_profile_button: Button
 var propose_edge_button: Button
 var path_list := ItemList.new()
-var delta_x := SpinBox.new()
-var delta_z := SpinBox.new()
-var rotate_deg := SpinBox.new()
-var spacing_m := SpinBox.new()
+var empty_paths_note := Label.new()
+var delta_x := SliderField.new()
+var delta_z := SliderField.new()
+var rotate_deg := SliderField.new()
+var spacing_m := SliderField.new()
 var snap_check := CheckBox.new()
 var translate_rotate_button: Button
 var mirror_x_button: Button
@@ -41,21 +47,29 @@ var _rebuilding := false
 func _ready() -> void:
 	title = "Mission & Path Studio"
 	ok_button_text = "Close"
-	min_size = Vector2i(760, 560)
 	var root := VBoxContainer.new()
-	root.add_theme_constant_override("separation", 6)
+	root.custom_minimum_size.x = DIALOG_WIDTH - 24
+	root.add_theme_constant_override("separation", 4)
 	add_child(root)
 
-	var top := HBoxContainer.new()
-	root.add_child(top)
+	var mode_row := HBoxContainer.new()
+	mode_row.add_theme_constant_override("separation", 6)
+	root.add_child(mode_row)
 	var prof_lbl := Label.new()
 	prof_lbl.text = "Mission Mode:"
-	top.add_child(prof_lbl)
+	prof_lbl.custom_minimum_size.x = 92
+	mode_row.add_child(prof_lbl)
 	for id: String in MissionProfiles.MISSION_MODES:
 		profile_select.add_item(String(MissionProfiles.MODE_LABELS.get(id, id)))
 		profile_select.set_item_metadata(profile_select.item_count - 1, id)
+	profile_select.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	profile_select.item_selected.connect(_on_mission_mode_selected)
-	top.add_child(profile_select)
+	mode_row.add_child(profile_select)
+
+	var top := HFlowContainer.new()
+	top.add_theme_constant_override("h_separation", 6)
+	top.add_theme_constant_override("v_separation", 3)
+	root.add_child(top)
 	generate_profile_button = add_btn(top, "Generate Required", generate_missing_required)
 	propose_edge_button = add_btn(top, "Propose edge_path", create_proposed_edge_path)
 	snap_check.text = "Snap drag to 2 m grid"
@@ -69,12 +83,15 @@ func _ready() -> void:
 
 	var split := HSplitContainer.new()
 	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	split.custom_minimum_size.y = 180
 	root.add_child(split)
 
 	# Left pane: Preset browser
 	var left := VBoxContainer.new()
-	left.custom_minimum_size.x = 290
+	left.custom_minimum_size.x = 240
 	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left.size_flags_stretch_ratio = 0.85
+	left.add_theme_constant_override("separation", 4)
 	split.add_child(left)
 	var p_hdr := Label.new()
 	p_hdr.text = "Path Presets"
@@ -83,42 +100,51 @@ func _ready() -> void:
 	preset_list.item_selected.connect(func(_i): update_preset_detail())
 	left.add_child(preset_list)
 	preset_detail.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	preset_detail.custom_minimum_size.y = 40
+	preset_detail.custom_minimum_size.y = 0
 	left.add_child(preset_detail)
 	create_preset_button = add_btn(left, "Create Selected Preset", create_selected_preset)
 
 	# Right pane: Multi-select paths + transform / clone / spacing tools
 	var right := VBoxContainer.new()
-	right.custom_minimum_size.x = 420
+	right.custom_minimum_size.x = 340
 	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right.size_flags_stretch_ratio = 1.15
+	right.add_theme_constant_override("separation", 4)
 	split.add_child(right)
 	var m_hdr := Label.new()
 	m_hdr.text = "Map Paths (Ctrl/Shift multi-select for 2D/3D & batch ops)"
 	right.add_child(m_hdr)
+	empty_paths_note.text = "No paths in map — select a preset or click Generate Required."
+	empty_paths_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	empty_paths_note.hide()
+	right.add_child(empty_paths_note)
 	path_list.select_mode = ItemList.SELECT_MULTI
 	path_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	path_list.multi_selected.connect(func(_i, _s): emit_selection())
 	path_list.item_selected.connect(func(_i): emit_selection())
 	right.add_child(path_list)
 
-	var xform_row := HBoxContainer.new()
+	var xform_row := HFlowContainer.new()
+	xform_row.add_theme_constant_override("h_separation", 4)
 	right.add_child(xform_row)
-	add_spin(xform_row, "dX (m)", delta_x, -4096.0, 4096.0, 2.0, 0.0)
-	add_spin(xform_row, "dZ (m)", delta_z, -4096.0, 4096.0, 2.0, 0.0)
-	add_spin(xform_row, "Rot (°)", rotate_deg, -180.0, 180.0, 1.0, 0.0)
+	add_spin(xform_row, "dX", delta_x, -4096.0, 4096.0, 2.0, 0.0, "m", -512.0, 512.0)
+	add_spin(xform_row, "dZ", delta_z, -4096.0, 4096.0, 2.0, 0.0, "m", -512.0, 512.0)
+	add_spin(xform_row, "Rot", rotate_deg, -180.0, 180.0, 1.0, 0.0, "°")
 	translate_rotate_button = add_btn(xform_row, "Transform", apply_transform)
 
-	var op_row := HBoxContainer.new()
+	var op_row := HFlowContainer.new()
+	op_row.add_theme_constant_override("h_separation", 4)
 	right.add_child(op_row)
 	mirror_x_button = add_btn(op_row, "Mirror X", func(): apply_mirror(true, false))
 	mirror_z_button = add_btn(op_row, "Mirror Z", func(): apply_mirror(false, true))
 	clone_button = add_btn(op_row, "Clone Path", clone_selected_path)
-	add_spin(op_row, "Spacing (m)", spacing_m, 2.0, 512.0, 2.0, 32.0)
+	add_spin(op_row, "Spacing", spacing_m, 2.0, 512.0, 2.0, 32.0, "m")
 	resample_button = add_btn(op_row, "Resample", apply_resample)
 	snap_now_button = add_btn(op_row, "Snap 2 m", apply_snap_grid)
 
-	validation_label.custom_minimum_size.y = 105
-	validation_label.fit_content = false
+	validation_label.fit_content = true
+	validation_label.scroll_active = false
+	validation_label.custom_minimum_size = Vector2(DIALOG_WIDTH - 40, 0)
 	root.add_child(validation_label)
 
 
@@ -130,15 +156,20 @@ func add_btn(parent: Control, text: String, action: Callable) -> Button:
 	return btn
 
 
-func add_spin(parent: Control, caption: String, box: SpinBox, lo: float, hi: float, step_val: float, initial: float) -> void:
+func add_spin(parent: Control, caption: String, box: SliderField, lo: float, hi: float, step_val: float, initial: float, unit: String = "", slider_lo: float = NAN, slider_hi: float = NAN) -> void:
 	var lbl := Label.new()
 	lbl.text = caption
 	parent.add_child(lbl)
 	box.min_value = lo
 	box.max_value = hi
 	box.step = step_val
+	if is_finite(slider_lo) and is_finite(slider_hi):
+		box.set_slider_range(slider_lo, slider_hi)
+	if not unit.is_empty():
+		box.set_unit_suffix(unit)
 	box.value = initial
-	box.custom_minimum_size.x = 76
+	box.set_readout_width(44.0)
+	box.custom_minimum_size.x = 104
 	parent.add_child(box)
 
 
@@ -174,7 +205,7 @@ func begin(doc: Document, world_anchor: Vector2) -> void:
 	anchor = world_anchor
 	_sync_profile_select()
 	refresh_all()
-	popup_centered()
+	Wintage.popup_fit(self, DIALOG_WIDTH, DIALOG_MIN_HEIGHT)
 
 
 func refresh_all() -> void:
@@ -219,7 +250,9 @@ func refresh_all() -> void:
 	var prev_selected := selected_path_indices()
 	path_list.clear()
 	var type_names: Array[String] = ["One-Way", "Round Trip", "Loop"]
-	for idx: int in document.path_indices():
+	var indices := document.path_indices()
+	empty_paths_note.visible = indices.is_empty()
+	for idx: int in indices:
 		var p: Dictionary = document.path_at(idx)
 		var tname: String = type_names[clampi(int(p["type"]), 0, 2)]
 		path_list.add_item("%s · %d pts · %s" % [p["name"], (p["points"] as PackedVector2Array).size(), tname])
@@ -242,7 +275,13 @@ func refresh_all() -> void:
 			lines.append("[ERR] " + err)
 	for warn: String in validation["warnings"]:
 		lines.append("[WARN] " + warn)
-	validation_label.text = "\n".join(lines)
+	if lines.size() > 4:
+		var shown := lines.slice(0, 3)
+		shown.append("… (+%d more notice(s))" % (lines.size() - 3))
+		validation_label.text = "\n".join(shown)
+	else:
+		validation_label.text = "\n".join(lines)
+	validation_label.visible = not validation_label.text.is_empty()
 	_rebuilding = false
 
 
@@ -250,16 +289,20 @@ func update_preset_detail() -> void:
 	var items := preset_list.get_selected_items()
 	if items.is_empty():
 		preset_detail.text = ""
+		preset_detail.hide()
 		return
 	var pname := String(preset_list.get_item_metadata(items[0]))
 	var info: Dictionary = MissionProfiles.PRESETS.get(pname, {})
 	preset_detail.text = "%s — %s" % [pname, String(info.get("description", ""))]
+	preset_detail.visible = not preset_detail.text.is_empty()
 
 
 func selected_path_indices() -> Array[int]:
 	var result: Array[int] = []
 	for row: int in path_list.get_selected_items():
-		result.append(int(path_list.get_item_metadata(row)))
+		var meta: Variant = path_list.get_item_metadata(row)
+		if meta != null and int(meta) >= 0:
+			result.append(int(meta))
 	return result
 
 
