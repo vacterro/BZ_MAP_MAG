@@ -6,6 +6,7 @@ extends ConfirmationDialog
 ## never silently override an explicit Stock choice with VSR/VRV.
 
 const ModRegistry := preload("res://core/mod_registry.gd")
+const CompatibilityEngine := preload("res://core/compatibility_engine.gd")
 const MissionProfiles := preload("res://core/mission_profiles.gd")
 const Snapshots := preload("res://bridge/snapshots.gd")
 const Package := preload("res://formats/map_package.gd")
@@ -232,48 +233,9 @@ func selected_size_m() -> int:
 
 
 func inspect_source_bzn(bzn_path: String, target_mod: String = "stock") -> Dictionary:
-	var clean := bzn_path.strip_edges()
-	if clean.is_empty() or not FileAccess.file_exists(clean):
-		return {"valid": false, "vsrOdfs": [], "vrvOdfs": [], "unknownOdfs": [], "recommendedMod": "stock", "dll": "", "conversionPlan": {"ok": false, "unsupported": ["Missing source BZN"]}}
-	var bytes := FileAccess.get_file_as_bytes(clean)
-	var layout := Layouts.recognize(bytes)
-	var ver := int(layout.get("version", 0))
-	if ver <= 0:
-		return {"valid": false, "vsrOdfs": [], "vrvOdfs": [], "unknownOdfs": [], "recommendedMod": "stock", "dll": "", "conversionPlan": {"ok": false, "unsupported": ["Unrecognized BZN layout"]}}
-	var paths := BznPaths.new()
-	if not paths.read(bytes, ver):
-		return {"valid": false, "vsrOdfs": [], "vrvOdfs": [], "unknownOdfs": [], "recommendedMod": "stock", "dll": "", "conversionPlan": {"ok": false, "unsupported": ["Unreadable BZN path table"]}}
-	var objs := BznObjects.new()
-	if not objs.read(bytes, ver, paths.table_start):
-		return {"valid": false, "vsrOdfs": [], "vrvOdfs": [], "unknownOdfs": [], "recommendedMod": "stock", "dll": "", "conversionPlan": {"ok": false, "unsupported": ["Unreadable BZN object table"]}}
-	var vsr_odfs: Array[String] = []
-	var vrv_odfs: Array[String] = []
-	var unknown_odfs: Array[String] = []
-	for obj: Dictionary in objs.objects:
-		var odf := String(obj.get("odf", "")).to_lower()
-		var lbl := String(obj.get("label", "")).to_lower()
-		if odf.begins_with("vrv_") or odf == "vrv_sndpoint" or lbl.begins_with("vrvsnd:"):
-			if not (odf in vrv_odfs):
-				vrv_odfs.append(odf)
-		elif odf.ends_with("_vsr") or "_vsr" in odf:
-			if not (odf in vsr_odfs):
-				vsr_odfs.append(odf)
-		elif not odf.is_empty() and not ModRegistry.is_verified_stock_odf(odf):
-			if not (odf in unknown_odfs):
-				unknown_odfs.append(odf)
-	var rec := "vrv" if not vrv_odfs.is_empty() else ("vsr" if not vsr_odfs.is_empty() else ("custom:unknown" if not unknown_odfs.is_empty() else "stock"))
-	var ptr_counts := paths.pointer_counts(bytes)
-	var conv_plan := ModRegistry.plan_bzn_odf_conversion(objs.objects, ptr_counts, target_mod)
-	return {
-		"valid": true,
-		"version": ver,
-		"vsrOdfs": vsr_odfs,
-		"vrvOdfs": vrv_odfs,
-		"unknownOdfs": unknown_odfs,
-		"recommendedMod": rec,
-		"dll": objs.mission_dll,
-		"conversionPlan": conv_plan,
-	}
+	return CompatibilityEngine.evaluate_bzn_path(
+		bzn_path, registry, target_mod, selected_mission_id(), selected_engine_id(),
+		game_dir, registry.last_vrv_dir if registry != null else "")
 
 
 func _use_discovered_stock_template() -> void:

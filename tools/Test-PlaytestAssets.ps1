@@ -70,8 +70,65 @@ if (Test-Path -LiteralPath $vsrDeps -PathType Container) {
         }
     }
 }
+# Wave 1 & 2: Stock 1192 Playtest independence from stale/absent -VrvSource + unified bzmag.compatibility-result/1 + DLL SHA-256 identity.
+$plgr = Join-Path $Game 'maps/Missions/Instant/PLGR/plgr.bzn'
+if (Test-Path -LiteralPath $plgr -PathType Leaf) {
+    $plgrCopy = [IO.Directory]::CreateDirectory((Join-Path $root 'plgr-stock')).FullName
+    foreach ($item in Get-ChildItem -LiteralPath (Split-Path -Parent $plgr) -File) {
+        Copy-Item -LiteralPath $item.FullName -Destination $plgrCopy
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $plgrCopy 'plgr.inf') -PathType Leaf)) {
+        [IO.File]::WriteAllText((Join-Path $plgrCopy 'plgr.inf'), "[DESCRIPTION]`r`nmissionName = `"plgr`"`r`n")
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $plgrCopy 'plgr.lua') -PathType Leaf)) {
+        [IO.File]::WriteAllText((Join-Path $plgrCopy 'plgr.lua'), "-- Test-only Lua stub; never launched.`r`n")
+    }
+    $staleStock = & $launcher -Game $Game -Godot $Godot -ModProfile 'stock' -VrvSource 'Z:/nonexistent_stale_vrv_checkout' -Mission (Join-Path $plgrCopy 'plgr.bzn') -ValidateOnly
+    if ($staleStock.LaunchRoute -ne 'native' -or $staleStock.ConverterRoot -ne '' -or $staleStock.VrvFolders.Count -ne 0) {
+        throw 'Stock 1192 Playtest failed to decouple from stale/invalid -VrvSource.'
+    }
+    if ($null -eq $staleStock.Compatibility -or $staleStock.Compatibility.schema -ne 'bzmag.compatibility-result/1') {
+        throw 'Start-Playtest -ValidateOnly did not emit unified bzmag.compatibility-result/1 contract.'
+    }
+    if ($null -eq $staleStock.DllIdentity -or $staleStock.DllIdentity.Status -ne 'VERIFIED') {
+        throw 'Stock 1192 LuaMission.dll SHA-256 identity check did not verify.'
+    }
+}
 # Cached ODF index reuse + invalidation + ambiguity + packed DOCP .pak support.
 . (Join-Path $PSScriptRoot 'Playtest-Assets.ps1')
+# Wave 2 & 6: Recursive Workshop dependency graph & real installed custom Workshop mods + DLL SHA-256 mismatch detection.
+$wrongDll = Join-Path $root 'Strategy02.dll'
+[IO.File]::WriteAllText($wrongDll, 'WRONG_HASH_DLL_BODY')
+$wrongIdent = Get-DllIdentityInfo $wrongDll 'stock'
+if ($wrongIdent.Status -ne 'HASH_UNVERIFIED') {
+    throw "Mutated Strategy02.dll should be HASH_UNVERIFIED, got $($wrongIdent.Status)."
+}
+$wsRoot = [IO.Path]::GetFullPath((Join-Path $Game '../../workshop/content/624970'))
+if (Test-Path -LiteralPath $wsRoot -PathType Container) {
+    $vsrGraph = Get-WorkshopDependencyGraph $Game 'vsr'
+    if ($vsrGraph.Roots.Count -lt 2) {
+        throw 'Real VSR Workshop dependency graph did not resolve child asset dependencies.'
+    }
+    if (Test-Path -LiteralPath (Join-Path $wsRoot '3820486276') -PathType Container) {
+        $vrvGraph = Get-WorkshopDependencyGraph $Game 'vrv'
+        if ($vrvGraph.Roots.Count -lt 5) {
+            throw 'Real VRV Workshop dependency graph did not resolve declared dependencies.'
+        }
+    }
+    $customChecked = 0
+    foreach ($cid in '3493433992','3728347411','2319244444') {
+        if (Test-Path -LiteralPath (Join-Path $wsRoot $cid) -PathType Container) {
+            $cg = Get-WorkshopDependencyGraph $Game ("custom:ws-$cid")
+            if ($cg.Roots.Count -lt 2) {
+                throw "Real custom Workshop mod $cid did not traverse transitive asset dependencies."
+            }
+            $customChecked++
+        }
+    }
+    if ($customChecked -lt 2) {
+        throw "Expected at least 2 real installed custom Workshop mods to verify recursive traversal, found $customChecked."
+    }
+}
 $cacheRoot = Join-Path $root 'asset-cache'
 $synthRoot = [IO.Directory]::CreateDirectory((Join-Path $root 'synth-assets')).FullName
 $subA = [IO.Directory]::CreateDirectory((Join-Path $synthRoot 'subA')).FullName

@@ -1,17 +1,27 @@
 extends RefCounted
 ## Universal BZCC EngineProfile & ModProfile registry, Workshop auto-discovery,
-## open-map profile detection, and dry-run conversion compatibility analysis.
+## deterministic dependency-stack resolution, open-map profile detection, and
+## dependency-aware dry-run conversion compatibility analysis.
 ##
 ## Architecture:
 ## - EngineProfile, ModProfile, MissionProfile, and FormatProfile stay strictly independent.
 ## - Stock BZCC works without VRV or VSR installed.
 ## - Unknown Workshop mods open safely as custom profiles without fabricated DLL rules.
+## - Stock ODF verification requires positive manifest or installed bz2r_res proof;
+##   naming-convention heuristics are strictly hints and NEVER compatibility proof.
 ## - Discovery is read-only, bounded, symlink-safe, and never executes installed DLLs.
+
+const AssetIndex := preload("res://core/asset_index.gd")
 
 const SCHEMA := "bzmag.mod-profile/1"
 const BZCC_APP_ID := "624970"
 const VSR_WORKSHOP_ID := "1325933293"
 const VRV_WORKSHOP_ID := "3820486276"
+
+const ODF_VERIFIED_STOCK := "VERIFIED_STOCK_ODF"
+const ODF_VERIFIED_MOD := "VERIFIED_MOD_ODF"
+const ODF_LIKELY_STOCK_NAMING := "LIKELY_STOCK_NAMING"
+const ODF_UNKNOWN := "UNKNOWN_ODF"
 
 const ENGINE_PROFILES := {
 	"bzcc-2.0.185": {
@@ -39,9 +49,11 @@ const ENGINE_PROFILES := {
 
 var profiles: Dictionary = {}
 var discovered_order: Array[String] = []
+var workshop_items: Dictionary = {}
 var disabled_mods: Dictionary = {}
 var custom_mods: Dictionary = {}
 var last_game_dir := ""
+var last_vrv_dir := ""
 var last_workshop_root := ""
 
 
@@ -52,6 +64,7 @@ func _init() -> void:
 func reset_builtins() -> void:
 	profiles.clear()
 	discovered_order.clear()
+	workshop_items.clear()
 	_register(builtin_stock())
 	_register(builtin_vsr())
 	_register(builtin_vrv())
@@ -130,7 +143,8 @@ static func builtin_vrv() -> Dictionary:
 		"modType": "config",
 		"gameRoot": "",
 		"assetRoots": [],
-		"dependencies": ["stock", "vsr", "3532748119", "1329659846", "2785557433", "2785542655", "2814914461", "2049956570", "3493379153", "2467249743"],
+		"parentMods": [VSR_WORKSHOP_ID],
+		"dependencies": ["stock", "3532748119", "1329659846", "2785557433", "2785542655", "2814914461", "2049956570", "3493379153", "2467249743"],
 		"missingDependencies": [],
 		"missionModes": ["blank", "strategy", "instant", "mpi", "duel", "lua", "custom-dll"],
 		"missionDlls": ["Strategy02.dll", "Instant.dll", "mpinstant.dll", "StratCTF.dll", "deathmatch01.dll", "VrvPrepare.dll"],
@@ -320,9 +334,52 @@ static func discover_stock_templates(game_dir: String) -> Array[String]:
 	return found
 
 
+func _collect_workshop_deps_recursive(start_id: String, include_self: bool = true) -> Dictionary:
+	var roots: Array[String] = []
+	var missing: Array[String] = []
+	var cycles: Array[String] = []
+	var all_dlls: Array[String] = []
+	var seen_dll := {}
+	var seen_root := {}
+	var state := {} # 1=visiting, 2=done
+	_walk_ws_dep(start_id, include_self, state, roots, seen_root, missing, cycles, all_dlls, seen_dll)
+	all_dlls.sort()
+	return {"roots": roots, "missing": missing, "cycles": cycles, "dlls": all_dlls}
+
+
+func _walk_ws_dep(item_id: String, include_root: bool, state: Dictionary, roots: Array[String], seen_root: Dictionary, missing: Array[String], cycles: Array[String], all_dlls: Array[String], seen_dll: Dictionary) -> void:
+	if not workshop_items.has(item_id):
+		if not (item_id in missing):
+			missing.append(item_id)
+		return
+	var st := int(state.get(item_id, 0))
+	if st == 1:
+		cycles.append("ws:%s" % item_id)
+		return
+	if st == 2:
+		return
+	state[item_id] = 1
+	var item: Dictionary = workshop_items[item_id]
+	var item_path := String(item["path"])
+	if include_root and not item_path.is_empty() and not seen_root.has(item_path.to_lower()):
+		seen_root[item_path.to_lower()] = true
+		roots.append(item_path)
+	for dll_v in item.get("dlls", []):
+		var dn := String(dll_v)
+		if not seen_dll.has(dn.to_lower()):
+			seen_dll[dn.to_lower()] = true
+			all_dlls.append(dn)
+	for dep_v in item.get("assetDependencies", []):
+		var dep_id := String(dep_v).strip_edges()
+		if not dep_id.is_empty():
+			_walk_ws_dep(dep_id, true, state, roots, seen_root, missing, cycles, all_dlls, seen_dll)
+	state[item_id] = 2
+
+
 func discover_installed(game_dir: String, vrv_dir: String = "", workshop_override: String = "") -> Dictionary:
 	reset_builtins()
 	last_game_dir = game_dir.strip_edges()
+	last_vrv_dir = vrv_dir.strip_edges()
 	var ws_root := workshop_override.strip_edges() if not workshop_override.strip_edges().is_empty() else derive_workshop_root(last_game_dir)
 	last_workshop_root = ws_root
 
@@ -336,8 +393,8 @@ func discover_installed(game_dir: String, vrv_dir: String = "", workshop_overrid
 			stock["missionDlls"] = found_dlls
 	_register(stock)
 
-	# 2. Scan Steam Workshop items (bounded, lazy: top-level .ini + Missions/*.dll only)
-	var workshop_items := {}
+	# 2. Scan Steam Workshop items (bounded, read-only: top-level .ini + shallow DLLs)
+	workshop_items.clear()
 	if not ws_root.is_empty() and DirAccess.dir_exists_absolute(ws_root):
 		var ws_dir := DirAccess.open(ws_root)
 		if ws_dir != null:
@@ -375,21 +432,13 @@ func discover_installed(game_dir: String, vrv_dir: String = "", workshop_overrid
 		vsr["gameRoot"] = String(item["path"])
 		if not String(item["modName"]).is_empty():
 			vsr["displayName"] = "VSR — " + String(item["modName"])
-		var roots: Array[String] = [String(item["path"])]
-		var missing: Array[String] = []
-		var deps: Array = item["assetDependencies"]
-		if not deps.is_empty():
-			var full_deps: Array[String] = ["stock"]
-			for d_v in deps:
-				var dep_id := String(d_v)
-				full_deps.append(dep_id)
-				if workshop_items.has(dep_id):
-					roots.append(String(workshop_items[dep_id]["path"]))
-				else:
-					missing.append(dep_id)
-			vsr["dependencies"] = full_deps
-		vsr["assetRoots"] = roots
-		vsr["missingDependencies"] = missing
+		var walked := _collect_workshop_deps_recursive(VSR_WORKSHOP_ID, true)
+		var full_deps: Array[String] = ["stock"]
+		for d_v in item["assetDependencies"]:
+			full_deps.append(String(d_v))
+		vsr["dependencies"] = full_deps
+		vsr["assetRoots"] = walked["roots"]
+		vsr["missingDependencies"] = walked["missing"]
 		if not (item["dlls"] as Array).is_empty():
 			vsr["missionDlls"] = item["dlls"]
 	_register(vsr)
@@ -404,25 +453,32 @@ func discover_installed(game_dir: String, vrv_dir: String = "", workshop_overrid
 		vrv["gameRoot"] = String(item["path"])
 		if not String(item["modName"]).is_empty():
 			vrv["displayName"] = String(item["modName"])
-		vrv_roots.append(String(item["path"]))
-		if workshop_items.has(VSR_WORKSHOP_ID):
-			vrv_roots.append(String(workshop_items[VSR_WORKSHOP_ID]["path"]))
-		else:
-			vrv_missing.append(VSR_WORKSHOP_ID)
+		var full_deps: Array[String] = ["stock"]
 		for d_v in item["assetDependencies"]:
-			var dep_id := String(d_v)
-			if workshop_items.has(dep_id):
-				vrv_roots.append(String(workshop_items[dep_id]["path"]))
-			else:
-				vrv_missing.append(dep_id)
+			full_deps.append(String(d_v))
+		vrv["dependencies"] = full_deps
+		vrv["parentMods"] = [VSR_WORKSHOP_ID]
+		var walked := _collect_workshop_deps_recursive(VRV_WORKSHOP_ID, true)
+		for r_v in walked["roots"]:
+			vrv_roots.append(String(r_v))
+		if workshop_items.has(VSR_WORKSHOP_ID):
+			var vsr_path := String(workshop_items[VSR_WORKSHOP_ID]["path"])
+			if not (vsr_path in vrv_roots):
+				vrv_roots.insert(1, vsr_path)
+		else:
+			if not (VSR_WORKSHOP_ID in vrv_missing):
+				vrv_missing.append(VSR_WORKSHOP_ID)
+		for m_v in walked["missing"]:
+			if not (String(m_v) in vrv_missing):
+				vrv_missing.append(String(m_v))
 		if not (item["dlls"] as Array).is_empty():
 			vrv["missionDlls"] = item["dlls"]
 	elif not last_game_dir.is_empty() and DirAccess.dir_exists_absolute(last_game_dir.path_join("VRV")):
 		vrv["installed"] = true
 		vrv["gameRoot"] = last_game_dir.path_join("VRV")
 		vrv_roots.append(last_game_dir.path_join("VRV"))
-	if not vrv_dir.strip_edges().is_empty() and DirAccess.dir_exists_absolute(vrv_dir.strip_edges().path_join("mod/Data/Templates")):
-		var tpl_dir := vrv_dir.strip_edges().path_join("mod/Data/Templates")
+	if not last_vrv_dir.is_empty() and DirAccess.dir_exists_absolute(last_vrv_dir.path_join("mod/Data/Templates")):
+		var tpl_dir := last_vrv_dir.path_join("mod/Data/Templates")
 		var tpl := tpl_dir.path_join("vrv_new_blank.ter")
 		if FileAccess.file_exists(tpl):
 			vrv["templates"] = [tpl]
@@ -430,7 +486,7 @@ func discover_installed(game_dir: String, vrv_dir: String = "", workshop_overrid
 	vrv["missingDependencies"] = vrv_missing
 	_register(vrv)
 
-	# 5. Register all other discovered config Workshop mods as custom:<workshopId>
+	# 5. Register all other discovered config Workshop mods as custom:ws-<workshopId>
 	for item_id: String in workshop_items:
 		if item_id == VSR_WORKSHOP_ID or item_id == VRV_WORKSHOP_ID:
 			continue
@@ -441,19 +497,13 @@ func discover_installed(game_dir: String, vrv_dir: String = "", workshop_overrid
 		var title := String(item["modName"])
 		if title.is_empty():
 			title = "Workshop Mod " + item_id
-		var roots: Array[String] = [String(item["path"])]
-		var missing: Array[String] = []
+		var walked := _collect_workshop_deps_recursive(item_id, true)
 		var deps: Array[String] = ["stock"]
 		for d_v in item["assetDependencies"]:
-			var dep_id := String(d_v)
-			deps.append(dep_id)
-			if workshop_items.has(dep_id):
-				roots.append(String(workshop_items[dep_id]["path"]))
-			else:
-				missing.append(dep_id)
+			deps.append(String(d_v))
 		var modes: Array[String] = ["blank", "custom-dll", "lua"]
-		for dll_name: String in item["dlls"]:
-			var dl := dll_name.to_lower()
+		for dll_v in walked["dlls"]:
+			var dl := String(dll_v).to_lower()
 			if "strat" in dl and not ("strategy" in modes):
 				modes.append("strategy")
 			if "instant" in dl and not ("instant" in modes):
@@ -469,11 +519,11 @@ func discover_installed(game_dir: String, vrv_dir: String = "", workshop_overrid
 			"homepage": "https://steamcommunity.com/sharedfiles/filedetails/?id=" + item_id,
 			"modType": String(item["modType"]) if not String(item["modType"]).is_empty() else "config",
 			"gameRoot": String(item["path"]),
-			"assetRoots": roots,
+			"assetRoots": walked["roots"],
 			"dependencies": deps,
-			"missingDependencies": missing,
+			"missingDependencies": walked["missing"],
 			"missionModes": modes,
-			"missionDlls": item["dlls"],
+			"missionDlls": walked["dlls"],
 			"templates": [],
 			"installed": true,
 			"capabilities": {"terrain": "NATIVE", "soundPoints": "UNSUPPORTED"},
@@ -505,14 +555,244 @@ func _dfs_cycle(node: String, state: Dictionary, cycles: Array[String]) -> void:
 	var entry: Dictionary = profiles.get(node, {})
 	for dep_v in entry.get("dependencies", []):
 		var dep := String(dep_v)
-		if not profiles.has(dep):
+		var target := dep
+		if not profiles.has(target) and dep.is_valid_int():
+			if dep == VSR_WORKSHOP_ID:
+				target = "vsr"
+			elif dep == VRV_WORKSHOP_ID:
+				target = "vrv"
+			elif profiles.has("custom:ws-" + dep):
+				target = "custom:ws-" + dep
+		if not profiles.has(target):
 			continue
-		var st := int(state.get(dep, 0))
+		var st := int(state.get(target, 0))
 		if st == 1:
-			cycles.append("%s -> %s" % [node, dep])
+			cycles.append("%s -> %s" % [node, target])
 		elif st == 0:
-			_dfs_cycle(dep, state, cycles)
+			_dfs_cycle(target, state, cycles)
 	state[node] = 2
+
+
+## Deterministic recursive dependency traversal for a target mod profile.
+## Produces ordered roots, exact provenance, missing/disabled dependencies,
+## dependency cycles, duplicate roots, and unavailable roots.
+## Never fakes `complete = true` when any dependency is missing or disabled.
+func resolve_dependency_stack(mod_id: String, game_dir: String = "", vrv_dir: String = "") -> Dictionary:
+	var eff_game := game_dir.strip_edges() if not game_dir.strip_edges().is_empty() else last_game_dir
+	var eff_mod := mod_id.strip_edges().to_lower()
+	if eff_mod.is_empty():
+		eff_mod = "stock"
+	var native_roots: Array[String] = []
+	if not eff_game.is_empty():
+		for sub in ["bz2r_res", "bz2r_loc"]:
+			var p := eff_game.path_join(sub)
+			if DirAccess.dir_exists_absolute(p):
+				native_roots.append(p)
+	var stock_installed := not eff_game.is_empty() and DirAccess.dir_exists_absolute(eff_game.path_join("bz2r_res"))
+	if eff_mod == "stock":
+		var stock_stack: Array[Dictionary] = []
+		for nr in native_roots:
+			stock_stack.append({"id": "stock", "source": "stock", "path": nr, "modType": "base"})
+		return {
+			"modId": "stock",
+			"knownProfile": true,
+			"installed": stock_installed,
+			"modAssetRoots": [],
+			"nativeRoots": native_roots,
+			"dependencyStack": stock_stack,
+			"missingDependencies": [],
+			"disabledDependencies": [],
+			"dependencyCycles": [],
+			"duplicateRoots": [],
+			"unavailableRoots": [],
+			"localFallbackUsed": false,
+			"complete": stock_installed,
+		}
+
+	var known := has_profile(eff_mod)
+	var prof := get_profile(eff_mod)
+	if not known or eff_mod == "custom:unknown":
+		return {
+			"modId": eff_mod,
+			"knownProfile": false,
+			"installed": false,
+			"modAssetRoots": [],
+			"nativeRoots": native_roots,
+			"dependencyStack": [],
+			"missingDependencies": [eff_mod],
+			"disabledDependencies": [],
+			"dependencyCycles": [],
+			"duplicateRoots": [],
+			"unavailableRoots": [],
+			"localFallbackUsed": false,
+			"complete": false,
+		}
+
+	var state := {
+		"eff_mod": eff_mod,
+		"eff_game": eff_game,
+		"stock_installed": stock_installed,
+		"mod_roots": [] as Array[String],
+		"stack": [] as Array[Dictionary],
+		"missing_deps": [] as Array[String],
+		"disabled_deps": [] as Array[String],
+		"cycles": [] as Array[String],
+		"dup_roots": [] as Array[String],
+		"unavailable_roots": [] as Array[String],
+		"local_fallback_used": false,
+		"seen_root": {},
+		"visit_state": {},
+	}
+
+	# Check primary profile disabled state
+	if disabled_mods.get(eff_mod, false):
+		(state["disabled_deps"] as Array).append(eff_mod)
+
+	_walk_dependency_node(state, eff_mod, true)
+
+	var mod_roots: Array[String] = state["mod_roots"]
+	var stack: Array[Dictionary] = state["stack"]
+	var missing_deps: Array[String] = state["missing_deps"]
+	var disabled_deps: Array[String] = state["disabled_deps"]
+	var cycles: Array[String] = state["cycles"]
+	var dup_roots: Array[String] = state["dup_roots"]
+	var unavailable_roots: Array[String] = state["unavailable_roots"]
+	var local_fallback_used: bool = bool(state["local_fallback_used"])
+
+	# Include Stock native roots at bottom of stack
+	for nr in native_roots:
+		stack.append({"id": "stock", "source": "stock", "path": nr, "modType": "base"})
+
+	var is_installed := bool(prof.get("installed", false)) or (local_fallback_used and not mod_roots.is_empty())
+	var complete := is_installed and missing_deps.is_empty() and disabled_deps.is_empty() and cycles.is_empty() and unavailable_roots.is_empty()
+	return {
+		"modId": eff_mod,
+		"knownProfile": true,
+		"installed": is_installed,
+		"modAssetRoots": mod_roots,
+		"nativeRoots": native_roots,
+		"dependencyStack": stack,
+		"missingDependencies": missing_deps,
+		"disabledDependencies": disabled_deps,
+		"dependencyCycles": cycles,
+		"duplicateRoots": dup_roots,
+		"unavailableRoots": unavailable_roots,
+		"localFallbackUsed": local_fallback_used,
+		"complete": complete,
+	}
+
+
+func _add_dep_root_entry(state: Dictionary, root_path: String, dep_id: String, source_tag: String, mtype: String) -> void:
+	var clean_p := root_path.strip_edges().simplify_path()
+	if clean_p.is_empty():
+		return
+	var low := clean_p.to_lower()
+	var seen_root: Dictionary = state["seen_root"]
+	if seen_root.has(low):
+		var dup_roots: Array = state["dup_roots"]
+		if not (clean_p in dup_roots):
+			dup_roots.append(clean_p)
+		return
+	if not DirAccess.dir_exists_absolute(clean_p):
+		var unavailable_roots: Array = state["unavailable_roots"]
+		if not (clean_p in unavailable_roots):
+			unavailable_roots.append(clean_p)
+		return
+	seen_root[low] = true
+	(state["mod_roots"] as Array).append(clean_p)
+	(state["stack"] as Array).append({"id": dep_id, "source": source_tag, "path": clean_p, "modType": mtype})
+
+
+func _walk_dependency_node(state: Dictionary, node_id: String, is_root_mod: bool) -> void:
+	var eff_mod := String(state["eff_mod"])
+	var eff_game := String(state["eff_game"])
+	var missing_deps: Array = state["missing_deps"]
+	var disabled_deps: Array = state["disabled_deps"]
+	var cycles: Array = state["cycles"]
+	var visit_state: Dictionary = state["visit_state"]
+
+	if node_id == "stock":
+		if not bool(state["stock_installed"]) and not ("stock" in missing_deps):
+			missing_deps.append("stock")
+		return
+	var st := int(visit_state.get(node_id, 0))
+	if st == 1:
+		var cyc := "%s -> %s" % [eff_mod, node_id]
+		if not (cyc in cycles):
+			cycles.append(cyc)
+		return
+	if st == 2:
+		return
+	visit_state[node_id] = 1
+
+	# Resolve either registered profile or raw Workshop numeric ID
+	var resolved_prof_id := node_id
+	if not has_profile(resolved_prof_id) and node_id.is_valid_int():
+		if node_id == VSR_WORKSHOP_ID:
+			resolved_prof_id = "vsr"
+		elif node_id == VRV_WORKSHOP_ID:
+			resolved_prof_id = "vrv"
+		elif has_profile("custom:ws-" + node_id):
+			resolved_prof_id = "custom:ws-" + node_id
+
+	if has_profile(resolved_prof_id):
+		var p: Dictionary = get_profile(resolved_prof_id)
+		if not is_root_mod and disabled_mods.get(resolved_prof_id, false) and not (resolved_prof_id in disabled_deps):
+			disabled_deps.append(resolved_prof_id)
+		var primary_root := String(p.get("gameRoot", "")).strip_edges()
+		if not primary_root.is_empty():
+			_add_dep_root_entry(state, primary_root, resolved_prof_id, String(p.get("provenance", {}).get("source", resolved_prof_id)), String(p.get("modType", "config")))
+		elif bool(p.get("installed", false)):
+			for ar_v in p.get("assetRoots", []):
+				_add_dep_root_entry(state, String(ar_v), resolved_prof_id, resolved_prof_id, String(p.get("modType", "config")))
+		elif resolved_prof_id in ["vsr", "vrv"] and not eff_game.is_empty():
+			# Explicit local VRV/deps fallback only when Workshop item itself is absent
+			var fallback_path := eff_game.path_join("VRV/Core") if resolved_prof_id == "vrv" else eff_game.path_join("VRV/deps/VSR")
+			if DirAccess.dir_exists_absolute(fallback_path):
+				state["local_fallback_used"] = true
+				_add_dep_root_entry(state, fallback_path, resolved_prof_id, "local-vrv-fallback:" + resolved_prof_id, "fallback")
+			elif not (resolved_prof_id in missing_deps):
+				missing_deps.append(resolved_prof_id)
+		elif not (resolved_prof_id in missing_deps):
+			missing_deps.append(resolved_prof_id)
+
+		for pm_v in p.get("parentMods", []):
+			var pm_id := String(pm_v).strip_edges()
+			if pm_id.is_empty():
+				continue
+			if workshop_items.has(pm_id):
+				var pwi: Dictionary = workshop_items[pm_id]
+				_add_dep_root_entry(state, String(pwi["path"]), pm_id, "workshop-parent-" + pm_id, String(pwi.get("modType", "config")))
+			elif pm_id == VSR_WORKSHOP_ID and not eff_game.is_empty() and DirAccess.dir_exists_absolute(eff_game.path_join("VRV/deps/VSR")):
+				state["local_fallback_used"] = true
+				_add_dep_root_entry(state, eff_game.path_join("VRV/deps/VSR"), pm_id, "local-vrv-fallback:vsr", "fallback")
+			elif not (pm_id in missing_deps):
+				missing_deps.append(pm_id)
+
+		for dep_v in p.get("dependencies", []):
+			var d := String(dep_v).strip_edges()
+			if not d.is_empty():
+				_walk_dependency_node(state, d, false)
+	elif workshop_items.has(node_id):
+		var wi: Dictionary = workshop_items[node_id]
+		_add_dep_root_entry(state, String(wi["path"]), node_id, "workshop-" + node_id, String(wi.get("modType", "asset")))
+		for dep_v in wi.get("assetDependencies", []):
+			var d := String(dep_v).strip_edges()
+			if not d.is_empty():
+				_walk_dependency_node(state, d, false)
+	else:
+		# Missing Workshop dependency ID: check targeted VRV/deps/<id> fallback only for vsr/vrv
+		var found_fallback := false
+		if eff_mod in ["vsr", "vrv"] and not eff_game.is_empty() and node_id.is_valid_int():
+			var local_dep := eff_game.path_join("VRV/deps").path_join(node_id)
+			if DirAccess.dir_exists_absolute(local_dep):
+				state["local_fallback_used"] = true
+				found_fallback = true
+				_add_dep_root_entry(state, local_dep, node_id, "local-vrv-fallback:" + node_id, "fallback")
+		if not found_fallback and not (node_id in missing_deps):
+			missing_deps.append(node_id)
+
+	visit_state[node_id] = 2
 
 
 const STOCK_KNOWN_DLLS := ["strategy02.dll", "instant.dll", "mpinstant.dll", "deathmatch01.dll", "stratctf.dll", "luamission.dll"]
@@ -650,21 +930,25 @@ const VERIFIED_VSR_TO_STOCK_ODFS := {
 	},
 }
 
+## Exact verified Stock ODF manifest (every entry verified in BZCC 2.0.185 bz2r_res).
+## Additional Stock ODFs are positively identified dynamically from installed game_dir/bz2r_res.
 const VERIFIED_STOCK_ODF_FAMILIES := {
 	"player": "craft",
 	"ivtank": "craft", "ivscout": "craft", "ivmisl": "craft", "ivturr": "craft",
-	"ivscav": "craft", "ivcons": "craft", "ivserv": "craft", "ivatank": "craft",
+	"ivscav": "craft", "ivcons": "craft", "ivcons2": "craft", "ivserv": "craft", "ivatank": "craft",
 	"ivrckt": "craft", "ivmbike": "craft", "ivwalk": "craft", "ivapc": "craft",
 	"ivrecy": "craft", "ivrecy_m": "craft", "ivrecycpu": "craft", "ivtug": "craft",
-	"ivintc": "craft", "ivbomb": "craft", "ivdrop": "craft", "ivdrop_fly": "craft",
-	"ivdrop_land": "craft", "ivdrop_sh": "craft", "ivpdrop": "craft",
+	"ivintc": "craft", "ivbomb": "craft", "ivcarr": "craft", "ivdrop": "craft", "ivdrop2": "craft",
+	"ivdrop_fly": "craft", "ivdrop2_fl": "craft", "ivdrop_land": "craft", "ivdrop2_ld": "craft",
+	"ivdrop_sh": "craft", "ivpdrop": "craft",
 	"fvscout": "craft", "fvtank": "craft", "fvsent": "craft", "fvturr": "craft",
 	"fvscav": "craft", "fvcons": "craft", "fvserv": "craft", "fvatank": "craft",
 	"fvarch": "craft", "fvwalk": "craft", "fvartl": "craft", "fvrecy": "craft",
 	"fvrecy_m": "craft", "fvrecycpu": "craft", "fvtug": "craft",
 	"ibrecy": "building", "ibrecy_m": "building", "ibfact": "building", "ibsbay": "building",
 	"ibbomb": "building", "ibtele": "building", "ibtcen": "building", "ibtrain": "building",
-	"ibarmo": "building", "ibcbun": "building", "ibgtow": "building", "ibpgen": "building",
+	"ibarmo": "building", "ibcbun": "building", "ibgtow": "building", "ibgtow01": "building", "ibgtoww1": "building",
+	"ibpgen": "building", "ibpgen01": "building",
 	"ibbstr": "building", "ibbseg": "building", "ibcrat00": "building", "ibcrat01": "building",
 	"iblite": "building", "ibscav": "building", "ibscup": "building", "ibwseg": "building",
 	"ibwstr": "building", "fbrecy": "building", "fbrecy_m": "building", "fbfact": "building",
@@ -672,10 +956,15 @@ const VERIFIED_STOCK_ODF_FAMILIES := {
 	"fbover": "building", "fbspir": "building", "fbantm": "building", "fbjamm": "building",
 	"fbscav": "building", "fbscup": "building", "ipdrop": "building",
 	"ispilo": "pilot", "issold": "pilot", "fspilo": "pilot", "fssold": "pilot",
-	"becras02a": "building", "perecy": "building", "petank": "building", "pescav": "building", "peapc": "building",
+	"becras02a": "building", "crashdrop": "building", "crashdrop2": "building", "crashsite": "building",
+	"perecy": "building", "petank": "building", "pescav": "building", "peapc": "building", "recarr00": "building",
+	"pbscen01": "prop", "pbscen02": "prop", "pbscen06": "prop", "pbscen07": "prop", "pbscen08": "prop", "pbscen10": "prop",
+	"morock01": "prop", "morock03": "prop", "mobush01": "prop", "mobush02": "prop", "mopalm02": "prop",
+	"rbruin01": "prop", "rbruin02": "prop", "rbruin04": "prop", "rbruin05": "prop", "rbruin06": "prop",
+	"ropilr01": "prop", "ropilr02": "prop", "ropilr03": "prop", "ropilr05": "prop",
 	"pspwn_1": "spawnpoint",
-	"npscrx": "pool", "npscr1": "pool", "npscr2": "pool", "npscr3": "pool",
-	"npba": "pool", "uepool01": "pool", "tepool01": "pool", "cpool01": "pool",
+	"npscrx": "scrap", "npscr1": "scrap", "npscr2": "scrap", "npscr3": "scrap",
+	"npba": "pool", "epgysr00": "pool", "uepool01": "pool", "tepool01": "pool", "cpool01": "pool",
 }
 
 
@@ -696,7 +985,10 @@ static func classify_odf_family(odf: String) -> String:
 	return ""
 
 
-static func is_verified_stock_odf(odf: String) -> bool:
+## Positive Stock ODF verification ONLY.
+## Checks the exact verified Stock manifest AND (when supplied) the live installed
+## Stock bz2r_res / .pak ODF index. NEVER falls back to naming-prefix heuristics.
+static func is_verified_stock_odf(odf: String, stock_odf_index: Dictionary = {}) -> bool:
 	var clean := odf.strip_edges().to_lower()
 	if clean.ends_with(".odf"):
 		clean = clean.substr(0, clean.length() - 4)
@@ -706,12 +998,97 @@ static func is_verified_stock_odf(odf: String) -> bool:
 		return false
 	if VERIFIED_STOCK_ODF_FAMILIES.has(clean):
 		return true
-	return _is_likely_stock_odf(clean)
+	if not stock_odf_index.is_empty() and stock_odf_index.has(clean + ".odf"):
+		return true
+	return false
+
+
+## Naming-convention hint ONLY. Never used as Stock compatibility proof or to
+## elevate Stock detection confidence.
+static func is_likely_stock_naming(odf: String) -> bool:
+	var clean := odf.strip_edges().to_lower()
+	if clean.ends_with(".odf"):
+		clean = clean.substr(0, clean.length() - 4)
+	if clean.is_empty():
+		return false
+	if clean.begins_with("vrv_") or clean.ends_with("_vsr") or "_vsr" in clean or ":" in clean:
+		return false
+	for prefix in ["iv", "ib", "is", "ie", "fv", "fb", "fs", "fe", "av", "ab", "bv", "bb", "be", "cv", "cb", "ev", "eb", "gv", "gb", "hv", "hb", "mv", "mb", "nv", "nb", "ov", "ob", "pv", "pb", "pe", "ps", "sv", "sb", "tv", "tb", "uv", "ub", "wv", "wb", "xv", "xb", "yv", "yb", "np", "sp", "ap", "op", "gp", "ep", "cp", "fp", "ip", "mp", "rp", "tp", "vp", "wp", "xp", "mo", "ba", "mi", "du", "pl", "cr", "tr", "bu", "tu", "wa", "la", "br", "ro", "st", "cl", "pi", "co", "de", "fl", "gl", "gr", "hi", "ic", "ju", "ma", "me", "mu", "pa", "po", "qu", "ra", "re", "ri", "ru", "sa", "sc", "se", "sh", "si", "sk", "sl", "sm", "sn", "so", "sq", "su", "sw", "ta", "te", "th", "ti", "to", "un", "va", "ve", "vi", "vo", "wi", "wo", "wr", "ze"]:
+		if clean.begins_with(prefix):
+			return true
+	return false
+
+
+## Legacy alias kept strictly as a naming hint helper (never called by is_verified_stock_odf).
+static func _is_likely_stock_odf(odf: String) -> bool:
+	return is_likely_stock_naming(odf)
+
+
+## Classifies an ODF strictly into VERIFIED_STOCK_ODF, VERIFIED_MOD_ODF,
+## LIKELY_STOCK_NAMING (hint only), or UNKNOWN_ODF.
+static func classify_odf_origin(odf: String, stock_odf_index: Dictionary = {}, mod_odf_sources: Dictionary = {}) -> Dictionary:
+	var clean := odf.strip_edges().to_lower()
+	if clean.ends_with(".odf"):
+		clean = clean.substr(0, clean.length() - 4)
+	var key := clean + ".odf"
+	if clean.is_empty():
+		return {"odf": "", "classification": ODF_UNKNOWN, "sourceMod": "unknown", "resolvedPath": "", "hint": "Empty ODF name."}
+	if clean == "vrv_sndpoint" or clean.begins_with("vrv_"):
+		return {"odf": clean, "classification": ODF_VERIFIED_MOD, "sourceMod": "vrv", "resolvedPath": "", "hint": "VRV runtime ODF."}
+	if clean.ends_with("_vsr") or "_vsr" in clean:
+		return {"odf": clean, "classification": ODF_VERIFIED_MOD, "sourceMod": "vsr", "resolvedPath": "", "hint": "VSR ODF."}
+	if mod_odf_sources.has(key):
+		var src_info: Variant = mod_odf_sources[key]
+		var src_mod := String(src_info.get("source", "custom")) if src_info is Dictionary else String(src_info)
+		var src_path := String(src_info.get("path", "")) if src_info is Dictionary else ""
+		if src_mod != "stock" and src_mod != "map":
+			return {"odf": clean, "classification": ODF_VERIFIED_MOD, "sourceMod": src_mod, "resolvedPath": src_path, "hint": "Resolved in mod asset root (%s)." % src_mod}
+	if is_verified_stock_odf(clean, stock_odf_index):
+		var path := ""
+		if stock_odf_index.has(key) and stock_odf_index[key] is Array and not (stock_odf_index[key] as Array).is_empty():
+			path = String((stock_odf_index[key] as Array)[0])
+		return {"odf": clean, "classification": ODF_VERIFIED_STOCK, "sourceMod": "stock", "resolvedPath": path, "hint": "Verified Stock resource."}
+	if is_likely_stock_naming(clean):
+		return {
+			"odf": clean,
+			"classification": ODF_LIKELY_STOCK_NAMING,
+			"sourceMod": "unknown",
+			"resolvedPath": "",
+			"hint": "Naming prefix resembles Stock convention, but origin is NOT verified in Stock manifest or installed bz2r_res.",
+		}
+	return {"odf": clean, "classification": ODF_UNKNOWN, "sourceMod": "unknown", "resolvedPath": "", "hint": "Unrecognized ODF origin."}
+
+
+func get_stock_odf_index(game_dir: String = "") -> Dictionary:
+	var eff_game := game_dir.strip_edges() if not game_dir.strip_edges().is_empty() else last_game_dir
+	if eff_game.is_empty():
+		return {}
+	var combined := {}
+	var res_dir := eff_game.path_join("bz2r_res")
+	if DirAccess.dir_exists_absolute(res_dir):
+		var idx := AssetIndex.get_root_index(res_dir, true, false)
+		var odfs: Dictionary = idx.get("odfs", {})
+		for k: String in odfs:
+			combined[k] = odfs[k]
+	var loc_dir := eff_game.path_join("bz2r_loc")
+	if DirAccess.dir_exists_absolute(loc_dir):
+		var lidx := AssetIndex.get_root_index(loc_dir, true, false)
+		var lodfs: Dictionary = lidx.get("odfs", {})
+		for k: String in lodfs:
+			if not combined.has(k):
+				combined[k] = lodfs[k]
+	if DirAccess.dir_exists_absolute(eff_game):
+		var gidx := AssetIndex.get_root_index(eff_game, false, false)
+		var godfs: Dictionary = gidx.get("odfs", {})
+		for k: String in godfs:
+			if not combined.has(k):
+				combined[k] = godfs[k]
+	return combined
 
 
 ## Looks up a verified semantic conversion for a single ODF from source_mod to target_mod.
 ## Never performs heuristic name-stripping (such as odf.replace("_vsr", "")).
-static func lookup_verified_odf_conversion(source_odf: String, target_mod: String = "stock", manual_map: Dictionary = {}) -> Dictionary:
+static func lookup_verified_odf_conversion(source_odf: String, target_mod: String = "stock", manual_map: Dictionary = {}, stock_odf_index: Dictionary = {}) -> Dictionary:
 	var clean := source_odf.strip_edges().to_lower()
 	if clean.ends_with(".odf"):
 		clean = clean.substr(0, clean.length() - 4)
@@ -722,7 +1099,7 @@ static func lookup_verified_odf_conversion(source_odf: String, target_mod: Strin
 			chosen_raw = chosen_raw.substr(0, chosen_raw.length() - 4)
 		if chosen_raw.is_empty():
 			return {"status": "missing_target", "sourceOdf": source_odf, "targetOdf": "", "error": "Manual replacement ODF for '%s' cannot be empty." % source_odf}
-		if tgt_mod == "stock" and not VERIFIED_STOCK_ODF_FAMILIES.has(chosen_raw):
+		if tgt_mod == "stock" and not is_verified_stock_odf(chosen_raw, stock_odf_index):
 			return {"status": "missing_target", "sourceOdf": source_odf, "targetOdf": chosen_raw, "error": "Manual replacement '%s' is not a verified Stock ODF." % chosen_raw}
 		var src_fam := classify_odf_family(clean)
 		var tgt_fam := classify_odf_family(chosen_raw)
@@ -747,7 +1124,7 @@ static func lookup_verified_odf_conversion(source_odf: String, target_mod: Strin
 			"error": "",
 		}
 	if tgt_mod == "stock":
-		if is_verified_stock_odf(clean):
+		if is_verified_stock_odf(clean, stock_odf_index):
 			return {
 				"status": "native",
 				"sourceOdf": source_odf,
@@ -774,14 +1151,16 @@ static func lookup_verified_odf_conversion(source_odf: String, target_mod: Strin
 				"classCompatible": false,
 				"error": "VRV runtime object '%s' has no Stock counterpart." % source_odf,
 			}
+		var origin := classify_odf_origin(clean, stock_odf_index)
 		return {
 			"status": "unverified",
 			"sourceOdf": source_odf,
 			"targetOdf": "",
 			"sourceMod": "vsr" if "_vsr" in clean else "unknown",
 			"targetMod": "stock",
+			"classification": String(origin["classification"]),
 			"classCompatible": false,
-			"error": "No verified Stock counterpart for '%s' (heuristic _vsr stripping is prohibited)." % source_odf,
+			"error": "No verified Stock resource or counterpart for '%s' (%s)." % [source_odf, String(origin["classification"])],
 		}
 	elif tgt_mod == "vsr":
 		if clean == "vrv_sndpoint" or clean.begins_with("vrv_"):
@@ -794,7 +1173,7 @@ static func lookup_verified_odf_conversion(source_odf: String, target_mod: Strin
 				"classCompatible": false,
 				"error": "VRV runtime object '%s' is not supported in VSR without VRV runtime." % source_odf,
 			}
-		if is_verified_stock_odf(clean) or VERIFIED_VSR_TO_STOCK_ODFS.has(clean):
+		if is_verified_stock_odf(clean, stock_odf_index) or VERIFIED_VSR_TO_STOCK_ODFS.has(clean):
 			return {
 				"status": "native",
 				"sourceOdf": source_odf,
@@ -827,7 +1206,7 @@ static func lookup_verified_odf_conversion(source_odf: String, target_mod: Strin
 ## Plans and validates semantic ODF conversion across a BZN object list.
 ## Checks duplicate object pointer IDs, duplicate sequences, pointer reference
 ## safety on removals, and verified ODF replacement mappings.
-static func plan_bzn_odf_conversion(entries: Array, ptr_counts: Dictionary, target_mod: String = "stock", manual_map: Dictionary = {}, allow_drop_vrv: bool = false) -> Dictionary:
+static func plan_bzn_odf_conversion(entries: Array, ptr_counts: Dictionary, target_mod: String = "stock", manual_map: Dictionary = {}, allow_drop_vrv: bool = false, stock_odf_index: Dictionary = {}) -> Dictionary:
 	var odf_edits := {}
 	var removals: Array[int] = []
 	var replacements: Array[Dictionary] = []
@@ -852,7 +1231,7 @@ static func plan_bzn_odf_conversion(entries: Array, ptr_counts: Dictionary, targ
 		var odf := String(entry.get("odf", ""))
 		var lbl := String(entry.get("label", ""))
 		var check_odf := "vrv_sndpoint" if lbl.to_lower().begins_with("vrvsnd:") and odf.to_lower() != "vrv_sndpoint" else odf
-		var lookup := lookup_verified_odf_conversion(check_odf, target_mod, manual_map)
+		var lookup := lookup_verified_odf_conversion(check_odf, target_mod, manual_map, stock_odf_index)
 		var st := String(lookup.get("status", ""))
 		if st == "native":
 			continue
@@ -905,62 +1284,76 @@ static func plan_bzn_odf_conversion(entries: Array, ptr_counts: Dictionary, targ
 
 ## Builds a single unified ResolvedContentEnvironment for models, terrain
 ## materials, ODF lookup, sound lookup, mission assets, export validation, and
-## Playtest. Strict Stock isolation: when mod_profile == 'stock', modAssetRoots
-## is ALWAYS empty (never mounts VRV/Core, VRV/deps, or Workshop mod folders).
-func resolve_content_environment(document: Object, game_dir: String = "", vrv_dir: String = "") -> Dictionary:
+## Playtest. Uses deterministic recursive dependency traversal.
+## Strict Stock isolation: when mod_profile == 'stock', modAssetRoots is ALWAYS empty.
+func resolve_content_environment(document: Object, game_dir: String = "", vrv_dir: String = "", target_mod_override: String = "", target_mission_override: String = "", target_engine_override: String = "", asset_profile_override: String = "", extra_roots_override: Array = []) -> Dictionary:
 	var eff_game := game_dir.strip_edges() if not game_dir.strip_edges().is_empty() else last_game_dir
-	var mod_id := String(document.mod_profile).strip_edges().to_lower() if document != null and "mod_profile" in document else "stock"
-	var mis_id := String(document.mission_profile).strip_edges().to_lower() if document != null and "mission_profile" in document else "blank"
-	var eng_id := String(document.engine_profile).strip_edges() if document != null and "engine_profile" in document else "bzcc-2.0.185"
-	var map_folder: String = String(document.package.source_path).get_base_dir() if document != null and document.package != null else ""
+	var eff_vrv := vrv_dir.strip_edges() if not vrv_dir.strip_edges().is_empty() else last_vrv_dir
+	var mod_id := target_mod_override.strip_edges().to_lower() if not target_mod_override.strip_edges().is_empty() else (String(document.mod_profile).strip_edges().to_lower() if document != null and "mod_profile" in document else "stock")
+	var mis_id := target_mission_override.strip_edges().to_lower() if not target_mission_override.strip_edges().is_empty() else (String(document.mission_profile).strip_edges().to_lower() if document != null and "mission_profile" in document else "blank")
+	var eng_id := target_engine_override.strip_edges() if not target_engine_override.strip_edges().is_empty() else (String(document.engine_profile).strip_edges() if document != null and "engine_profile" in document else "bzcc-2.0.185")
+	var map_folder := ""
+	if document != null:
+		if "package" in document and document.package != null:
+			map_folder = String(document.package.source_path).get_base_dir()
+		elif "source_path" in document:
+			map_folder = String(document.source_path).get_base_dir()
 
+	var ap := asset_profile_override.strip_edges()
+	if ap.is_empty() and document != null and "asset_profile" in document:
+		ap = String(document.asset_profile).strip_edges()
 	var linked_folders: Array[String] = []
-	if document != null and "asset_profile" in document and not String(document.asset_profile).is_empty():
-		var ap := String(document.asset_profile)
-		if FileAccess.file_exists(ap):
-			var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(ap))
-			if parsed is Dictionary and parsed.get("folders", null) is Array:
-				var base_dir := ap.get_base_dir()
-				for entry_v in parsed["folders"]:
-					var entry := String(entry_v).strip_edges()
-					if entry.is_empty():
-						continue
-					var full := entry if entry.is_absolute_path() else base_dir.path_join(entry).simplify_path()
-					if DirAccess.dir_exists_absolute(full) and not (full in linked_folders):
+	var unavailable_linked: Array[String] = []
+	if not ap.is_empty() and FileAccess.file_exists(ap):
+		var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(ap))
+		if parsed is Dictionary and parsed.get("folders", null) is Array:
+			var base_dir := ap.get_base_dir()
+			for entry_v in parsed["folders"]:
+				var entry := String(entry_v).strip_edges()
+				if entry.is_empty():
+					continue
+				var full := entry if entry.is_absolute_path() else base_dir.path_join(entry).simplify_path()
+				if DirAccess.dir_exists_absolute(full):
+					if not (full in linked_folders):
 						linked_folders.append(full)
+				elif not (full in unavailable_linked):
+					unavailable_linked.append(full)
+	for er_v in extra_roots_override:
+		var er := String(er_v).strip_edges().simplify_path()
+		if er.is_empty():
+			continue
+		if DirAccess.dir_exists_absolute(er):
+			if not (er in linked_folders):
+				linked_folders.append(er)
+		elif not (er in unavailable_linked):
+			unavailable_linked.append(er)
 
+	var dep_res := resolve_dependency_stack(mod_id, eff_game, eff_vrv)
 	var mod_roots: Array[String] = []
-	if mod_id != "stock":
-		var prof := get_profile(mod_id)
-		for r_v in prof.get("assetRoots", []):
-			var r := String(r_v).strip_edges()
-			if not r.is_empty() and DirAccess.dir_exists_absolute(r) and not (r in mod_roots):
-				mod_roots.append(r)
-		# Local VRV/deps fallback only for VSR/VRV when Workshop roots are absent
-		if mod_roots.is_empty() and not eff_game.is_empty() and mod_id in ["vsr", "vrv"]:
-			if mod_id == "vrv":
-				var vrv_core := eff_game.path_join("VRV/Core")
-				if DirAccess.dir_exists_absolute(vrv_core):
-					mod_roots.append(vrv_core)
-			var deps_dir := eff_game.path_join("VRV/deps")
-			for sub in ["VSR", "3532748119", "1329659846", "2785557433", "2785542655", "2814914461", "2049956570", "3493379153", "2467249743"]:
-				var p := deps_dir.path_join(sub)
-				if DirAccess.dir_exists_absolute(p) and not (p in mod_roots):
-					mod_roots.append(p)
-
+	for r_v in dep_res["modAssetRoots"]:
+		mod_roots.append(String(r_v))
 	var native_roots: Array[String] = []
-	if not eff_game.is_empty():
-		for sub in ["bz2r_res", "bz2r_loc"]:
-			var p := eff_game.path_join(sub)
-			if DirAccess.dir_exists_absolute(p):
-				native_roots.append(p)
+	for r_v in dep_res["nativeRoots"]:
+		native_roots.append(String(r_v))
 
 	var search_roots: Array[String] = []
+	var layered_roots: Array[Dictionary] = []
 	if not map_folder.is_empty():
 		search_roots.append(map_folder)
-	for r in linked_folders + mod_roots + native_roots:
-		if not (r in search_roots):
-			search_roots.append(r)
+		layered_roots.append({"path": map_folder, "source": "map", "recurse": true, "volatile": true})
+	for lf in linked_folders:
+		if not (lf in search_roots):
+			search_roots.append(lf)
+			layered_roots.append({"path": lf, "source": "linked", "recurse": true, "volatile": false})
+	for item_v in dep_res["dependencyStack"]:
+		var item: Dictionary = item_v
+		var p := String(item["path"])
+		if not (p in search_roots):
+			search_roots.append(p)
+			layered_roots.append({"path": p, "source": String(item["source"]), "recurse": true, "volatile": false})
+	if not eff_game.is_empty() and DirAccess.dir_exists_absolute(eff_game):
+		# Root game folder (non-recursive) for top-level DOCP .pak archives (smtex.pak, bumps.pak)
+		layered_roots.append({"path": eff_game, "source": "stock-pak", "recurse": false, "volatile": false})
 
 	var sound_roots: Array[String] = []
 	if not map_folder.is_empty():
@@ -988,41 +1381,46 @@ func resolve_content_environment(document: Object, game_dir: String = "", vrv_di
 		if not (r in dll_roots):
 			dll_roots.append(r)
 
+	var unavailable_all: Array[String] = []
+	for u_v in dep_res["unavailableRoots"]:
+		unavailable_all.append(String(u_v))
+	for u_v in unavailable_linked:
+		if not (u_v in unavailable_all):
+			unavailable_all.append(u_v)
+
 	return {
 		"engineProfile": eng_id,
 		"modProfile": mod_id,
 		"missionProfile": mis_id,
 		"mapFolder": map_folder,
 		"gameRoot": eff_game,
-		"vrvRoot": vrv_dir.strip_edges(),
+		"vrvRoot": eff_vrv,
 		"linkedFolders": linked_folders,
 		"modAssetRoots": mod_roots,
 		"nativeRoots": native_roots,
 		"searchRoots": search_roots,
+		"layeredRoots": layered_roots,
 		"soundRoots": sound_roots,
 		"missionDllRoots": dll_roots,
+		"dependencyStack": dep_res["dependencyStack"],
+		"missingDependencies": dep_res["missingDependencies"],
+		"disabledDependencies": dep_res["disabledDependencies"],
+		"dependencyCycles": dep_res["dependencyCycles"],
+		"duplicateRoots": dep_res["duplicateRoots"],
+		"unavailableRoots": unavailable_all,
+		"localFallbackUsed": bool(dep_res["localFallbackUsed"]),
+		"modInstalled": bool(dep_res["installed"]),
+		"knownProfile": bool(dep_res["knownProfile"]),
+		"dependenciesComplete": bool(dep_res["complete"]) and unavailable_linked.is_empty(),
 	}
-
-
-static func _is_likely_stock_odf(odf: String) -> bool:
-	var clean := odf.strip_edges().to_lower()
-	if clean.ends_with(".odf"):
-		clean = clean.substr(0, clean.length() - 4)
-	if clean.is_empty():
-		return true
-	if clean.begins_with("vrv_") or clean.ends_with("_vsr") or "_vsr" in clean or ":" in clean:
-		return false
-	# Standard BZCC Stock ODF faction/prop prefixes (ISDF i*, Scion f*, scrap/pools np*/sp*/ap*/gp*/ep*/cp*/pb*/mb*/ob*/bb*/cb*/sb*/tb*/ub*/wb*/xb*/yb*)
-	for prefix in ["iv", "ib", "is", "ie", "fv", "fb", "fs", "fe", "av", "ab", "bv", "bb", "be", "cv", "cb", "ev", "eb", "gv", "gb", "hv", "hb", "mv", "mb", "nv", "nb", "ov", "ob", "pv", "pb", "pe", "ps", "sv", "sb", "tv", "tb", "uv", "ub", "wv", "wb", "xv", "xb", "yv", "yb", "np", "sp", "ap", "op", "gp", "ep", "cp", "fp", "ip", "mp", "rp", "tp", "vp", "wp", "xp", "mo", "ba", "mi", "du", "pl", "cr", "tr", "bu", "tu", "wa", "la", "br", "ro", "st", "cl", "pi", "co", "de", "fl", "gl", "gr", "hi", "ic", "ju", "ma", "me", "mu", "pa", "po", "qu", "ra", "re", "ri", "ru", "sa", "sc", "se", "sh", "si", "sk", "sl", "sm", "sn", "so", "sq", "su", "sw", "ta", "te", "th", "ti", "to", "un", "va", "ve", "vi", "vo", "wi", "wo", "wr", "ze"]:
-		if clean.begins_with(prefix):
-			return true
-	return false
 
 
 ## Inspects real map package data (BZN DLL, ODF names, path names, Lua files)
 ## and produces evidence-based candidate ModProfile + MissionProfile rankings.
-## Never selects VRV merely because a converter or VRV tools exist locally,
-## and never assumes an unknown custom DLL or unknown mod ODFs are Stock.
+## NEVER selects VRV merely because a converter or VRV tools exist locally.
+## NEVER promotes naming-convention hints (LIKELY_STOCK_NAMING) to VERIFIED_STOCK
+## or Stock HIGH confidence, and NEVER treats a matching DLL basename alone as
+## Stock proof when unverified ODFs exist.
 static func detect_map_profiles(package: Object, registry: Object = null) -> Dictionary:
 	var dll := String(package.mission_dll).strip_edges().to_lower() if package != null else ""
 	var has_lua := false
@@ -1031,26 +1429,51 @@ static func detect_map_profiles(package: Object, registry: Object = null) -> Dic
 			if member.get_extension().to_lower() == "lua":
 				has_lua = true
 				break
+	var stock_odf_index := {}
+	if registry != null and registry.has_method("get_stock_odf_index"):
+		stock_odf_index = registry.get_stock_odf_index()
+
 	var vsr_odfs: Array[String] = []
 	var vrv_odfs: Array[String] = []
+	var verified_stock_odfs: Array[String] = []
+	var likely_stock_odfs: Array[String] = []
 	var unknown_odfs: Array[String] = []
-	var stock_odf_count := 0
+	var odf_classifications := {}
+	var seen_odf := {}
+
 	if package != null:
 		for obj: Dictionary in package.objects:
 			var odf := String(obj.get("odf", "")).to_lower()
 			var lbl := String(obj.get("label", "")).to_lower()
-			if odf.begins_with("vrv_") or odf == "vrv_sndpoint" or lbl.begins_with("vrvsnd:"):
-				if not (odf in vrv_odfs):
+			if lbl.begins_with("vrvsnd:") and odf != "vrv_sndpoint":
+				if not ("vrv_sndpoint" in vrv_odfs):
+					vrv_odfs.append("vrv_sndpoint")
+				odf_classifications["vrv_sndpoint"] = ODF_VERIFIED_MOD
+			if odf.is_empty() or seen_odf.has(odf):
+				continue
+			seen_odf[odf] = true
+			var origin := classify_odf_origin(odf, stock_odf_index)
+			var cls := String(origin["classification"])
+			odf_classifications[odf] = cls
+			if cls == ODF_VERIFIED_MOD:
+				var src_mod := String(origin["sourceMod"])
+				if src_mod == "vrv":
 					vrv_odfs.append(odf)
-			elif odf.ends_with("_vsr") or "_vsr" in odf:
-				if not (odf in vsr_odfs):
+				elif src_mod == "vsr":
 					vsr_odfs.append(odf)
-			elif not odf.is_empty():
-				if is_verified_stock_odf(odf):
-					stock_odf_count += 1
 				else:
-					if not (odf in unknown_odfs):
-						unknown_odfs.append(odf)
+					unknown_odfs.append(odf)
+			elif cls == ODF_VERIFIED_STOCK:
+				verified_stock_odfs.append(odf)
+			elif cls == ODF_LIKELY_STOCK_NAMING:
+				likely_stock_odfs.append(odf)
+			else:
+				unknown_odfs.append(odf)
+
+	var unverified_all: Array[String] = []
+	unverified_all.append_array(likely_stock_odfs)
+	unverified_all.append_array(unknown_odfs)
+
 	var path_lower := {}
 	if package != null:
 		for p: Dictionary in package.paths:
@@ -1069,16 +1492,16 @@ static func detect_map_profiles(package: Object, registry: Object = null) -> Dic
 		mission_evidence.append("LuaMission.dll / .lua companion present")
 	elif dll == "strategy02.dll":
 		mission_mode = "strategy"
-		mission_evidence.append("BZN mission DLL is Strategy02.dll")
+		mission_evidence.append("BZN mission DLL basename is Strategy02.dll")
 	elif dll == "instant.dll":
 		mission_mode = "instant"
-		mission_evidence.append("BZN mission DLL is Instant.dll")
+		mission_evidence.append("BZN mission DLL basename is Instant.dll")
 	elif dll == "mpinstant.dll":
 		mission_mode = "mpi"
-		mission_evidence.append("BZN mission DLL is mpinstant.dll")
+		mission_evidence.append("BZN mission DLL basename is mpinstant.dll")
 	elif dll == "deathmatch01.dll":
 		mission_mode = "duel"
-		mission_evidence.append("BZN mission DLL is deathmatch01.dll")
+		mission_evidence.append("BZN mission DLL basename is deathmatch01.dll")
 	elif not dll.is_empty():
 		mission_mode = "custom-dll"
 		mission_evidence.append("BZN references custom DLL '%s'" % package.mission_dll)
@@ -1091,7 +1514,7 @@ static func detect_map_profiles(package: Object, registry: Object = null) -> Dic
 	else:
 		mission_evidence.append("No fixed mission DLL or script paths detected")
 
-	# Score candidate ModProfiles purely from map data
+	# Score candidate ModProfiles purely from verified map evidence
 	var candidates: Array[Dictionary] = []
 	if not vrv_odfs.is_empty():
 		candidates.append({
@@ -1116,32 +1539,59 @@ static func detect_map_profiles(package: Object, registry: Object = null) -> Dic
 				"evidence": ["VSR ODFs + VRV/AIP patrol paths (11Patrol1/11MLay1)"] + mission_evidence,
 			})
 	if vrv_odfs.is_empty() and vsr_odfs.is_empty():
-		# Check if a custom DLL or unknown ODFs indicate a non-Stock mod
 		var matched_custom_mod := ""
-		if is_custom_dll and registry != null and registry.has_method("all_profile_ids"):
-			for mid: String in registry.all_profile_ids():
-				if mid in ["stock", "vsr", "vrv"]:
-					continue
-				var prof: Dictionary = registry.get_profile(mid)
-				for mdll_v in prof.get("missionDlls", []):
-					if String(mdll_v).to_lower() == dll:
-						matched_custom_mod = mid
+		var matched_custom_reason := ""
+		if registry != null and registry.has_method("all_profile_ids"):
+			if is_custom_dll:
+				for mid: String in registry.all_profile_ids():
+					if mid in ["stock", "vsr", "vrv"]:
+						continue
+					var prof: Dictionary = registry.get_profile(mid)
+					for mdll_v in prof.get("missionDlls", []):
+						if String(mdll_v).to_lower() == dll:
+							matched_custom_mod = mid
+							matched_custom_reason = "Matched custom mod DLL '%s' in profile %s" % [package.mission_dll, matched_custom_mod]
+							break
+					if not matched_custom_mod.is_empty():
 						break
-				if not matched_custom_mod.is_empty():
-					break
+			# If unverified ODFs exist, try positive ODF resolution in installed custom mods
+			if matched_custom_mod.is_empty() and not unverified_all.is_empty():
+				var best_hits := 0
+				for mid: String in registry.all_profile_ids():
+					if mid in ["stock", "vsr", "vrv"]:
+						continue
+					var prof: Dictionary = registry.get_profile(mid)
+					if not bool(prof.get("installed", false)):
+						continue
+					var hits := 0
+					for ar_v in prof.get("assetRoots", []):
+						var idx := AssetIndex.get_root_index(String(ar_v), true, false)
+						var odf_map: Dictionary = idx.get("odfs", {})
+						for u_odf in unverified_all:
+							if odf_map.has(u_odf + ".odf"):
+								hits += 1
+					if hits > best_hits:
+						best_hits = hits
+						matched_custom_mod = mid
+						matched_custom_reason = "Resolved %d/%d mod ODF(s) directly in installed profile %s" % [hits, unverified_all.size(), mid]
+
 		if not matched_custom_mod.is_empty():
 			candidates.append({
 				"modProfile": matched_custom_mod,
 				"missionProfile": mission_mode,
 				"confidence": "high",
-				"evidence": ["Matched custom mod DLL '%s' in profile %s" % [package.mission_dll, matched_custom_mod]] + mission_evidence,
+				"evidence": [matched_custom_reason] + mission_evidence,
 			})
-		elif is_custom_dll or not unknown_odfs.is_empty():
+		elif is_custom_dll or not unverified_all.is_empty():
 			var u_ev: Array[String] = []
 			if is_custom_dll:
 				u_ev.append("Unrecognized non-Stock mission DLL '%s'" % package.mission_dll)
+			elif not dll.is_empty() and not unverified_all.is_empty():
+				u_ev.append("DLL basename '%s' alone does not prove Stock when unverified ODF(s) are present" % package.mission_dll)
 			if not unknown_odfs.is_empty():
-				u_ev.append("Non-Stock ODF prefix(es): " + ", ".join(unknown_odfs.slice(0, 4)))
+				u_ev.append("UNKNOWN_ODF: " + ", ".join(unknown_odfs.slice(0, 4)))
+			if not likely_stock_odfs.is_empty():
+				u_ev.append("LIKELY_STOCK_NAMING (unverified hint only): " + ", ".join(likely_stock_odfs.slice(0, 4)))
 			candidates.append({
 				"modProfile": "custom:unknown",
 				"missionProfile": mission_mode,
@@ -1152,14 +1602,14 @@ static func detect_map_profiles(package: Object, registry: Object = null) -> Dic
 				"modProfile": "stock",
 				"missionProfile": mission_mode,
 				"confidence": "low",
-				"evidence": ["Fallback Stock profile (unverified with custom DLL/ODFs)"] + mission_evidence,
+				"evidence": ["Unverified Stock fallback (%d verified Stock, %d unverified ODFs)" % [verified_stock_odfs.size(), unverified_all.size()]] + mission_evidence,
 			})
 		else:
 			candidates.append({
 				"modProfile": "stock",
 				"missionProfile": mission_mode,
-				"confidence": "high" if stock_odf_count > 0 or not dll.is_empty() else "medium",
-				"evidence": ["No VSR/VRV-prefixed ODFs found (%d stock/generic objects)" % stock_odf_count] + mission_evidence,
+				"confidence": "high" if not verified_stock_odfs.is_empty() else "medium",
+				"evidence": ["%d verified Stock ODF(s), 0 unverified ODFs" % verified_stock_odfs.size()] + mission_evidence,
 			})
 
 	var recommended_mod := String(candidates[0]["modProfile"]) if not candidates.is_empty() else "stock"
@@ -1174,70 +1624,66 @@ static func detect_map_profiles(package: Object, registry: Object = null) -> Dic
 		"candidates": candidates,
 		"vsrOdfs": vsr_odfs,
 		"vrvOdfs": vrv_odfs,
-		"unknownOdfs": unknown_odfs,
+		"verifiedStockOdfs": verified_stock_odfs,
+		"likelyStockOdfs": likely_stock_odfs,
+		"unknownOdfs": unverified_all,
+		"strictUnknownOdfs": unknown_odfs,
+		"odfClassifications": odf_classifications,
 	}
 
 
-## Read-only dry-run compatibility report when converting a map from its current
-## profile to a different target (ModProfile, MissionProfile). Mutates nothing.
-func analyze_conversion(document: Object, target_mod_id: String, target_mission_id: String, mission_profiles_script: Script, manual_map: Dictionary = {}) -> Dictionary:
-	var missing_odfs: Array[String] = []
-	var incompatible_odfs: Array[String] = []
-	var verified_replacements: Array[String] = []
-	var unverified_odfs: Array[String] = []
-	var seen := {}
-	for view in document.object_count():
-		var odf := String(document.object_odf(view)).to_lower()
-		var lbl := String(document.object_label(view)).to_lower()
-		var key_odf := "vrv_sndpoint" if lbl.begins_with("vrvsnd:") and odf != "vrv_sndpoint" else odf
-		if key_odf.is_empty() or seen.has(key_odf):
-			continue
-		seen[key_odf] = true
-		var lookup := lookup_verified_odf_conversion(key_odf, target_mod_id, manual_map)
-		var st := String(lookup.get("status", "native"))
-		if st == "native":
-			continue
-		elif st in ["verified", "verified_manual"]:
-			incompatible_odfs.append("%s -> %s (verified)" % [key_odf, String(lookup["targetOdf"])])
-			verified_replacements.append("%s -> %s" % [key_odf, String(lookup["targetOdf"])])
-		else:
-			var reason := String(lookup.get("error", "unverified"))
-			incompatible_odfs.append("%s (UNSUPPORTED: %s)" % [key_odf, reason])
-			unverified_odfs.append(key_odf)
-	var target_manifest := get_profile(target_mod_id)
-	var mod_installed := bool(target_manifest.get("installed", target_mod_id == "stock"))
-	var validation: Dictionary = mission_profiles_script.validate(document, target_mission_id, target_mod_id)
-	var current_dll := String(document.package.mission_dll)
-	var expected_dll: String = String(mission_profiles_script.expected_dll(target_mission_id, target_mod_id))
-	var dll_change := ""
-	if not expected_dll.is_empty() and current_dll.nocasecmp_to(expected_dll) != 0:
-		dll_change = "%s -> %s" % [current_dll if not current_dll.is_empty() else "(none)", expected_dll]
+## Read-only dependency-aware dry-run conversion & compatibility report.
+## Populates real missingOdfs/meshes/textures/sounds/DLL identity via AssetIndex
+## and separates environmentSwitchStatus, nativeConversionStatus, and playtestStatus.
+## Mutates nothing.
+func analyze_conversion(document: Object, target_mod_id: String, target_mission_id: String, mission_profiles_script: Script, manual_map: Dictionary = {}, game_dir: String = "", vrv_dir: String = "") -> Dictionary:
+	var compat_script: Script = load("res://core/compatibility_engine.gd")
+	var eff_game := game_dir.strip_edges() if not game_dir.strip_edges().is_empty() else last_game_dir
+	var eff_vrv := vrv_dir.strip_edges() if not vrv_dir.strip_edges().is_empty() else last_vrv_dir
+	var eng_id := String(document.engine_profile) if document != null and "engine_profile" in document else "bzcc-2.0.185"
+	var result: Dictionary = compat_script.evaluate(
+		document, self, target_mod_id, target_mission_id, eng_id,
+		eff_game, eff_vrv, manual_map, false, mission_profiles_script)
+	var conv: Dictionary = result["conversionRequirements"]
+	var missing_block: Dictionary = result["missingDependencies"]
+	var mod_block: Dictionary = result["modProfile"]
+	var mis_block: Dictionary = result["missionProfile"]
 	var lossy: Array[String] = []
-	if not unverified_odfs.is_empty():
-		lossy.append("Target mod '%s' has %d unverified/unsupported ODF class(es) (%s); conversion is blocked without a verified same-class mapping." % [
-			target_mod_id, unverified_odfs.size(), ", ".join(unverified_odfs)])
-	elif not verified_replacements.is_empty():
-		lossy.append("Target mod '%s' requires verified semantic ODF conversion for %d class(es): %s." % [
-			target_mod_id, verified_replacements.size(), ", ".join(verified_replacements)])
-	if not mod_installed:
-		lossy.append("Target mod '%s' is not detected locally; preview and Playtest assets may be unavailable." % target_mod_id)
+	for w_v in result.get("warnings", []):
+		lossy.append(String(w_v))
+	for r_v in result.get("refusalReasons", []):
+		var r := String(r_v)
+		if not (r in lossy):
+			lossy.append(r)
+	var env_status := String(result["environmentSwitchStatus"])
 	return {
-		"sourceMod": String(document.mod_profile),
-		"sourceMission": String(document.mission_profile),
+		"schema": String(result["schema"]),
+		"compatibilityResult": result,
+		"sourceMod": String(document.mod_profile) if document != null and "mod_profile" in document else "stock",
+		"sourceMission": String(document.mission_profile) if document != null and "mission_profile" in document else "blank",
 		"targetMod": target_mod_id,
 		"targetMission": target_mission_id,
-		"formatProfile": String(document.package.layout_id),
-		"modInstalled": mod_installed,
-		"incompatibleOdfs": incompatible_odfs,
-		"verifiedReplacements": verified_replacements,
-		"unverifiedOdfs": unverified_odfs,
-		"conversionFeasible": unverified_odfs.is_empty(),
-		"missingOdfs": missing_odfs,
-		"dllChange": dll_change,
-		"missingRequiredPaths": validation.get("missing_required", []),
-		"pathErrors": validation.get("errors", []),
-		"pathWarnings": validation.get("warnings", []),
+		"formatProfile": String(result["formatProfile"].get("id", "")),
+		"modInstalled": bool(mod_block.get("installed", false)),
+		"incompatibleOdfs": conv.get("incompatibleOdfs", []),
+		"verifiedReplacements": conv.get("verifiedReplacements", []),
+		"unverifiedOdfs": conv.get("unverifiedOdfs", []),
+		"conversionFeasible": bool(conv.get("feasible", false)),
+		"missingOdfs": missing_block.get("odfs", []),
+		"missingMeshes": missing_block.get("meshes", []),
+		"missingTextures": missing_block.get("textures", []),
+		"missingSounds": missing_block.get("sounds", []),
+		"missingDependencies": missing_block,
+		"ambiguousOverrides": result.get("ambiguousOverrides", {}),
+		"dllIdentity": result.get("dllIdentity", {}),
+		"dllChange": String(conv.get("dllChange", "")),
+		"missingRequiredPaths": mis_block.get("missingRequiredPaths", []),
+		"pathErrors": mis_block.get("pathErrors", []),
+		"pathWarnings": mis_block.get("pathWarnings", []),
 		"lossyWarnings": lossy,
-		"safeToSwitchEnvironment": true,
-		"requiresExplicitSaveAs": not incompatible_odfs.is_empty() or not dll_change.is_empty(),
+		"environmentSwitchStatus": env_status,
+		"nativeConversionStatus": String(result["nativeConversionStatus"]),
+		"playtestStatus": String(result["validationStatus"]),
+		"safeToSwitchEnvironment": env_status != "INVALID_PROFILE",
+		"requiresExplicitSaveAs": not (conv.get("incompatibleOdfs", []) as Array).is_empty() or not String(conv.get("dllChange", "")).is_empty(),
 	}

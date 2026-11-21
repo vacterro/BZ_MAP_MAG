@@ -86,7 +86,17 @@ function Get-ValidatedPackage([string] $MissionPath) {
     $response = [IO.Path]::GetTempFileName()
     $log = "$response.log"
     try {
-        $argsLine = "--headless $project --log-file `"$log`" -- --validate-playtest `"$MissionPath`" `"$response`""
+        $extraValArgs = @()
+        if ($Game) { $extraValArgs += "--game `"$Game`"" }
+        $convVal = if ($Converter) { $Converter } else { $VrvSource }
+        if ($convVal) { $extraValArgs += "--vrv `"$convVal`"" }
+        if ($ModProfile) { $extraValArgs += "--mod `"$ModProfile`"" }
+        if ($MissionProfile) { $extraValArgs += "--mission `"$MissionProfile`"" }
+        if ($AssetProfile) { $extraValArgs += "--asset-profile `"$AssetProfile`"" }
+        if ($AssetRoots -and $AssetRoots.Count -gt 0) { $extraValArgs += "--asset-roots `"$($AssetRoots -join ';')`"" }
+        if ($WithoutMissionScript) { $extraValArgs += '--noscript' }
+        $extraJoined = if ($extraValArgs.Count -gt 0) { ' ' + ($extraValArgs -join ' ') } else { '' }
+        $argsLine = "--headless $project --log-file `"$log`" -- --validate-playtest `"$MissionPath`" `"$response`"$extraJoined"
         $process = Start-Process -FilePath $validator -ArgumentList $argsLine -WorkingDirectory $root -WindowStyle Hidden -PassThru
         if (-not $process.WaitForExit(30000)) {
             $process.Kill()
@@ -168,6 +178,7 @@ if ($launchRoute -eq 'convert') {
 }
 
 $odfs = if ($package.PSObject.Properties.Name -contains 'odfs') { @($package.odfs) } else { @() }
+$compatResult = if ($package.PSObject.Properties.Name -contains 'compatibility') { $package.compatibility } else { $null }
 $assetPlan = Get-PlaytestAssetPlan $Game $Mission $AssetProfile $VrvSource ([bool]$WithoutMissionScript) $AssetRoots $odfs '' $ModProfile $Converter
 if ($ValidateOnly) {
     return $assetPlan | Add-Member -PassThru -NotePropertyMembers @{
@@ -176,6 +187,7 @@ if ($ValidateOnly) {
         MissionProfile = $MissionProfile
         KeepRequested = [bool]$KeepBznLayout
         VrvConverterRequired = ($launchRoute -eq 'convert')
+        Compatibility = $compatResult
     }
 }
 if (Get-Process battlezone2 -ErrorAction SilentlyContinue) { throw 'Close your current Battlezone session before Playtest.' }

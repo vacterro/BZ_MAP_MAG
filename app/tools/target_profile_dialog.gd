@@ -301,26 +301,36 @@ func apply_environment_switch() -> void:
 func run_conversion_analysis() -> void:
 	if document == null or registry == null:
 		return
-	var report := registry.analyze_conversion(document, selected_target_mod(), selected_target_mission(), MissionProfiles)
+	var report := registry.analyze_conversion(document, selected_target_mod(), selected_target_mission(), MissionProfiles, {}, game_dir, vrv_dir)
+	var dll_id: Dictionary = report.get("dllIdentity", {})
 	var lines: Array[String] = [
-		"=== Dry-Run Conversion Report (%s/%s -> %s/%s) ===" % [
+		"=== Dry-Run Conversion & Compatibility Report (%s/%s -> %s/%s) ===" % [
 			report["sourceMod"], report["sourceMission"], report["targetMod"], report["targetMission"]],
-		"Format profile: %s | Target mod installed: %s | Feasible: %s" % [
-			report["formatProfile"], "yes" if report["modInstalled"] else "NO",
-			"YES (verified)" if bool(report.get("conversionFeasible", true)) else "NO (blocked by unverified ODFs)"],
+		"Format: %s | Mod installed: %s" % [
+			report["formatProfile"], "yes" if report["modInstalled"] else "NO"],
+		"Environment Switch: %s | Native Conversion: %s | Playtest: %s" % [
+			String(report.get("environmentSwitchStatus", "UNKNOWN")),
+			String(report.get("nativeConversionStatus", "UNKNOWN")),
+			String(report.get("playtestStatus", "UNKNOWN"))],
 	]
 	if not String(report["dllChange"]).is_empty():
 		lines.append("Mission DLL change: " + String(report["dllChange"]))
+	if not String(dll_id.get("requested", "")).is_empty():
+		lines.append("DLL identity: %s [%s] — %s" % [
+			String(dll_id.get("requested", "")), String(dll_id.get("status", "UNKNOWN")), String(dll_id.get("detail", ""))])
 	var bad_odfs: Array = report["incompatibleOdfs"]
 	if bad_odfs.is_empty():
-		lines.append("ODF compatibility: all placed ODF classes appear compatible with target mod.")
+		lines.append("ODF compatibility: all placed ODF classes verified for target mod.")
 	else:
-		lines.append("[WARN] Mod-specific ODFs (%d): %s" % [bad_odfs.size(), ", ".join(bad_odfs)])
+		lines.append("[WARN] Mod-specific / unverified ODFs (%d): %s" % [bad_odfs.size(), ", ".join(bad_odfs)])
+	var missing_odfs: Array = report.get("missingOdfs", [])
+	if not missing_odfs.is_empty():
+		lines.append("[ERR] Missing ODF assets (%d): %s" % [missing_odfs.size(), ", ".join(missing_odfs)])
 	var missing_paths: Array = report["missingRequiredPaths"]
 	if not missing_paths.is_empty():
 		lines.append("[WARN] Missing required paths for target mission: " + ", ".join(missing_paths))
 	for w in report["lossyWarnings"]:
-		lines.append("[LOSSY] " + String(w))
+		lines.append("[NOTICE] " + String(w))
 	lines.append("Note: Original native map files stay untouched. Use Export Native to publish a new target copy.")
 	_set_analysis_text("\n".join(lines))
 

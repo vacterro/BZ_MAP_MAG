@@ -2919,8 +2919,10 @@ func test_hold_ui_font_playtest(editor: Control, brave_source: String, blank_sou
 	editor.document.undo()
 	check(editor.document.object_odf(0) == "ivtank_vsr", "Undo restores original ivtank_vsr ODF")
 	editor.document.redo()
-	check(editor.document.object_odf(0) == "ivtank" and bool(editor.validate_playtest_profile()["ok"]),
-		"Redo reapplies semantic ivtank conversion and passes Playtest profile validation")
+	var redo_compat: Dictionary = editor.validate_playtest_profile()
+	check(editor.document.object_odf(0) == "ivtank" and bool(redo_compat["profileCompatible"])
+		and (redo_compat["incompatibleOdfs"] as Array).is_empty(),
+		"Redo reapplies semantic ivtank conversion and passes profile ODF compatibility check")
 	var conv_bzmag := scratch.path_join("converted-stock.bzmag")
 	check(writer.save_project(editor.document, conv_bzmag), "save converted Stock project to .bzmag")
 	var reopened_conv := Document.new()

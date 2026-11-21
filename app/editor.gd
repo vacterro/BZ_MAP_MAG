@@ -18,6 +18,7 @@ const SlopeStudio := preload("res://tools/slope_studio.gd")
 const MissionStudio := preload("res://tools/mission_studio.gd")
 const MissionProfiles := preload("res://core/mission_profiles.gd")
 const ModRegistry := preload("res://core/mod_registry.gd")
+const CompatibilityEngine := preload("res://core/compatibility_engine.gd")
 const NewMapWizard := preload("res://tools/new_map_wizard.gd")
 const TargetProfileDialog := preload("res://tools/target_profile_dialog.gd")
 const WaterCommands := preload("res://tools/water_commands.gd")
@@ -808,18 +809,28 @@ func open_map(path: String) -> bool:
 	object_tool.bind(document, top, scene_view)
 	refresh_path_list(true)
 	set_cursor(Vector2(-1, -1))
+	var cur_game := game_path.text.strip_edges()
+	var cur_vrv := vrv_path.text.strip_edges()
+	if mod_registry.last_game_dir != cur_game:
+		mod_registry.discover_installed(cur_game, cur_vrv)
+	document.detected_profile_info = ModRegistry.detect_map_profiles(document.package, mod_registry)
+	if not document.profile_explicit:
+		document.mod_profile = String(document.detected_profile_info.get("recommendedMod", "stock"))
+		document.mission_profile = String(document.detected_profile_info.get("recommendedMission", "blank"))
+		remember_saved_changes()
 	sync_actions()
-	var mod_info := mod_registry.get_profile(document.mod_profile)
-	var missing_note := ""
-	if document.mod_profile != "stock" and not bool(mod_info.get("installed", false)):
-		missing_note = " [WARN: mod '%s' not installed locally — generic terrain editing available]" % document.mod_profile
-	report("Opened %s [%s / %s]%s" % [document.package.source_path.get_file(), document.mod_profile, document.mission_profile, missing_note])
+	var open_compat := CompatibilityEngine.evaluate(document, mod_registry, document.mod_profile, document.mission_profile, document.engine_profile, cur_game, cur_vrv, {}, engine_editor_mode.button_pressed)
+	var open_note := ""
+	if String(open_compat["validationStatus"]) != CompatibilityEngine.PLAYTEST_READY:
+		var reasons: Array = open_compat.get("refusalReasons", [])
+		if not reasons.is_empty():
+			open_note = " [%s: %s]" % [String(open_compat["validationStatus"]), String(reasons[0])]
+	report("Opened %s [%s / %s]%s" % [document.package.source_path.get_file(), document.mod_profile, document.mission_profile, open_note])
 	return true
 
 
 func open_new_map_wizard() -> void:
 	find_steam_game()
-	suggest_vrv()
 	var game := game_path.text.strip_edges()
 	var vrv := vrv_path.text.strip_edges()
 	if mod_registry.last_game_dir != game:
@@ -841,7 +852,7 @@ func _on_wizard_map_created(bzn_path: String, engine_id: String, mod_id: String,
 		remember_saved_changes()
 		sync_actions()
 		var compat := validate_playtest_profile()
-		if not bool(compat["ok"]):
+		if not bool(compat["profileCompatible"]):
 			report("Created %s map (%s / %s) at %s [WARN: contains %s object(s): %s — use Target Profile to switch or replace]" % [
 				mod_id, mission_id, engine_id, bzn_path.get_base_dir(),
 				String(compat["suggestedMod"]).to_upper(), ", ".join(compat["incompatibleOdfs"])])
@@ -1066,7 +1077,10 @@ func export_package(folder: String) -> void:
 	var name := document.package.source_path.get_file().get_basename()
 	var target := folder.path_join(name + "-bzmag-" + writer.nonce().left(8))
 	if writer.export_native(document, target):
-		report("Exported and re-imported " + target + object_count_notice("BZCC runtime compatibility unverified"))
+		var compat := validate_playtest_profile()
+		var status_tag := String(compat.get("validationStatus", "UNKNOWN"))
+		report("Exported and re-imported %s | Compatibility: %s%s" % [
+			target, status_tag, object_count_notice("Format verified")])
 	else:
 		report(writer.error)
 
@@ -1378,80 +1392,82 @@ func open_sound_editor() -> void:
 func validate_playtest_profile() -> Dictionary:
 	if document == null:
 		return {
-			"ok": true,
+			"schema": CompatibilityEngine.SCHEMA,
+			"ok": false,
+			"profileCompatible": true,
+			"validationStatus": CompatibilityEngine.PLAYTEST_UNKNOWN,
+			"playtestStatus": CompatibilityEngine.PLAYTEST_UNKNOWN,
 			"selectedMod": "stock",
 			"detectedMod": "stock",
 			"suggestedMod": "stock",
-			"verifiedPlaytestMod": "stock",
+			"verifiedPlaytestMod": "",
 			"incompatibleOdfs": [],
-			"error": "",
+			"refusalReasons": ["No map loaded."],
+			"error": "No map loaded.",
 		}
-	var selected_mod := document.mod_profile
-	var vsr_odfs: Array[String] = []
-	var vrv_odfs: Array[String] = []
-	for view in document.object_count():
-		var odf := document.object_odf(view).to_lower()
-		var lbl := document.object_label(view).to_lower()
-		if odf.begins_with("vrv_") or odf == "vrv_sndpoint" or lbl.begins_with("vrvsnd:"):
-			if not (odf in vrv_odfs):
-				vrv_odfs.append(odf)
-		elif odf.ends_with("_vsr") or odf.contains("_vsr"):
-			if not (odf in vsr_odfs):
-				vsr_odfs.append(odf)
-	var detected_mod := "vrv" if not vrv_odfs.is_empty() else ("vsr" if not vsr_odfs.is_empty() else "stock")
-	var bad_odfs: Array[String] = []
-	var suggested_mod := selected_mod
-	if selected_mod == "stock":
-		bad_odfs.append_array(vrv_odfs)
-		bad_odfs.append_array(vsr_odfs)
-		if not bad_odfs.is_empty():
-			suggested_mod = detected_mod
-	elif selected_mod == "vsr" and not vrv_odfs.is_empty():
-		bad_odfs.append_array(vrv_odfs)
-		suggested_mod = "vrv"
-	var ok := bad_odfs.is_empty()
-	var err := ""
-	if not ok:
-		err = "Profile contradiction: active profile is '%s' but map contains %s object(s): %s. Switch Target Profile to '%s' or remove incompatible objects before Playtest." % [
-			selected_mod, suggested_mod.to_upper(), ", ".join(bad_odfs), suggested_mod]
-	return {
-		"ok": ok,
-		"selectedMod": selected_mod,
-		"detectedMod": detected_mod,
-		"suggestedMod": suggested_mod,
-		"verifiedPlaytestMod": selected_mod if ok else "",
-		"incompatibleOdfs": bad_odfs,
-		"error": err,
-	}
+	var game := game_path.text.strip_edges()
+	var vrv := vrv_path.text.strip_edges()
+	if mod_registry.last_game_dir != game:
+		mod_registry.discover_installed(game, vrv)
+	return CompatibilityEngine.evaluate(
+		document, mod_registry,
+		document.mod_profile, document.mission_profile, document.engine_profile,
+		game, vrv, {}, engine_editor_mode.button_pressed)
 
 
 func _effective_playtest_mod() -> String:
 	return document.mod_profile if document != null else "stock"
 
 
+func playtest_route_plan() -> Dictionary:
+	if document == null:
+		return {"ok": false, "route": "refuse", "error": "No map loaded."}
+	var effective_mod := _effective_playtest_mod()
+	var route := Layouts.playtest_route(document.package.bzn_version, "binary")
+	var game := game_path.text.strip_edges()
+	var vrv := vrv_path.text.strip_edges()
+	var needs_converter := (route == "convert")
+	if needs_converter and vrv.is_empty():
+		suggest_vrv()
+		vrv = vrv_path.text.strip_edges()
+	var unused_vrv_warning := ""
+	if not needs_converter and not vrv.is_empty() and not valid_vrv(vrv):
+		unused_vrv_warning = "Ignoring stale VRV converter path '%s' (not needed for %s native %d route)." % [vrv, effective_mod, document.package.bzn_version]
+	var compat := validate_playtest_profile()
+	var pass_converter := needs_converter and valid_vrv(vrv)
+	var pass_vrv_source := (effective_mod == "vrv" or (effective_mod == "vsr" and bool(compat.get("modProfile", {}).get("localFallbackUsed", false)))) and valid_vrv(vrv)
+	return {
+		"ok": bool(compat["ok"]),
+		"route": route,
+		"effectiveMod": effective_mod,
+		"needsConverter": needs_converter,
+		"converterArg": vrv if pass_converter else "",
+		"vrvSourceArg": vrv if pass_vrv_source else "",
+		"unusedVrvWarning": unused_vrv_warning,
+		"compatibility": compat,
+		"error": String(compat.get("error", "")),
+	}
+
+
 func playtest() -> void:
 	if launcher_pid > 0 or game_pid > 0 or document == null:
-		return
-	if (not document.object_additions.is_empty() or not document.object_removals.is_empty()) and not (Layouts.capability_status(document.package.layout_id, Layouts.EDIT_OBJECT_COUNT) in ["NATIVE", "BAKED"]):
-		report(object_count_notice("Undo the object additions or removals before Playtest.").trim_prefix(" | "))
-		return
-	var profile_check := validate_playtest_profile()
-	if not bool(profile_check["ok"]):
-		report("[ERR] " + String(profile_check["error"]))
-		open_target_profile(0)
 		return
 	if not find_steam_game():
 		Wintage.popup_fit(playtest_dialog, 560)
 		return
-	suggest_vrv()
-	var game := game_path.text.strip_edges()
-	var vrv := vrv_path.text.strip_edges()
-	if vrv != "" and not valid_vrv(vrv):
-		setup_status.text = "The VRV folder must contain tools/bzn_compat.py."
-		Wintage.popup_fit(playtest_dialog, 560)
+	var plan := playtest_route_plan()
+	var compat: Dictionary = plan["compatibility"]
+	if not bool(plan["ok"]):
+		var status_code := String(compat.get("validationStatus", "UNKNOWN"))
+		report("[ERR] [%s] %s" % [status_code, String(plan["error"])])
+		if bool(plan["needsConverter"]) and not valid_vrv(vrv_path.text.strip_edges()):
+			setup_status.text = "BZN %d requires a valid conversion adapter folder containing tools/bzn_compat.py." % document.package.bzn_version
+			Wintage.popup_fit(playtest_dialog, 560)
+		elif not bool(compat.get("profileCompatible", true)) or status_code in [CompatibilityEngine.PLAYTEST_MISSING_ASSETS, CompatibilityEngine.PLAYTEST_UNKNOWN]:
+			open_target_profile(0)
 		return
-	if mod_registry.last_game_dir != game:
-		mod_registry.discover_installed(game, vrv)
+	var game := game_path.text.strip_edges()
+	var effective_mod := String(plan["effectiveMod"])
 	var script := tool_root().path_join("tools/Start-Playtest.ps1")
 	if not FileAccess.file_exists(script):
 		report("Playtest helper missing at " + script)
@@ -1471,21 +1487,21 @@ func playtest() -> void:
 		return
 	var mission := target.path_join(document.package.source_path.get_file())
 	playtest_result = run.path_join("playtest.json")
-	var effective_mod := _effective_playtest_mod()
 	var args := PackedStringArray(["-NoProfile", "-NonInteractive", "-File", script, "-Game", game, "-Mission", mission, "-ResultFile", playtest_result, "-PreparedRun", run, "-WaitForGame", "-ModProfile", effective_mod, "-MissionProfile", document.mission_profile])
 	if OS.has_feature("editor"):
 		args.append_array(PackedStringArray(["-Godot", OS.get_executable_path()]))
-	var route := Layouts.playtest_route(document.package.bzn_version, "binary")
-	if route == "convert" and vrv != "":
-		args.append_array(PackedStringArray(["-Converter", vrv]))
-	if effective_mod in ["vsr", "vrv"] and vrv != "":
-		args.append_array(PackedStringArray(["-VrvSource", vrv]))
+	var conv_arg := String(plan["converterArg"])
+	if not conv_arg.is_empty():
+		args.append_array(PackedStringArray(["-Converter", conv_arg]))
+	var vrv_src_arg := String(plan["vrvSourceArg"])
+	if not vrv_src_arg.is_empty():
+		args.append_array(PackedStringArray(["-VrvSource", vrv_src_arg]))
 	if engine_editor_mode.button_pressed:
 		args.append_array(PackedStringArray(["-StartInEditor", "-WithoutMissionScript"]))
 	if not document.asset_profile.is_empty():
 		args.append_array(PackedStringArray(["-AssetProfile", document.asset_profile]))
-	var mod_prof := mod_registry.get_profile(effective_mod)
-	var mod_roots: Array = mod_prof.get("assetRoots", [])
+	var env := mod_registry.resolve_content_environment(document, game, conv_arg)
+	var mod_roots: Array = env.get("modAssetRoots", [])
 	if effective_mod != "stock" and not mod_roots.is_empty():
 		var joined := PackedStringArray()
 		for r_v in mod_roots:
@@ -1500,7 +1516,8 @@ func playtest() -> void:
 		return
 	store_playtest_settings()
 	sync_actions()
-	report("Starting Battlezone with the current edits…")
+	var warn_note := (" [" + String(plan["unusedVrvWarning"]) + "]") if not String(plan["unusedVrvWarning"]).is_empty() else ""
+	report("Starting Battlezone with the current edits…" + warn_note)
 
 
 func poll_playtest() -> void:

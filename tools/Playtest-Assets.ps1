@@ -87,10 +87,52 @@ function Get-VrvAssetFolders([string] $Game, [string] $VrvSource) {
     }
 }
 
-function Get-WorkshopAssetFolders([string] $Game, [string] $ModProfile) {
-    if (-not $ModProfile -or $ModProfile -ieq 'stock') { return }
+$script:KnownDllSignatures = @{
+    '415ad6ca656c02972ff5b88c574d51cb508f6574001b848b84c30b776d9b1bc2' = @{ Mod = 'stock'; Name = 'Strategy02.dll' }
+    'c3dc76d348ef8a31cfade7b3928e0f650d4bfb62348942177e1bc364470c65ce' = @{ Mod = 'stock'; Name = 'Instant.dll' }
+    '62f296053c99bb5b871e17b5140ac3b53f75ce6442721219c581611fad9439fc' = @{ Mod = 'stock'; Name = 'mpinstant.dll' }
+    '20344ce75d291e68e95692d8b6202b7f7d3ae08c93a3664907d65ec987071046' = @{ Mod = 'stock'; Name = 'deathmatch01.dll' }
+    '687c1ed92f6eaee882a688f78f75eb7be8972e3f7590db0fc9b0b53e8c56eec6' = @{ Mod = 'stock'; Name = 'StratCTF.dll' }
+    'b197f15b12901c9d87a0b80a7b775860a15302320cd33f1b09fa2b8683da57db' = @{ Mod = 'stock'; Name = 'LuaMission.dll' }
+    'a4b3ce223fc305df88507b07d1e0790ced781df5147ccce4886d776c45c0b6bb' = @{ Mod = 'vsr';   Name = 'Strategy02.dll' }
+    'c17c7d1c7fa7a75b87f3350f3b66599e207e9ece580d555b5c7c5051bd7e407d' = @{ Mod = 'vsr';   Name = 'Instant.dll' }
+    'b982c41694aba3e7d48fe4bc2d145d6d4f0261d529dea17d644212478c5e6020' = @{ Mod = 'vsr';   Name = 'deathmatch01.dll' }
+    'a7097e937761f2ef81d84693ef537c0102cc359ad3d6a7aa1d7d01a6b98a5a2a' = @{ Mod = 'vsr';   Name = 'LuaMission.dll' }
+    'afc99de3250ab37dccfbaf099b4983a7a402c0f8ae8d535f63fac7f91297a989' = @{ Mod = 'vrv';   Name = 'Strategy02.dll' }
+    '8879f1e83d507720774d48c196a0f750b40044ad3c80c279ff348436edb79c0d' = @{ Mod = 'vrv';   Name = 'Instant.dll' }
+    'f7759194b4798120ed87525cd27c4e6574454fdb2eb67d58cc33cd47a9e79834' = @{ Mod = 'vrv';   Name = 'mpinstant.dll' }
+    'd09c8bfc1e4a71723185e0ebf5f2cb1f4c88821e726396eaa43d45a7743dcd4a' = @{ Mod = 'vrv';   Name = 'deathmatch01.dll' }
+    'e3f6e4b5062cfced01f70f81809b83d7bbed1fb9f4ab563b33257fc015fa0130' = @{ Mod = 'vrv';   Name = 'StratCTF.dll' }
+    '65e575b840c5840ebc7df8b21ee35c116c1fd88abe63528be9483f0dbf115d11' = @{ Mod = 'vrv';   Name = 'VrvPrepare.dll' }
+}
+
+function Get-DllIdentityInfo([string] $DllPath, [string] $ModProfile = '') {
+    if (-not $DllPath -or -not (Test-Path -LiteralPath $DllPath -PathType Leaf)) {
+        return [pscustomobject]@{ Path = ''; Sha256 = ''; SizeBytes = 0; MatchedMod = ''; Status = 'MISSING' }
+    }
+    $sha = (Get-FileHash -LiteralPath $DllPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $size = (Get-Item -LiteralPath $DllPath).Length
+    $sig = $script:KnownDllSignatures[$sha]
+    $matched = if ($sig) { $sig.Mod } else { 'unknown' }
+    $tgt = if ($ModProfile) { $ModProfile.ToLowerInvariant() } else { '' }
+    $status = if (-not $tgt) {
+        if ($sig) { 'VERIFIED' } else { 'CUSTOM_PRESENT' }
+    } elseif ($tgt -in 'stock','vsr','vrv') {
+        if ($matched -eq $tgt) { 'VERIFIED' }
+        elseif ($matched -eq 'stock' -and $tgt -in 'vsr','vrv' -and ((Split-Path -Leaf $DllPath).ToLowerInvariant() -in 'mpinstant.dll','stratctf.dll','luamission.dll')) { 'VERIFIED_INHERITED_STOCK' }
+        elseif ($matched -eq 'unknown') { 'HASH_UNVERIFIED' }
+        else { 'HASH_MISMATCH' }
+    } else {
+        if ($sig) { 'VERIFIED_KNOWN_BASE' } else { 'CUSTOM_PRESENT' }
+    }
+    return [pscustomobject]@{ Path = $DllPath; Sha256 = $sha; SizeBytes = $size; MatchedMod = $matched; Status = $status }
+}
+
+function Get-WorkshopDependencyGraph([string] $Game, [string] $ModProfile) {
+    $result = [pscustomobject]@{ Roots = @(); MissingDependencies = @(); DependencyCycles = @() }
+    if (-not $ModProfile -or $ModProfile -ieq 'stock') { return $result }
     $wsRoot = [IO.Path]::GetFullPath((Join-Path $Game '../../workshop/content/624970'))
-    if (-not (Test-Path -LiteralPath $wsRoot -PathType Container)) { return }
+    if (-not (Test-Path -LiteralPath $wsRoot -PathType Container)) { return $result }
     $targetId = switch ($ModProfile.ToLowerInvariant()) {
         'vsr' { '1325933293' }
         'vrv' { '3820486276' }
@@ -98,59 +140,111 @@ function Get-WorkshopAssetFolders([string] $Game, [string] $ModProfile) {
             if ($ModProfile -match '^(?:custom:ws-)?(\d+)$') { $Matches[1] } else { '' }
         }
     }
-    if (-not $targetId) { return }
-    $itemDir = Join-Path $wsRoot $targetId
-    if (-not (Test-Path -LiteralPath $itemDir -PathType Container)) { return }
-    $seen = @{}
+    if (-not $targetId) { return $result }
     $queue = [System.Collections.Generic.List[string]]::new()
-    $queue.Add((Resolve-Path -LiteralPath $itemDir).Path)
-    $seen[$queue[0]] = $true
-    if ($ModProfile -ieq 'vrv') {
-        $vsrDir = Join-Path $wsRoot '1325933293'
-        if (Test-Path -LiteralPath $vsrDir -PathType Container) {
-            $r = (Resolve-Path -LiteralPath $vsrDir).Path
-            if (-not $seen.ContainsKey($r)) { $seen[$r] = $true; $queue.Add($r) }
+    $missing = [System.Collections.Generic.List[string]]::new()
+    $cycles = [System.Collections.Generic.List[string]]::new()
+    $seenPath = @{}
+    $visitState = @{} # id -> 1 visiting, 2 done
+
+    $walk = {
+        param([string] $id, [bool] $traverseIni)
+        $itemDir = Join-Path $wsRoot $id
+        if (-not (Test-Path -LiteralPath $itemDir -PathType Container)) {
+            if (-not $missing.Contains($id)) { $missing.Add($id) }
+            return
         }
-    }
-    $ini = Get-ChildItem -LiteralPath $itemDir -Filter '*.ini' -File | Select-Object -First 1
-    if ($ini) {
-        $text = [IO.File]::ReadAllText($ini.FullName)
-        $m = [regex]::Match($text, '(?im)^\s*assetDependencies\s*=\s*"?([^"\r\n]+)')
-        if ($m.Success) {
-            foreach ($tok in ($m.Groups[1].Value -split ',')) {
-                $depId = $tok.Trim()
-                if ($depId -match '^\d+$') {
-                    $depDir = Join-Path $wsRoot $depId
-                    if (Test-Path -LiteralPath $depDir -PathType Container) {
-                        $r = (Resolve-Path -LiteralPath $depDir).Path
-                        if (-not $seen.ContainsKey($r)) { $seen[$r] = $true; $queue.Add($r) }
+        if ($visitState[$id] -eq 1) {
+            if (-not $cycles.Contains("ws:$id")) { $cycles.Add("ws:$id") }
+            return
+        }
+        if ($visitState[$id] -eq 2) { return }
+        $visitState[$id] = 1
+        $resolved = (Resolve-Path -LiteralPath $itemDir).Path
+        if (-not $seenPath.ContainsKey($resolved)) {
+            $seenPath[$resolved] = $true
+            $queue.Add($resolved)
+        }
+        if ($traverseIni) {
+            $ini = Get-ChildItem -LiteralPath $itemDir -Filter '*.ini' -File | Select-Object -First 1
+            if ($ini) {
+                $text = [IO.File]::ReadAllText($ini.FullName)
+                foreach ($line in ($text -split "`r?`n")) {
+                    $clean = ($line -split ';|//')[0].Trim()
+                    if ($clean -match '^(?i)assetDependencies\s*=\s*"?([^"]+)"?$') {
+                        foreach ($tok in ($Matches[1] -split ',')) {
+                            $depId = $tok.Trim()
+                            if ($depId -match '^\d+$') {
+                                & $walk $depId $true
+                            }
+                        }
                     }
                 }
             }
         }
+        $visitState[$id] = 2
     }
-    return @($queue.ToArray())
+
+    & $walk $targetId $true
+    # VRV mounts VSR's own folder (1325933293) as its parent config mod without inheriting unrelated seasonal VSR map packs.
+    if ($ModProfile -ieq 'vrv') {
+        & $walk '1325933293' $false
+    }
+    $result.Roots = @($queue.ToArray())
+    $result.MissingDependencies = @($missing.ToArray())
+    $result.DependencyCycles = @($cycles.ToArray())
+    return $result
+}
+
+function Get-WorkshopAssetFolders([string] $Game, [string] $ModProfile) {
+    $graph = Get-WorkshopDependencyGraph $Game $ModProfile
+    return @($graph.Roots)
 }
 
 function Get-PlaytestAssetConfiguration([string] $Game, [string] $Mission, [string] $AssetProfile, [string] $VrvSource, [string[]] $AssetRoots = @(), [string] $ModProfile = '', [string] $Converter = '') {
     $converterSource = if ($Converter) { $Converter } elseif ($VrvSource) { $VrvSource } else { '' }
-    $converterRoot = if ($converterSource) { (Resolve-Path -LiteralPath $converterSource).Path } else { '' }
+    # Only resolve converterRoot when it actually exists; stale unused -VrvSource must NEVER crash a native Stock 1192 route.
+    $converterRoot = if ($converterSource -and (Test-Path -LiteralPath $converterSource)) { (Resolve-Path -LiteralPath $converterSource).Path } else { '' }
     $linked = @(Get-LinkedAssetFolders $AssetProfile)
     $explicit = @(Get-ExplicitAssetRoots $AssetRoots)
     # Strict Stock isolation: when -ModProfile 'stock' is selected, NEVER mount
     # VRV or VSR folders even if a format converter is configured.
     $modFolders = @()
+    $missingModDeps = @()
+    $depCycles = @()
     $vrv = @()
     if ($ModProfile) {
         if ($ModProfile -ine 'stock') {
-            $modFolders = @(Get-WorkshopAssetFolders $Game $ModProfile)
-            if ($ModProfile -in 'vsr','vrv' -and $modFolders.Count -eq 0 -and $VrvSource) {
-                $vrv = @(Get-VrvAssetFolders $Game $VrvSource)
+            $wsGraph = Get-WorkshopDependencyGraph $Game $ModProfile
+            $modFolders = @($wsGraph.Roots)
+            $missingModDeps = @($wsGraph.MissingDependencies)
+            $depCycles = @($wsGraph.DependencyCycles)
+            if ($ModProfile -in 'vsr','vrv' -and $VrvSource -and (Test-Path -LiteralPath $VrvSource)) {
+                if ($modFolders.Count -eq 0) {
+                    $vrv = @(Get-VrvAssetFolders $Game $VrvSource)
+                } elseif ($missingModDeps.Count -gt 0) {
+                    # Targeted local fallback only for specific missing Workshop IDs
+                    $stillMissing = [System.Collections.Generic.List[string]]::new()
+                    $extraVrv = [System.Collections.Generic.List[string]]::new()
+                    $depsBase = Join-Path $Game 'VRV/deps'
+                    foreach ($mid in $missingModDeps) {
+                        $cand = Join-Path $depsBase $mid
+                        if (Test-Path -LiteralPath $cand -PathType Container) {
+                            $extraVrv.Add((Resolve-Path -LiteralPath $cand).Path)
+                        } else {
+                            $stillMissing.Add($mid)
+                        }
+                    }
+                    $vrv = @($extraVrv.ToArray())
+                    $missingModDeps = @($stillMissing.ToArray())
+                }
             }
         }
     } else {
         # Legacy callers without -ModProfile retain backward-compatible -VrvSource asset behavior.
-        $vrv = @(Get-VrvAssetFolders $Game $VrvSource)
+        if ($VrvSource -and (Test-Path -LiteralPath $VrvSource)) {
+            $vrv = @(Get-VrvAssetFolders $Game $VrvSource)
+        }
     }
     $combined = [System.Collections.Generic.List[string]]::new()
     $seen = @{}
@@ -176,6 +270,8 @@ function Get-PlaytestAssetConfiguration([string] $Game, [string] $Mission, [stri
         VrvFolders = $vrv
         AssetRoots = @($combined.ToArray())
         NativeRoots = $nativeRoots
+        MissingModDependencies = $missingModDeps
+        DependencyCycles = $depCycles
         MissionFolder = (Split-Path -Parent $Mission)
     }
 }
@@ -430,8 +526,11 @@ function Get-PlaytestAssetPlan([string] $Game, [string] $Mission, [string] $Asse
         ModFolders = $config.ModFolders
         VrvFolders = $config.VrvFolders
         AssetRoots = $config.AssetRoots
+        MissingModDependencies = $config.MissingModDependencies
+        DependencyCycles = $config.DependencyCycles
         ScriptCheck = 'disabled'
         MissionDll = ''
+        DllIdentity = $null
         LuaScript = ''
         RequiredOdfs = @()
         ResolvedOdfs = @{}
@@ -447,6 +546,7 @@ function Get-PlaytestAssetPlan([string] $Game, [string] $Mission, [string] $Asse
             $roots = @($config.MissionFolder) + @($config.AssetRoots) + @((Join-Path $Game 'Missions')) + @($config.NativeRoots)
             $plan.MissionDll = Find-PlaytestAsset $dll $roots
             if (-not $plan.MissionDll) { throw "Missing mission DLL $dll. Put it beside the map or link its folder in the asset profile." }
+            $plan.DllIdentity = Get-DllIdentityInfo $plan.MissionDll $ModProfile
             if ($dll -ieq 'LuaMission.dll') {
                 $name = [IO.Path]::GetFileNameWithoutExtension($Mission) + '.lua'
                 $plan.LuaScript = Find-PlaytestAsset $name $roots
