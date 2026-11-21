@@ -12,6 +12,7 @@ const NativeAssets := preload("res://formats/native_assets.gd")
 const TerrainTextures := preload("res://render/terrain_textures.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
 const TerrainCommands := preload("res://tools/terrain_commands.gd")
+const SlopeStudio := preload("res://tools/slope_studio.gd")
 const WaterCommands := preload("res://tools/water_commands.gd")
 const MoveObject := preload("res://tools/move_object.gd")
 const AutoSaveStore := preload("res://core/autosave_store.gd")
@@ -76,9 +77,11 @@ var export_button: Button
 var focus_button: Button
 var playtest_button: Button
 var nodes_button: Button
+var slope_studio_button: Button
 var studio := NodeStudio.new()
 var terrain_tools_button: Button
 var terrain_tools := TerrainCommands.new()
+var slope_studio := SlopeStudio.new()
 var confirmation := ConfirmationDialog.new()
 var keys_dialog := AcceptDialog.new()
 var playtest_dialog := ConfirmationDialog.new()
@@ -124,7 +127,7 @@ func _ready() -> void:
 	theme = Wintage.make(colors)
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	for window in [open_dialog, blank_dialog, flat_template_dialog, flat_output_dialog, save_dialog, export_dialog,
-		confirmation, keys_dialog, playtest_dialog, recover_dialog, game_picker, vrv_picker, autosave_picker, asset_profile_picker, studio, path_inspector, terrain_tools]:
+		confirmation, keys_dialog, playtest_dialog, recover_dialog, game_picker, vrv_picker, autosave_picker, asset_profile_picker, studio, path_inspector, terrain_tools, slope_studio]:
 		window.theme = theme
 	var backdrop := ColorRect.new()
 	backdrop.color = colors["background"]
@@ -153,6 +156,7 @@ func _ready() -> void:
 	redo_button = add_button(tools, "Redo", func(): document.redo(); sync_actions(), "Redo the last stroke", KEY_Y)
 	nodes_button = add_button(tools, "Layers / Nodes", open_studio, "Preview and bake procedural height, color or base tile layers")
 	terrain_tools_button = add_button(tools, "Shape Terrain", open_terrain_tools, "Preview a slope plane or mirror the heightfield")
+	slope_studio_button = add_button(tools, "Slope Studio", open_slope_studio, "Build exact-angle ramps, terraces, ridges, valleys, trenches and excavations with batch stamps and masks")
 	add_button(tools, "Hotkeys", keys_dialog.popup_centered, "Show editor shortcuts")
 	title.text = "Open a map to edit terrain"
 	title.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
@@ -242,6 +246,8 @@ func _ready() -> void:
 	studio.preview_display.connect(show_graph_preview)
 	add_child(terrain_tools)
 	terrain_tools.updated.connect(func(value: String): sync_actions(); report(value))
+	add_child(slope_studio)
+	slope_studio.updated.connect(func(value: String): sync_actions(); report(value))
 	add_child(water_tools)
 	water_tools.updated.connect(func(value: String): sync_actions(); report(value))
 	water_tools.painting_changed.connect(update_water_painting)
@@ -502,6 +508,7 @@ func sync_actions() -> void:
 		button.disabled = locked
 	nodes_button.disabled = locked
 	terrain_tools_button.disabled = locked
+	slope_studio_button.disabled = locked or document.has_preview()
 	new_path_button.disabled = locked or not document.package.path_codec.can_resize
 	edit_path_button.disabled = locked or path_list.selected <= 0
 	move_path_button.disabled = locked or path_list.selected <= 0
@@ -1191,6 +1198,15 @@ func open_terrain_tools() -> void:
 	var sample := last_cursor if last_cursor.x >= 0 else Vector2(terrain.dimensions) * 0.5
 	var anchor_point := Vector2i(sample.round()).clamp(Vector2i.ZERO, terrain.dimensions - Vector2i.ONE)
 	terrain_tools.begin(document, anchor_point, brush_panel.radius_m)
+
+
+func open_slope_studio() -> void:
+	if document == null:
+		return
+	var terrain := document.package.terrain
+	var target := last_cursor if last_cursor.x >= 0 else Vector2(terrain.dimensions) * 0.5
+	var world := scene_view.point_world(Vector2(target.x, target.y))
+	slope_studio.begin(document, Vector2(world.x, world.z))
 
 
 func set_cursor(point: Vector2) -> void:

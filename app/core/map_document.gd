@@ -5,6 +5,7 @@ const Graph := preload("res://nodes/height_graph.gd")
 const PathCodec := preload("res://formats/bzn_paths.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
 const Water := preload("res://formats/water_v5.gd")
+const SlopeShapes := preload("res://core/slope_shapes.gd")
 const HISTORY_LIMIT := 64
 const MAX_EDITOR_ABS_HEIGHT := 100000.0
 enum Brush { OFFSET, SMOOTH, FLATTEN, SPRAY }
@@ -1181,6 +1182,35 @@ func preview_slope_plane(center: Vector2i, radius_m: float, height: float, grade
 				values[index] = native_sample[0]
 	show_preview(values)
 	return true
+
+
+func preview_slope_shape(params: Dictionary, batch := {}) -> bool:
+	## Advanced sculptor preview: every batch instance evaluates deterministically
+	## against the heights before the batch, then the merged result goes through
+	## the shared preview/bake pipeline (one undo step per apply).
+	if stroke_active:
+		return fail("Finish the stroke before shaping terrain.")
+	clear_preview()
+	var terrain := package.terrain
+	var snapshot := terrain.heights.duplicate()
+	var values := {}
+	for instance in SlopeShapes.instances(params, batch):
+		var shaped: Dictionary = SlopeShapes.evaluate(instance, terrain.dimensions, terrain.origin, snapshot)
+		if not String(shaped["error"]).is_empty():
+			return fail(shaped["error"])
+		for index in shaped["values"]:
+			values[index] = shaped["values"][index]
+	if values.is_empty():
+		return fail("The shape covers no terrain samples. Check start, end, width and masks.")
+	var limit := minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0)
+	var native_sample := PackedFloat32Array([0.0])
+	for index in values:
+		var value := float(values[index])
+		if not is_finite(value) or absf(value) > limit:
+			return fail("The shape exceeds the terrain height range.")
+		native_sample[0] = value
+		values[index] = native_sample[0]
+	return show_preview(values)
 
 
 func mirror_heights(direction: int) -> int:

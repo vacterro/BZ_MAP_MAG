@@ -8,6 +8,7 @@ const Graph := preload("res://nodes/height_graph.gd")
 const Water := preload("res://formats/water_v5.gd")
 const BznObjects := preload("res://formats/bzn_objects.gd")
 const AutoSaveStore := preload("res://core/autosave_store.gd")
+const Shapes := preload("res://core/slope_shapes.gd")
 const TerrainView := preload("res://render/terrain_view.gd")
 
 var failures := 0
@@ -171,6 +172,7 @@ func run() -> void:
 	await test_object_move(editor, args[0], args[2])
 	await test_object_tools(editor, args[0], args[2])
 	await test_water_tools(editor, args[0], args[2])
+	test_slope_studio(editor, args[0], args[2])
 	await test_fly_autosave_symmetry(editor, args[0], args[2])
 	test_sound_point_labels(editor)
 	print("Native height at (0,0): %.4f -> %.4f, changed samples: %d" % [baseline, intended, document.edits.size()])
@@ -1200,6 +1202,133 @@ func test_fly_autosave_symmetry(editor: Control, source: String, scratch: String
 	check(editor.brush_panel.mirrored(doc, Vector2(100.0, 200.0), true) == Vector2(923.0, 200.0)
 		and editor.brush_panel.mirrored(doc, Vector2(100.0, 200.0), false) == Vector2(100.0, 823.0), "mirror points compute the opposite samples")
 	print("Fly camera, rolling autosave and live symmetry verified.")
+
+
+func sample_of_world(terrain: Terrain, world: Vector2) -> Vector2i:
+	var point: Vector2 = Vector2(world.x, world.y) / terrain.SPACING - Vector2(terrain.origin)
+	return Vector2i(point.round()).clamp(Vector2i.ZERO, terrain.dimensions - Vector2i.ONE)
+
+
+func test_slope_studio(editor: Control, source: String, scratch: String) -> void:
+	var doc: Document = editor.document
+	var terrain := doc.package.terrain
+	var granularity: float = doc.package.granularity
+	var writer := Snapshots.new()
+	var before_ramp := terrain.heights.duplicate()
+	editor.last_cursor = Vector2(512.0, 512.0)
+	editor.slope_studio_button.pressed.emit()
+	var studio = editor.slope_studio
+	var anchor: Vector3 = editor.scene_view.point_world(Vector2(512.0, 512.0))
+	var anchor_world := Vector2(anchor.x, anchor.z)
+	check(absf(studio.from_x.value - anchor_world.x) < 0.001 and absf(studio.from_z.value - anchor_world.y) < 0.001,
+		"the studio opens at the terrain cursor in world metres")
+	check(absf(studio.from_height.value - before_ramp[512 * terrain.dimensions.x + 512]) < 0.001,
+		"the ramp start height reads the current terrain")
+	var span := 200.0
+	studio.to_x.value = studio.from_x.value + span
+	studio.to_z.value = studio.from_z.value
+	studio.mode_choice.select(1)
+	studio.angle.value = 15.0
+	studio.width.value = 32.0
+	studio.falloff.value = 0.0
+	studio.profile.select(Shapes.PROFILES.find("flat"))
+	var ramp_ready: bool = studio.preview_shape() and doc.has_preview()
+	if not ramp_ready:
+		check(false, "the exact-angle 15 degree ramp previews on 2D and 3D")
+		return
+	check(true, "the exact-angle 15 degree ramp previews on 2D and 3D")
+	check(studio.message.text.contains("15.0 degrees"), "the status names the exact angle")
+	var expected_end := snappedf(studio.from_height.value + span * tan(deg_to_rad(15.0)), granularity)
+	var index := sample_of_world(terrain, Vector2(studio.to_x.value, studio.to_z.value))
+	var end_height: float = terrain.heights[index.y * terrain.dimensions.x + index.x]
+	check(absf(end_height - expected_end) <= granularity, "the ramp reaches h = start + distance * tan(15 degrees)")
+	var middle := sample_of_world(terrain, Vector2((studio.from_x.value + studio.to_x.value) * 0.5, studio.from_z.value))
+	var middle_height: float = terrain.heights[middle.y * terrain.dimensions.x + middle.x]
+	check(absf(middle_height - lerpf(studio.from_height.value, expected_end, 0.5)) <= granularity, "the flat ramp profile is linear at mid-span")
+	# Edge falloff blends the ramp into the existing surface: at 24 m lateral
+	# the weight is exactly mid-falloff, so the blended sample must land on the
+	# midpoint between the original surface and the ramp height.
+	var edge := sample_of_world(terrain, Vector2(studio.to_x.value, studio.to_z.value + 24.0))
+	studio.falloff.value = 16.0
+	if not studio.preview_shape():
+		check(false, "the widened falloff previews")
+		return
+	check(true, "the widened falloff previews")
+	var edge_index := edge.y * terrain.dimensions.x + edge.x
+	var blended: float = terrain.heights[edge_index]
+	var edge_original: float = before_ramp[edge_index]
+	check(absf(blended - lerpf(edge_original, expected_end, 0.5)) <= granularity + 0.05,
+		"the falloff edge blends halfway between the original surface and the ramp")
+	check(not writer.export_native(doc, scratch.path_join("unapplied-ramp")), "an unapplied ramp cannot export")
+	# Apply is one undo step; undo and redo are exact.
+	var stack_before := doc.undo_stack.size()
+	studio.apply_shape()
+	check(doc.undo_stack.size() == stack_before + 1 and not doc.has_preview(), "the ramp commits as exactly one undo step")
+	var ramped := terrain.heights.duplicate()
+	check(ramped != before_ramp, "the commit changed terrain heights")
+	doc.undo()
+	check(terrain.heights == before_ramp, "undo restores the exact pre-ramp heights")
+	doc.redo()
+	check(terrain.heights == ramped, "redo re-applies the ramp exactly")
+	# Terrace profile quantizes the climb.
+	studio.profile.select(Shapes.PROFILES.find("terrace"))
+	studio.terrace_levels.value = 4.0
+	if studio.preview_shape():
+		var quarter := sample_of_world(terrain, Vector2(studio.from_x.value + span * 0.28, studio.from_z.value))
+		var stepped: float = terrain.heights[quarter.y * terrain.dimensions.x + quarter.x]
+		var level_one := snappedf(studio.from_height.value + (expected_end - studio.from_height.value) * 0.25, granularity)
+		check(absf(stepped - level_one) <= granularity, "the terrace quantizes to the second level near 25 percent")
+	else:
+		check(false, "the terrace profile previews")
+	studio.profile.select(Shapes.PROFILES.find("flat"))
+	studio.preview_shape()
+	studio.apply_shape()
+	# Batch: two linear ramps mirrored across the start axis.
+	studio.batch_mode.select(1)
+	studio.batch_count.value = 2.0
+	studio.batch_spacing.value = 96.0
+	# Mirror across X: the mirrored ramp runs on the opposite side of the start
+	# point, so its footprint is disjoint from the original.
+	studio.mirror_x.button_pressed = true
+	var mirror_previewed: bool = studio.preview_shape()
+	check(mirror_previewed, "the mirrored linear batch previews")
+	if mirror_previewed:
+		var mirrored_values := doc.preview_after.size()
+		studio.mirror_x.button_pressed = false
+		studio.preview_shape()
+		# The mirrored ramps run on the far side of the symmetry point, so their
+		# footprints stay nearly disjoint; only the falloff tails overlap.
+		check(mirrored_values >= doc.preview_after.size() * 7 / 4,
+			"the mirror adds a near-complete copy of the batch despite the falloff-tail overlap")
+		studio.apply_shape()
+	# Masks: a height maximum below the current surface shapes nothing.
+	studio.mask_max.text = "-100000"
+	check(not studio.preview_shape(), "a height mask excluding every sample refuses the shape")
+	studio.mask_max.text = ""
+	# Project round-trip: save, reopen, verify the ramp survives.
+	var saved := scratch.path_join("slope-project.bzmag")
+	check(writer.save_project(doc, saved), "save the ramp project")
+	var reopened := Document.new()
+	var reopened_ok := reopened.open(saved) and reopened.edits.size() == doc.edits.size()
+	check(reopened_ok, "the ramp project reopens with the same edit count")
+	if reopened_ok:
+		check(reopened.package.terrain.heights == terrain.heights, "the reopened heights equal the applied ramp")
+	# Native export plus independent VRV decoder agreement.
+	var export_target := scratch.path_join("slope-ramp")
+	check(writer.export_native(doc, export_target), "export the ramp natively: " + writer.error)
+	var exported_ter := export_target.path_join(doc.package.terrain_name)
+	var original_ter := doc.package.source_path.get_base_dir().path_join(doc.package.terrain_name)
+	var oracle := ProjectSettings.globalize_path("res://").path_join("../build/terrain_oracle.exe")
+	var output: Array = []
+	var code := OS.execute(oracle, [original_ter, exported_ter, "--heights-only"], output, true)
+	var report := str(output[0]).strip_edges() if not output.is_empty() else ""
+	check(code == 0 and report.contains("non-height layers identical"),
+		"the independent VRV decoder sees only height changes: " + report)
+	var changed_count := doc.edits.size()
+	check(report.contains("changed %d" % changed_count),
+		"the independent decoder counts the same changed samples (%d): %s" % [changed_count, report])
+	studio.batch_mode.select(0)
+	studio.batch_count.value = 1.0
 
 
 func test_sound_point_labels(editor: Control) -> void:

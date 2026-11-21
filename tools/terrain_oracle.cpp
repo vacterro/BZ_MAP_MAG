@@ -44,8 +44,9 @@ static int verify_graph(const vrv::terrain::Grid& base, const vrv::terrain::Grid
 
 int main(int argc, char** argv) {
     const bool graph = argc == 4 && std::string(argv[3]) == "--graph";
-    if (argc != 2 && argc != 3 && !graph) {
-        std::cerr << "Pass original TER and optionally its edited export, with --graph for the material graph fixture.\n";
+    const bool heights_only = argc == 4 && std::string(argv[3]) == "--heights-only";
+    if (argc != 2 && argc != 3 && !graph && !heights_only) {
+        std::cerr << "Pass original TER and optionally its edited export, with --graph for the material graph fixture or --heights-only for a generic height-diff.\n";
         return 2;
     }
     const auto start = std::chrono::steady_clock::now();
@@ -65,6 +66,20 @@ int main(int argc, char** argv) {
         if (base.alpha[layer] != edited.alpha[layer]) return 1;
     }
     if (graph) return verify_graph(base, edited);
+    if (heights_only) {
+        if (base.minX != edited.minX || base.minZ != edited.minZ ||
+            base.width != edited.width || base.depth != edited.depth) return 1;
+        if (base.colour != edited.colour || base.textures != edited.textures) return 1;
+        if (base.flags != edited.flags || base.drawn != edited.drawn) return 1;
+        for (int layer = 0; layer < 3; ++layer) {
+            if (base.alpha[layer] != edited.alpha[layer]) return 1;
+        }
+        size_t changed = 0;
+        for (size_t i = 0; i < base.Count(); ++i) changed += base.height[i] != edited.height[i];
+        std::cout << "HeightsOnly: changed " << changed
+                  << "; non-height layers identical; grid " << base.width << " x " << base.depth << "\n";
+        return 0;
+    }
     if (base.colour != edited.colour || base.textures != edited.textures) return 1;
 
     const auto center = base.At(-base.minX, -base.minZ);
