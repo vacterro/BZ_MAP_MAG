@@ -14,8 +14,8 @@ const Terrain := preload("res://formats/terrain_v5.gd")
 const TerrainCommands := preload("res://tools/terrain_commands.gd")
 const WaterCommands := preload("res://tools/water_commands.gd")
 const MoveObject := preload("res://tools/move_object.gd")
+const AutoSaveStore := preload("res://core/autosave_store.gd")
 const SETTINGS := "user://editor.cfg"
-
 var document: Document
 var top := TopView.new()
 var scene_view := TerrainView.new()
@@ -54,6 +54,12 @@ var fly_button: Button
 const AUTOSAVE_INTERVAL := 180.0
 const AUTOSAVE_KEEP := 3
 var autosave_seconds := 0.0
+var autosave_custom_root := ""
+var last_autosave := ""
+var autosave_picker := FileDialog.new()
+var autosave_root_field := LineEdit.new()
+var recover_dialog := ConfirmationDialog.new()
+var recover_list := ItemList.new()
 var open_dialog := FileDialog.new()
 var blank_dialog := FileDialog.new()
 var flat_template_dialog := FileDialog.new()
@@ -65,6 +71,7 @@ var export_dialog := FileDialog.new()
 var undo_button: Button
 var redo_button: Button
 var save_button: Button
+var recover_button: Button
 var export_button: Button
 var focus_button: Button
 var playtest_button: Button
@@ -117,7 +124,7 @@ func _ready() -> void:
 	theme = Wintage.make(colors)
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	for window in [open_dialog, blank_dialog, flat_template_dialog, flat_output_dialog, save_dialog, export_dialog,
-		confirmation, keys_dialog, playtest_dialog, game_picker, vrv_picker, asset_profile_picker, studio, path_inspector, terrain_tools]:
+		confirmation, keys_dialog, playtest_dialog, recover_dialog, game_picker, vrv_picker, autosave_picker, asset_profile_picker, studio, path_inspector, terrain_tools]:
 		window.theme = theme
 	var backdrop := ColorRect.new()
 	backdrop.color = colors["background"]
@@ -138,6 +145,7 @@ func _ready() -> void:
 	var new_map := add_button(tools, "New Map", blank_dialog.popup_centered_ratio.bind(0.72), "Create a new map from a blank BZN and matching flat TER")
 	new_map.disabled = OS.get_name() != "Windows"
 	save_button = add_button(tools, "Save Project", request_save, "Create a .bzmag project snapshot", KEY_S)
+	recover_button = add_button(tools, "Recover…", recover_autosaves, "Open a rolling autosave from the verified recovery store")
 	export_button = add_button(tools, "Export Native", request_export, "Export and re-import a new native map folder")
 	playtest_button = add_button(tools, "Playtest", playtest, "Launch Battlezone with the current edits")
 	add_button(tools, "Setup", show_playtest_setup, "Choose the Battlezone and VRV folders")
@@ -239,6 +247,7 @@ func _ready() -> void:
 	water_tools.painting_changed.connect(update_water_painting)
 	setup_dialog(game_picker, FileDialog.FILE_MODE_OPEN_DIR, [])
 	setup_dialog(vrv_picker, FileDialog.FILE_MODE_OPEN_DIR, [])
+	setup_dialog(autosave_picker, FileDialog.FILE_MODE_OPEN_DIR, [])
 	setup_dialog(asset_profile_picker, FileDialog.FILE_MODE_OPEN_FILE, ["*.json ; Asset profile"])
 	asset_profile_picker.title = "Choose a linked asset profile"
 	asset_profile_picker.use_native_dialog = true
@@ -255,6 +264,8 @@ func _ready() -> void:
 	add_folder_field(paths, game_path, game_picker, "Select the Battlezone installation folder")
 	add_label(paths, "VRV source folder (optional engine layout converter and VSR assets)")
 	add_folder_field(paths, vrv_path, vrv_picker, "Select the VRV source folder")
+	add_label(paths, "Autosave folder (empty keeps the default user folder; never the map folder)")
+	add_folder_field(paths, autosave_root_field, autosave_picker, "Select the autosave store folder")
 	add_label(paths, "Asset profile for this project (optional)")
 	var profile_row := HBoxContainer.new()
 	paths.add_child(profile_row)
@@ -274,8 +285,19 @@ func _ready() -> void:
 	settings.load(settings_path)
 	game_path.text = settings.get_value("playtest", "game", "")
 	vrv_path.text = settings.get_value("playtest", "vrv", "")
+	autosave_root_field.text = settings.get_value("autosave", "root", "")
+	autosave_custom_root = autosave_root_field.text.strip_edges()
 	engine_editor_mode.button_pressed = settings.get_value("playtest", "engine_editor", false)
 	vrv_configured = settings.has_section_key("playtest", "vrv")
+	recover_dialog.title = "Recover autosave"
+	recover_dialog.min_size = Vector2i(520, 260)
+	recover_dialog.ok_button_text = "Open Selected"
+	recover_dialog.dialog_autowrap = true
+	recover_dialog.add_child(recover_list)
+	recover_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	recover_list.tooltip_text = "Rolling autosave slots, oldest first. Items outside the verified slot naming rule never appear here."
+	recover_dialog.confirmed.connect(open_recovered_autosave)
+	add_child(recover_dialog)
 	sync_actions()
 	var args := OS.get_cmdline_user_args()
 	if not args.is_empty():
@@ -957,6 +979,9 @@ func store_playtest_settings() -> void:
 	settings.set_value("playtest", "game", game_path.text.strip_edges())
 	settings.set_value("playtest", "vrv", vrv_path.text.strip_edges())
 	settings.set_value("playtest", "engine_editor", engine_editor_mode.button_pressed)
+	var root := autosave_root_field.text.strip_edges()
+	settings.set_value("autosave", "root", root)
+	autosave_custom_root = root
 	settings.save(settings_path)
 	vrv_configured = true
 
@@ -1094,33 +1119,65 @@ func toggle_fly() -> void:
 	sync_actions()
 
 
-func autosave_path(base: String, slot: int) -> String:
-	var stem := document.package.source_path.get_file().get_basename()
-	return base.path_join("%s-autosave-%d.bzmag" % [stem, slot])
+func autosave_root(custom := "") -> String:
+	var root := custom if custom != "" else autosave_custom_root
+	return root if root != "" else AutoSaveStore.DEFAULT_ROOT
 
 
-func autosave_now(base := "") -> bool:
+## publishes the current document through the transactional autosave store.
+## The autosave never writes into the map's own folder; every slot is fully
+## written, verified by re-opening and only then do old slots get pruned.
+func autosave_now(custom_root := "") -> bool:
 	if document == null:
 		return false
 	autosave_seconds = 0.0
 	if not has_unsaved_changes():
 		return false
-	if base.is_empty():
-		base = document.package.source_path.get_base_dir()
-	var writer := Snapshots.new()
-	DirAccess.remove_absolute(autosave_path(base, AUTOSAVE_KEEP))
-	for slot in range(AUTOSAVE_KEEP - 1, 0, -1):
-		var previous := autosave_path(base, slot)
-		if FileAccess.file_exists(previous):
-			if DirAccess.rename_absolute(previous, autosave_path(base, slot + 1)) != OK:
-				report("Autosave failed. Choose a writable map folder.")
-				return false
-	var target := autosave_path(base, 1)
-	if not writer.save_project(document, target):
-		report("Autosave failed. " + writer.error)
+	var store := AutoSaveStore.new()
+	var published: String = store.publish(document, autosave_root(custom_root), AUTOSAVE_KEEP)
+	if published.is_empty():
+		report("Autosave failed. " + store.error)
 		return false
-	report("Autosaved " + target)
+	last_autosave = published
+	report("Autosaved " + published + " | The source map folder is never touched.")
 	return true
+
+
+func recover_autosaves() -> void:
+	recover_list.clear()
+	var root := autosave_root()
+	var projects: PackedStringArray = []
+	if document != null:
+		projects.push_back(AutoSaveStore.project_dir(root, document.package.source_path))
+	else:
+		var handle := DirAccess.open(root)
+		if handle != null:
+			for name in handle.get_directories():
+				projects.push_back(root.path_join(name))
+	var found := 0
+	for project in projects:
+		for slot in AutoSaveStore.slots(project):
+			var item := recover_list.add_item("%s · %s" % [project.get_file(), slot.get_file()])
+			recover_list.set_item_metadata(item, slot)
+			found += 1
+	if found == 0:
+		report("No autosaves found under " + root + ".")
+		return
+	recover_dialog.dialog_text = "Open an autosave project file. Unsaved changes are always confirmed first."
+	recover_list.select(found - 1)
+	recover_dialog.popup_centered_ratio(0.62)
+
+
+func open_recovered_autosave() -> void:
+	var selected := recover_list.get_selected_items()
+	if selected.is_empty():
+		return
+	var slot: String = recover_list.get_item_metadata(selected[0])
+	request_open(slot)
+
+
+func open_autosave_folder() -> void:
+	OS.shell_open(ProjectSettings.globalize_path(autosave_root()))
 
 
 func open_studio() -> void:

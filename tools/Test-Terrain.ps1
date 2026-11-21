@@ -26,3 +26,6 @@ if ($process.ExitCode -ne 0 -or ($lines -match 'SCRIPT ERROR|^ERROR:').Count -gt
 }
 # The layout capability test runs the registry against every verified BZN fixture.
 & (Join-Path $PSScriptRoot 'Test-BznLayouts.ps1') -Godot $Godot
+# The autosave failure-injection protocol proves the newest confirmed copy
+# survives every simulated write, verify, publish, crash and prune failure.
+& (Join-Path $PSScriptRoot 'Test-AutosaveStore.ps1') -Godot $Godot
