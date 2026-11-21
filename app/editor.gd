@@ -996,6 +996,9 @@ func store_playtest_settings() -> void:
 func playtest() -> void:
 	if launcher_pid > 0 or game_pid > 0 or document == null:
 		return
+	if not document.object_additions.is_empty() or not document.object_removals.is_empty():
+		report(object_count_notice("Undo the object additions or removals before Playtest.").trim_prefix(" | "))
+		return
 	if not find_steam_game():
 		playtest_dialog.popup_centered()
 		return
@@ -1025,11 +1028,9 @@ func playtest() -> void:
 		return
 	var mission := target.path_join(document.package.source_path.get_file())
 	playtest_result = run.path_join("playtest.json")
-	var caution := ""
-	if document != null and (not document.object_additions.is_empty() or not document.object_removals.is_empty()):
-		caution = " Caution: %d added / %d removed objects are EDITOR-ONLY; the verified 2.0.185 loader has rejected changed object counts with SAVEGAME CORRUPT." % [
-			document.object_additions.size(), document.object_removals.size()]
 	var args := PackedStringArray(["-NoProfile", "-NonInteractive", "-File", script, "-Game", game, "-Mission", mission, "-ResultFile", playtest_result, "-PreparedRun", run, "-WaitForGame"])
+	if OS.has_feature("editor"):
+		args.append_array(PackedStringArray(["-Godot", OS.get_executable_path()]))
 	if vrv != "":
 		args.append_array(PackedStringArray(["-VrvSource", vrv]))
 	if engine_editor_mode.button_pressed:
@@ -1042,7 +1043,7 @@ func playtest() -> void:
 		return
 	store_playtest_settings()
 	sync_actions()
-	report("Starting Battlezone with the current edits…" + caution)
+	report("Starting Battlezone with the current edits…")
 
 
 func poll_playtest() -> void:

@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory)] [string] $Game,
     [Parameter(Mandatory)] [string] $Mission,
+    [string] $Godot,
     [string] $VrvSource,
     [string] $AssetProfile,
     [string] $ResultFile,
@@ -40,6 +41,41 @@ function Clear-PreparedRuntime {
     Remove-Item -LiteralPath $gameFolder.FullName -Recurse -Force
 }
 
+function Get-ValidatedPackage([string] $MissionPath) {
+    $root = Split-Path -Parent $PSScriptRoot
+    $app = Join-Path $root 'app'
+    $validator = $Godot
+    $project = ''
+    if (Test-Path -LiteralPath (Join-Path $app 'project.godot') -PathType Leaf) {
+        if (-not $validator) {
+            $validator = (Get-Command godot.exe -ErrorAction SilentlyContinue).Source
+        }
+        if (-not $validator) { throw 'Pass -Godot with the Godot executable used by this checkout.' }
+        $project = "--path `"$app`""
+    } elseif (-not $validator) {
+        $validator = Join-Path $root 'BZ_MAP_MAG.exe'
+    }
+    $validator = (Resolve-Path -LiteralPath $validator).Path
+    $response = [IO.Path]::GetTempFileName()
+    $log = "$response.log"
+    try {
+        $argsLine = "--headless $project --log-file `"$log`" -- --validate-playtest `"$MissionPath`" `"$response`""
+        $process = Start-Process -FilePath $validator -ArgumentList $argsLine -WorkingDirectory $root -WindowStyle Hidden -PassThru
+        if (-not $process.WaitForExit(30000)) {
+            $process.Kill()
+            $process.WaitForExit()
+            throw 'Playtest package validation timed out.'
+        }
+        if ($process.ExitCode -ne 0 -or (Get-Item -LiteralPath $response).Length -eq 0) {
+            $detail = if (Test-Path -LiteralPath $log) { (Get-Content -LiteralPath $log -Tail 6) -join ' ' }
+            throw "Playtest package validator failed. $detail"
+        }
+        return Get-Content -LiteralPath $response -Raw -Encoding UTF8 | ConvertFrom-Json
+    } finally {
+        Remove-Item -LiteralPath $response,$log -Force -ErrorAction SilentlyContinue
+    }
+}
+
 trap {
     if ($ResultFile) {
         @{ error = $_.Exception.Message } | ConvertTo-Json -Compress | Set-Content -LiteralPath $ResultFile -Encoding UTF8
@@ -75,42 +111,35 @@ if ($PreparedRun -and -not $ValidateOnly) {
     if (@(Get-ChildItem -LiteralPath $clone -Force).Count -ne 1) { throw 'Prepared Playtest session is already in use.' }
     $preparedRuntime = $clone
 }
-foreach ($extension in 'ter','trn','inf') {
-    if (-not (Test-Path -LiteralPath (Join-Path $sourceFolder "$stem.$extension") -PathType Leaf)) {
-        throw "Map snapshot is missing .$extension"
-    }
-}
-
-# --- Layout stage: classify the BZN before anything else is copied or launched ---
-# This mirrors the capability registry in app/formats/bzn_layouts.gd. Direct-native:
-# 1192. Conversion sources: 1196 through the VRV bzn_compat adapter. Every other
-# version is refused instead of launched unverified, and there is no bypass switch.
-$versionLine = Get-Content -LiteralPath $Mission -TotalCount 2 -Encoding ASCII | Select-Object -Last 1
-if ($versionLine -notmatch '^[0-9]+$') {
-    throw "The BZN header does not name a numeric save version (found '$versionLine')."
-}
-$bznVersion = [int]$versionLine
-$launchRoute = 'refuse'
-if ($bznVersion -eq 1192) {
-    $launchRoute = 'native'
-} elseif ($bznVersion -eq 1196) {
-    $launchRoute = 'convert'
-}
-if ($launchRoute -eq 'refuse') {
-    throw "BZN version $bznVersion has no verified 2.0.185 launch route. This launcher runs the native 1192 layout and the adapter-converted 1196 layout; every other version is refused instead of launched unverified."
-}
-if ($launchRoute -eq 'convert' -and -not $VrvSource) {
-    throw 'This 1196 map needs the verified VRV conversion adapter before 2.0.185 can load it. Pass -VrvSource pointing at the VRV checkout with tools/bzn_compat.py. Launching it unconverted fails with SAVEGAME CORRUPT.'
-}
+$package = Get-ValidatedPackage $Mission
+if ($package.error) { throw $package.error }
+$launchRoute = $package.route
+$bznVersion = $package.version
+if ($launchRoute -notin 'native','convert' -or -not $package.files) { throw 'Invalid Playtest validation result.' }
 if ($launchRoute -eq 'convert' -and $KeepBznLayout) {
     throw '-KeepBznLayout requires a confirmed native 2.0.185 layout (version 1192). This map is version 1196 and needs the verified conversion.'
+}
+if ($launchRoute -eq 'convert') {
+    if (-not $VrvSource) {
+        throw 'This 1196 map needs the verified VRV conversion adapter. Pass -VrvSource pointing at the VRV checkout with tools/bzn_compat.py.'
+    }
+    $converter = Join-Path (Resolve-Path -LiteralPath $VrvSource).Path 'tools/bzn_compat.py'
+    if (-not (Test-Path -LiteralPath $converter -PathType Leaf)) {
+        throw "The VRV layout converter is missing at $converter."
+    }
+    $probe = & python $converter inspect $Mission
+    if ($LASTEXITCODE) { throw 'VRV could not identify this BZN layout.' }
+    $layout = $probe | ConvertFrom-Json
 }
 
 $assetPlan = Get-PlaytestAssetPlan $Game $Mission $AssetProfile $VrvSource ([bool]$WithoutMissionScript)
 if ($ValidateOnly) {
-    [pscustomobject]@{ LaunchRoute = $launchRoute; BznVersion = $bznVersion; KeepRequested = [bool]$KeepBznLayout; VrvConverterRequired = ($launchRoute -eq 'convert') } | Format-List
-    $assetPlan
-    return
+    return $assetPlan | Add-Member -PassThru -NotePropertyMembers @{
+        LaunchRoute = $launchRoute
+        BznVersion = $bznVersion
+        KeepRequested = [bool]$KeepBznLayout
+        VrvConverterRequired = ($launchRoute -eq 'convert')
+    }
 }
 if (Get-Process battlezone2 -ErrorAction SilentlyContinue) { throw 'Close your current Battlezone session before Playtest.' }
 if (-not (Get-Process steam -ErrorAction SilentlyContinue)) { throw 'Start Steam before launching this installation.' }
@@ -120,27 +149,23 @@ if (-not $PreparedRun) {
     $session = 'BZMAG-' + [guid]::NewGuid().ToString('N')
     $run = (New-Item -ItemType Directory -Path (Join-Path $repo ('build/' + $session)) -Force).FullName
     $clone = (New-Item -ItemType Directory -Path (Join-Path $run 'game')).FullName
+    $preparedRuntime = $clone
     $pack = (New-Item -ItemType Directory -Path (Join-Path $clone 'snapshot')).FullName
     Get-ChildItem -LiteralPath $sourceFolder -File | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $pack
     }
 }
-foreach ($extension in 'bzn','ter','trn','inf') {
-    if (-not (Test-Path -LiteralPath (Join-Path $pack "$stem.$extension") -PathType Leaf)) {
-        throw "Map snapshot is missing .$extension"
+foreach ($file in $package.files.PSObject.Properties) {
+    $staged = Join-Path $pack $file.Name
+    if (-not (Test-Path -LiteralPath $staged -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash -ne $file.Value) {
+        throw "Map snapshot changed after validation: $($file.Name)"
     }
 }
 
 # --- Conversion stage: materialize the verified 185 layout in the staged snapshot copy ---
 $bznCopy = Join-Path $pack $missionName
 if ($launchRoute -eq 'convert') {
-    $converter = Join-Path (Resolve-Path -LiteralPath $VrvSource).Path 'tools/bzn_compat.py'
-    if (-not (Test-Path -LiteralPath $converter -PathType Leaf)) {
-        throw "The VRV layout converter is missing at $converter."
-    }
-    $probe = & python $converter inspect $bznCopy
-    if ($LASTEXITCODE) { throw 'VRV could not identify this BZN layout.' }
-    $layout = $probe | ConvertFrom-Json
     if ($layout.schema -ne '185') {
         $conversion = Join-Path $run 'migration'
         & python $converter convert $bznCopy --to 185 --output-dir $conversion
