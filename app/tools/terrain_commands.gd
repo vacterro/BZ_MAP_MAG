@@ -197,7 +197,7 @@ func apply_terrain() -> void:
 			message.text = document.error
 			return
 	else:
-		if not preview_plane():
+		if not document.has_preview() and not preview_plane():
 			return
 		count = document.preview_after.size()
 		document.bake_preview()

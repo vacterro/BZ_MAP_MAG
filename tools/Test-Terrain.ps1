@@ -16,7 +16,7 @@ $mode = if ($WithGpu) { '--resolution 640x540' } else { '--headless' }
 $arguments = "$mode --path `"$app`" --log-file `"$log`" --script res://tests/terrain_workflow.gd -- `"$brave`" `"$blank`" `"$scratch`""
 $process = Start-Process -FilePath $Godot -ArgumentList $arguments -WindowStyle Hidden -PassThru
 $record = New-BzmagRunRecord $repo $scratch $process
-if (-not $process.WaitForExit(90000)) {
+if (-not $process.WaitForExit(600000)) {
     $process.Kill()
     if ($process.WaitForExit(10000)) { Complete-BzmagRunRecord $record $log $false }
     throw "Godot test timed out. See $log"

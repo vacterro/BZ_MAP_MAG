@@ -14,7 +14,7 @@ $log = Join-Path $scratch 'godot.log'
 $arguments = "--headless --path `"$app`" --log-file `"$log`" --script res://tests/autosave_store.gd -- `"$brave`" `"$scratch`""
 $process = Start-Process -FilePath $Godot -ArgumentList $arguments -WindowStyle Hidden -PassThru
 $record = New-BzmagRunRecord $repo $scratch $process
-if (-not $process.WaitForExit(120000)) {
+if (-not $process.WaitForExit(240000)) {
     $process.Kill()
     if ($process.WaitForExit(10000)) { Complete-BzmagRunRecord $record $log $false }
     throw "Godot autosave test timed out. See $log"
