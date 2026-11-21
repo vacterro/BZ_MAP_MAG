@@ -170,7 +170,7 @@ The suite's workflow test now asserts the same properties through the editor pat
 
 ## Cleanup semantics, process ownership and evidence retention (P0, 2026-11-21)
 
-Three hygiene fixes, each verified live on this machine:
+Three initial hygiene changes were checked on this machine. The T-13 entry below supersedes the location-only process check and the early temp ownership rules.
 
 - **`-Keep N` contract fixed.** `tools/Clean-Build.ps1` previously deleted *all* folders of the `BZMAG`, `bzn-185` and `sdk` groups even with `-Keep N`, contradicting its documented semantics through a hidden branch. The contract is now uniform and tested against three synthetic `asset-test-<guid>` folders with distinct mtimes: dry-run `-Keep 2` listed only the oldest, `-Apply` removed exactly that one and left the two newest, `-Keep 0 -Apply` removed the rest, a repeated `-Apply` was a no-op, and `build/object-preview/` plus `build/terrain_oracle.exe` stayed untouched. The 0..5 range remains an explicit documented cap.
 
@@ -230,3 +230,11 @@ Both runtime checks and all refusal probes ran on clean commit `4b1b494ce3a035c8
 | Native 1192, freshly generated flat snapshot | Loaded the blank map in engine editor mode, reached MISSION and RUN, then shut down normally. Zero `SAVEGAME CORRUPT`. Source and runtime BZN SHA-256 both `89a14d196a06f6520c0d7c6b214b69056306556a8ea98e1826fb7902484da1e3`. Runtime TER equals the flat template export. | `Battlezone 2026-11-21 13.36.12.3125.log` · `3b5281aa9bc7af2725c52224e842f6d8efaa4751cd6f2573f6b5b1c35cf088ef` |
 | Adapter-converted 1196, Slope Studio Brave export | Loaded Brave, reached MISSION and RUN, then shut down normally. Zero `SAVEGAME CORRUPT`. Runtime BZN SHA-256 `1ad84f9e0a0dde381c978fa4666e4e18c0647079d7a10e9c2c2613fb1b2cb450`. Runtime TER equals the independent decoder's ramp export. | `Battlezone 2026-11-21 13.36.30.1578.log` · `a0aa5b45f122994bbd1a3abaa08ca3bd38cc9972e6fd4a45768b9f1121ac20b5` |
 | VSR binary 1197, Bolt text 1200 and a private Brave copy with version 1199 | Each returned a version-specific refusal in `-ValidateOnly`. No runtime was launched for these samples. | — |
+
+## Workspace run ownership (T-13, 2026-11-21)
+
+- The same dry-run control showed the old tools selecting a PowerShell process with only a repository-path argument and an unmarked `native-route-probe` folder. The repaired tools kept both. Neither old control applied a stop or removal.
+- `tools/Test-RunHygiene.ps1` exercises Keep 0, 1 and 2, dry-run and repeat cleanup using a private scratch tree. The check retained the newest PASS and FAIL, an unrecorded log, an unmarked probe and a recorded run referenced by a live child. Applying a stale process record left the child running. Applying the correct record stopped the selected child and left the second child running.
+- The chained Godot tests write a run record and final log SHA-256. Standalone cleanup requires the matching workspace, run name, log hash and corresponding evidence entry. Pre-existing folders without a run record remain eligible for inspection only.
+- The editor's Playtest result and run record publish via same-directory replacement. The stricter `Test-Playtest.ps1` checks the Godot log for errors in addition to the engine accepting the mission. On the repaired script the 1196 slope export reached MISSION and RUN, exited normally, and logged no errors in the editor bridge or corruption in the game. Engine log `Battlezone 2026-11-21 13.49.37.8968.log` has SHA-256 `a07ad3684eda47033a0a88e1276e260ea2ea1631e0d07c166077218026be579f`.
+- The native 1192 launch also reached MISSION and RUN and closed normally with no corruption. The ownership dry run selected the live clone by its manifest without stopping it. Engine log `Battlezone 2026-11-21 13.52.10.1250.log` has SHA-256 `911c738d0ad8240a8a5fad7992462e6be1125f9395a0891fe9de795959364a8e`. The portable desktop export admitted the same 1192 map using its packaged validator and helper.

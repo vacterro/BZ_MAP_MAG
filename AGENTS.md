@@ -20,24 +20,18 @@ Clean them as part of finishing any session, and opportunistically during long o
    `build/terrain_oracle.exe` (compiled local tools). A repeated run is a no-op.
 2. Prune suite output under `V:/_TEMP_/` with
    `powershell -NoProfile -ExecutionPolicy Bypass -File tools/Clean-TempEvidence.ps1`
-   (dry run by default, `-Apply` to remove). It only considers workspace-owned names:
-   `bzmag-terrain-<guid>`, `bzmag-layout-<guid>`, `bzmag-autosave-<guid>` and true
-   one-off probes (`water-…`, `bzm-<guid>`, `native-route-probe`, `bzn-conv-probe`,
-   or a generic `*-probe*` name that carries an internal workspace marker). Per group
-   it always keeps the newest PASS and the newest FAIL, plus `-Keep N` extra newest
-   runs, plus fresh (< 24 h) UNKNOWN runs. Foreign `*-probe*` folders without a
-   workspace marker are reported and never touched. Live-referenced folders are
-   skipped. Never match temp folders by broad wildcards outside this tool.
+   (dry run by default, `-Apply` to remove). A deletion requires a matching
+   `.bzmag-run.json` and the run name plus its exact `godot.log` SHA-256 on the
+   same line in `docs/EVIDENCE.md`. Keep the newest PASS and FAIL in each suite
+   group plus `-Keep N` extra runs. Keep incomplete, unmarked, linked or
+   live-referenced folders. Never match temp folders by broad wildcards.
 3. Before finishing, stop stray processes the session started — **never by name and
    never anything outside this repository**. Use
    `powershell -NoProfile -ExecutionPolicy Bypass -File tools/Stop-OwnedProcesses.ps1`
-   (dry run by default, `-Apply` to stop). Ownership is proven by location: the
-   process executable path or command line must reference a path inside this repo;
-   the tool excludes its own process tree, re-verifies each PID immediately before
-   stopping and refuses anything else. A user's Battlezone session from the Steam
-   install or an unrelated Godot project can never match. A killed game produces a
-   `Battlezone-Crashed *.log` — a normal exit (`System shutdown normally`) is the
-   clean pattern; check the run logs before trusting a crash log.
+   (dry run by default). Apply with `-Apply -RunToken <private-run-name>` for
+   a specific child you started. The record must match the PID, creation time,
+   executable, run token and repository path at the point of stopping. Prefer a
+   normal Battlezone exit and verify `System shutdown normally` in its log.
 4. Never delete: `build/object-preview/` (compiled VRV mesh adapter),
    `build/terrain_oracle.exe` (reference TER decoder), `tools/`, `map_references/`,
    the installed game, or the VRV checkout. A `desktop-<hash>` export is reproducible
@@ -53,7 +47,7 @@ Clean them as part of finishing any session, and opportunistically during long o
   `powershell -NoProfile -ExecutionPolicy Bypass -File tools/Test-Terrain.ps1 -Godot '<godot>'`
   The workflow log goes to `V:/_TEMP_/bzmag-terrain-<guid>/godot.log`, the chained
   stages to `bzmag-layout-<guid>/` and `bzmag-autosave-<guid>/`. A stuck headless run
-  can be killed with `tools/Stop-OwnedProcesses.ps1 -Apply`; parse errors abort
+  can be killed with `tools/Stop-OwnedProcesses.ps1 -Apply -RunToken <private-run-name>`; parse errors abort
   before any checks.
 - Playtest (Steam must be running; **never pass `-KeepBznLayout`** — it is now a
   hard refusal for anything but the verified native 1192 layout; the launcher
