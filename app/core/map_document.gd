@@ -1310,7 +1310,7 @@ func object_sequence(view: int) -> int:
 	var lbl := object_label(view)
 	if not lbl.is_empty():
 		return seq & ~0x800000
-	if not object_is_added(view) and object_label_edits.has(object_actual_index(view)):
+	if object_is_added(view) or object_label_edits.has(object_actual_index(view)):
 		return seq | 0x800000
 	return seq
 

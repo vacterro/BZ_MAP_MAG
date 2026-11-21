@@ -1921,6 +1921,18 @@ func test_vrv_parity_wave7(editor: Control, source: String, scratch: String) -> 
 		and reimported.object_label(snd_base_count) == "vrvsnd:rain.ogg:80:300:15:10:110:25",
 		"native BZN export round-trips both vrv_sndpoint records and labels")
 
+	# Regression (T-19): duplicating a labeled object and clearing its label exports and re-imports cleanly
+	var clear_doc := Document.new()
+	check(clear_doc.open(snd_bzn_path), "reopen vrv_sndpoint fixture for empty-label addition check")
+	var dup_clear := clear_doc.duplicate_object(snd_view, clear_doc.object_position(snd_view) + Vector3(8, 0, 8))
+	check(dup_clear >= 0 and clear_doc.set_object_label(dup_clear, ""), "duplicate labeled object and clear its label")
+	check((clear_doc.object_sequence(dup_clear) & 0x800000) != 0, "empty-label added object sets 0x800000 sequence bit")
+	var clear_exp := scratch.path_join("wave7-clear-added-label")
+	check(writer.export_native(clear_doc, clear_exp), "export added object with cleared label: " + writer.error)
+	var clear_reimp := Document.new()
+	check(clear_reimp.open(clear_exp.path_join(clear_doc.package.bzn_name)) and clear_reimp.object_label(dup_clear) == "",
+		"reimport added object with cleared label intact")
+
 	# 3. Wintage theme registry + compact mode + ConfigFile persistence + toolbar search
 	var saved_cfg_path: String = editor.settings_path
 	editor.settings_path = scratch.path_join("wave7-editor.cfg")
