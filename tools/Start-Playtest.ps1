@@ -80,8 +80,38 @@ foreach ($extension in 'ter','trn','inf') {
         throw "Map snapshot is missing .$extension"
     }
 }
+
+# --- Layout stage: classify the BZN before anything else is copied or launched ---
+# This mirrors the capability registry in app/formats/bzn_layouts.gd. Direct-native:
+# 1192. Conversion sources: 1196 through the VRV bzn_compat adapter. Every other
+# version is refused instead of launched unverified, and there is no bypass switch.
+$versionLine = Get-Content -LiteralPath $Mission -TotalCount 2 -Encoding ASCII | Select-Object -Last 1
+if ($versionLine -notmatch '^[0-9]+$') {
+    throw "The BZN header does not name a numeric save version (found '$versionLine')."
+}
+$bznVersion = [int]$versionLine
+$launchRoute = 'refuse'
+if ($bznVersion -eq 1192) {
+    $launchRoute = 'native'
+} elseif ($bznVersion -eq 1196) {
+    $launchRoute = 'convert'
+}
+if ($launchRoute -eq 'refuse') {
+    throw "BZN version $bznVersion has no verified 2.0.185 launch route. This launcher runs the native 1192 layout and the adapter-converted 1196 layout; every other version is refused instead of launched unverified."
+}
+if ($launchRoute -eq 'convert' -and -not $VrvSource) {
+    throw 'This 1196 map needs the verified VRV conversion adapter before 2.0.185 can load it. Pass -VrvSource pointing at the VRV checkout with tools/bzn_compat.py. Launching it unconverted fails with SAVEGAME CORRUPT.'
+}
+if ($launchRoute -eq 'convert' -and $KeepBznLayout) {
+    throw '-KeepBznLayout requires a confirmed native 2.0.185 layout (version 1192). This map is version 1196 and needs the verified conversion.'
+}
+
 $assetPlan = Get-PlaytestAssetPlan $Game $Mission $AssetProfile $VrvSource ([bool]$WithoutMissionScript)
-if ($ValidateOnly) { $assetPlan; return }
+if ($ValidateOnly) {
+    [pscustomobject]@{ LaunchRoute = $launchRoute; BznVersion = $bznVersion; KeepRequested = [bool]$KeepBznLayout; VrvConverterRequired = ($launchRoute -eq 'convert') } | Format-List
+    $assetPlan
+    return
+}
 if (Get-Process battlezone2 -ErrorAction SilentlyContinue) { throw 'Close your current Battlezone session before Playtest.' }
 if (-not (Get-Process steam -ErrorAction SilentlyContinue)) { throw 'Start Steam before launching this installation.' }
 
@@ -101,10 +131,13 @@ foreach ($extension in 'bzn','ter','trn','inf') {
     }
 }
 
+# --- Conversion stage: materialize the verified 185 layout in the staged snapshot copy ---
 $bznCopy = Join-Path $pack $missionName
-$versionLine = Get-Content -LiteralPath $bznCopy -TotalCount 2 -Encoding ASCII | Select-Object -Last 1
-if ($VrvSource -and -not $KeepBznLayout -and $versionLine -ne '1192') {
+if ($launchRoute -eq 'convert') {
     $converter = Join-Path (Resolve-Path -LiteralPath $VrvSource).Path 'tools/bzn_compat.py'
+    if (-not (Test-Path -LiteralPath $converter -PathType Leaf)) {
+        throw "The VRV layout converter is missing at $converter."
+    }
     $probe = & python $converter inspect $bznCopy
     if ($LASTEXITCODE) { throw 'VRV could not identify this BZN layout.' }
     $layout = $probe | ConvertFrom-Json
@@ -113,6 +146,12 @@ if ($VrvSource -and -not $KeepBznLayout -and $versionLine -ne '1192') {
         & python $converter convert $bznCopy --to 185 --output-dir $conversion
         if ($LASTEXITCODE) { throw 'BZN layout review or conversion failed.' }
         Copy-Item -LiteralPath (Join-Path $conversion $missionName) -Destination $bznCopy -Force
+        $verify = & python $converter inspect $bznCopy
+        if ($LASTEXITCODE) { throw 'The converted BZN could not be re-inspected.' }
+        $verified = $verify | ConvertFrom-Json
+        if ($verified.schema -ne '185') {
+            throw 'The conversion did not produce the verified 185 schema; the original BZN stays untouched.'
+        }
     }
 }
 

@@ -24,3 +24,5 @@ $lines | Select-Object -First 100 | Write-Output
 if ($process.ExitCode -ne 0 -or ($lines -match 'SCRIPT ERROR|^ERROR:').Count -gt 0 -or -not ($lines -contains 'FAILURES: 0')) {
     throw "Terrain workflow failed. See $log"
 }
+# The layout capability test runs the registry against every verified BZN fixture.
+& (Join-Path $PSScriptRoot 'Test-BznLayouts.ps1') -Godot $Godot

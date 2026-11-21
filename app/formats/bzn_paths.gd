@@ -1,9 +1,9 @@
 extends RefCounted
 
+const Layouts := preload("res://formats/bzn_layouts.gd")
 const MARKER := [2, 1, 0, 6, 2, 6, 0, 65, 105, 80, 97, 116, 104]
 const TRAILER_PREFIX := [1, 1, 0]
 const MAP_TRAILER_BYTES := 8031
-const BINARY_MAP_VERSIONS := [1192, 1196, 1197]
 const BINARY_MAP_HEADER := "saveType [1] =\n0\nbinarySave [1] =\ntrue\n"
 const MAX_PATHS := 2048
 const MAX_POINTS := 8191
@@ -21,7 +21,7 @@ func read(data: PackedByteArray, version: int) -> bool:
 	table_end = 0
 	table_start = 0
 	can_resize = false
-	if version not in BINARY_MAP_VERSIONS or data.size() > 16 * 1024 * 1024:
+	if not Layouts.supports_path_table(version) or data.size() > 16 * 1024 * 1024:
 		return false
 	var header := data.slice(0, 128).get_string_from_ascii().replace("\r", "").split("\n", true, 2)
 	if header.size() != 3 or not header[2].begins_with(BINARY_MAP_HEADER):

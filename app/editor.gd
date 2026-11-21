@@ -432,7 +432,7 @@ func _shortcut_input(event: InputEvent) -> void:
 					object_tool.set_active(true)
 					object_tool.selected = view
 					object_tool.refresh_marker()
-					report(object_tool.description())
+					report(object_tool.description() + " | Duplicated: object-count changes are EDITOR-ONLY for the verified 2.0.185 loader (it rejected changed counts with SAVEGAME CORRUPT).")
 				else:
 					report(document.error)
 			get_viewport().set_input_as_handled()
@@ -441,7 +441,7 @@ func _shortcut_input(event: InputEvent) -> void:
 			if object_tool.selected >= 0 and document.remove_object(object_tool.selected):
 				object_tool.selected = -1
 				object_tool.refresh_marker()
-				report("Object removed. Undo restores it.")
+				report("Object removed. Undo restores it. Object-count changes are EDITOR-ONLY for the verified 2.0.185 loader (it rejected changed counts with SAVEGAME CORRUPT).")
 			else:
 				report(document.error)
 			get_viewport().set_input_as_handled()
@@ -767,9 +767,19 @@ func export_package(folder: String) -> void:
 	var name := document.package.source_path.get_file().get_basename()
 	var target := folder.path_join(name + "-bzmag-" + writer.nonce().left(8))
 	if writer.export_native(document, target):
-		report("Exported and re-imported " + target + " | BZCC runtime compatibility unverified")
+		report("Exported and re-imported " + target + object_count_notice("BZCC runtime compatibility unverified"))
 	else:
 		report(writer.error)
+
+
+## Honest engine-compatibility notice for object count edits. The verified
+## 2.0.185 loader rejected changed counts with SAVEGAME CORRUPT, so additions
+## and removals stay editor-verified; transform-only edits remain verified.
+func object_count_notice(suffix: String) -> String:
+	if document == null or (document.object_additions.is_empty() and document.object_removals.is_empty()):
+		return " | " + suffix
+	return " | Adding %d and removing %d objects is EDITOR-ONLY: the verified 2.0.185 loader has rejected changed object counts with SAVEGAME CORRUPT. Transform-only edits remain engine-verified. %s" % [
+		document.object_additions.size(), document.object_removals.size(), suffix]
 
 
 func report(message: String) -> void:
@@ -983,6 +993,10 @@ func playtest() -> void:
 		return
 	var mission := target.path_join(document.package.source_path.get_file())
 	playtest_result = run.path_join("playtest.json")
+	var caution := ""
+	if document != null and (not document.object_additions.is_empty() or not document.object_removals.is_empty()):
+		caution = " Caution: %d added / %d removed objects are EDITOR-ONLY; the verified 2.0.185 loader has rejected changed object counts with SAVEGAME CORRUPT." % [
+			document.object_additions.size(), document.object_removals.size()]
 	var args := PackedStringArray(["-NoProfile", "-NonInteractive", "-File", script, "-Game", game, "-Mission", mission, "-ResultFile", playtest_result, "-PreparedRun", run, "-WaitForGame"])
 	if vrv != "":
 		args.append_array(PackedStringArray(["-VrvSource", vrv]))
@@ -996,7 +1010,7 @@ func playtest() -> void:
 		return
 	store_playtest_settings()
 	sync_actions()
-	report("Starting Battlezone with the current edits…")
+	report("Starting Battlezone with the current edits…" + caution)
 
 
 func poll_playtest() -> void:

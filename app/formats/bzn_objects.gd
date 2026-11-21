@@ -1,5 +1,6 @@
 extends RefCounted
 
+const Layouts := preload("res://formats/bzn_layouts.gd")
 const MAX_RECORDS := 150_000
 const MAX_OBJECTS := 8192
 const MAX_LABEL_LENGTH := 64
@@ -18,7 +19,7 @@ func read(data: PackedByteArray, version: int, stop: int) -> bool:
 	count_offset = -1
 	object_count = 0
 	insert_offset = -1
-	if version not in [1192, 1196] or stop <= 0 or stop > data.size():
+	if not Layouts.supports_object_table(version) or stop <= 0 or stop > data.size():
 		return false
 	var header := RegEx.new()
 	header.compile("^version \\[1\\] =\\r?\\n[0-9]+\\r?\\nsaveType \\[1\\] =\\r?\\n0\\r?\\nbinarySave \\[1\\] =\\r?\\ntrue\\r?\\n")

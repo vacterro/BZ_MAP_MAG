@@ -4,6 +4,7 @@ const Terrain := preload("res://formats/terrain_v5.gd")
 const BznPaths := preload("res://formats/bzn_paths.gd")
 const BznObjects := preload("res://formats/bzn_objects.gd")
 const Water := preload("res://formats/water_v5.gd")
+const Layouts := preload("res://formats/bzn_layouts.gd")
 const MAX_MEMBER_BYTES := 128 * 1024 * 1024
 const MAP_EXTENSIONS := ["bzn", "ter", "trn", "inf", "wat", "sky", "des", "dds", "tga", "png", "lua", "dll", "odf", "aip"]
 
@@ -15,6 +16,8 @@ var bzn_name := ""
 var terrain: Terrain
 var water: Water
 var bzn_version := 0
+var layout_id := ""
+var layout_reason := ""
 var mission_name := ""
 var granularity := 0.1
 var metadata: Dictionary = {}
@@ -58,6 +61,13 @@ func open(path: String) -> bool:
 	if not read_header(bzn_path):
 		return false
 	var bzn_bytes := FileAccess.get_file_as_bytes(bzn_path)
+	# The layout registry decides which save layouts this editor may decode.
+	# A matching version number alone never grants read or write capability.
+	var layout := Layouts.recognize(bzn_bytes)
+	layout_id = layout["profile"]
+	layout_reason = layout["reason"]
+	if layout_id.is_empty() or int(layout["version"]) != bzn_version or not Layouts.has_capability(layout_id, Layouts.INSPECT_PATHS):
+		return fail(layout_reason + " This editor decodes only the verified binary path layouts.")
 	if path_codec.read(bzn_bytes, bzn_version):
 		paths = path_codec.paths
 		var object_reader := BznObjects.new()
