@@ -39,6 +39,7 @@ var profile_explicit := false
 var detected_profile_info: Dictionary = {}
 var object_edits := {}
 var object_label_edits := {}
+var object_odf_edits := {}
 var object_additions: Array = []
 var object_removals := {}
 var next_object_id := 1
@@ -51,6 +52,8 @@ var undo_stack: Array[Dictionary] = []
 var redo_stack: Array[Dictionary] = []
 var stroke := {}
 var stroke_weights := {}
+var stroke_exact := {}
+var stroke_tick := 0
 var stroke_active := false
 var stroke_layer := Terrain.Layer.HEIGHT
 var layers: Array = [Graph.layer()]
@@ -91,6 +94,7 @@ func open(path: String) -> bool:
 	water_stroke = {}
 	water_stroke_active = false
 	object_label_edits = {}
+	object_odf_edits = {}
 	package = Package.new()
 	if not package.open(source):
 		return fail(package.error)
@@ -130,6 +134,8 @@ func open(path: String) -> bool:
 		if not read_object_edits(saved.get("objectEdits", {})):
 			return false
 		if not read_object_label_edits(saved.get("objectLabelEdits", {})):
+			return false
+		if not read_object_odf_edits(saved.get("objectOdfEdits", {})):
 			return false
 		if not read_object_removals(saved.get("objectRemovals", [])):
 			return false
@@ -298,9 +304,11 @@ func begin_stroke(layer := Terrain.Layer.HEIGHT) -> void:
 	stroke_layer = layer
 	stroke = {}
 	stroke_weights = {}
+	stroke_exact = {}
+	stroke_tick = 0
 
 
-func dab(point: Vector2, radius_m: float, amount: float, mode := Brush.OFFSET, shape := BrushShape.BELL, pressure := 1.0) -> void:
+func dab(point: Vector2, radius_m: float, amount: float, mode := Brush.OFFSET, shape := BrushShape.BELL, pressure := 1.0, accumulate := false) -> void:
 	if not stroke_active or stroke_layer != Terrain.Layer.HEIGHT or not is_finite(amount):
 		return
 	var terrain := package.terrain
@@ -308,7 +316,63 @@ func dab(point: Vector2, radius_m: float, amount: float, mode := Brush.OFFSET, s
 	var region := brush_region(point, radius_m)
 	if not region.has_area():
 		return
+	var limit := minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0)
 	var touched := false
+	if accumulate:
+		stroke_tick += 1
+		var p := clampf(pressure, 0.0, 1.0)
+		var smooth_updates: Array = []
+		for z in range(region.position.y, region.end.y):
+			for x in range(region.position.x, region.end.x):
+				var weight := brush_weight(point - Vector2(x, z), radius, shape)
+				if weight <= 0.0:
+					continue
+				if mode == Brush.SPRAY and hash(Vector3i(x, z, stroke_tick)) % 5 > 1:
+					continue
+				var index := z * terrain.dimensions.x + x
+				var old := terrain.heights[index]
+				var start: float = stroke.get(index, old)
+				var current_exact: float = stroke_exact.get(index, old)
+				var next_exact := current_exact
+				match mode:
+					Brush.OFFSET:
+						next_exact = clampf(current_exact + amount * p * weight, -limit, limit)
+					Brush.SMOOTH:
+						var avg := neighborhood_average_current(Vector2i(x, z), terrain.dimensions)
+						next_exact = lerpf(current_exact, avg, clampf(amount / 100.0, 0.0, 1.0) * p * weight)
+					Brush.FLATTEN, Brush.SPRAY:
+						var clamped_goal := clampf(amount, -limit, limit)
+						next_exact = lerpf(current_exact, clamped_goal, p * weight)
+						if absf(clamped_goal - next_exact) < package.granularity * 0.5:
+							next_exact = clamped_goal
+				if not is_finite(next_exact):
+					continue
+				var target := snappedf(next_exact, package.granularity)
+				if not is_finite(target) or absf(target) > limit:
+					continue
+				if mode == Brush.SMOOTH:
+					smooth_updates.append([index, start, next_exact, target, old])
+				else:
+					stroke_exact[index] = next_exact
+					if target != old:
+						stroke[index] = start
+						set_height(index, target)
+						touched = true
+		if mode == Brush.SMOOTH:
+			for item: Array in smooth_updates:
+				var idx: int = item[0]
+				var st: float = item[1]
+				var exact_val: float = item[2]
+				var tgt: float = item[3]
+				var prev: float = item[4]
+				stroke_exact[idx] = exact_val
+				if tgt != prev:
+					stroke[idx] = st
+					set_height(idx, tgt)
+					touched = true
+		if touched:
+			terrain_changed.emit(region)
+		return
 	for z in range(region.position.y, region.end.y):
 		for x in range(region.position.x, region.end.x):
 			var weight := brush_weight(point - Vector2(x, z), radius, shape)
@@ -331,12 +395,13 @@ func dab(point: Vector2, radius_m: float, amount: float, mode := Brush.OFFSET, s
 			if requested == start:
 				continue
 			var target := snappedf(lerpf(start, requested, weight), package.granularity)
-			if not is_finite(target) or absf(target) > minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0):
+			if not is_finite(target) or absf(target) > limit:
 				continue
 			if (requested > start and target <= old) or (requested < start and target >= old):
 				continue
 			stroke[index] = start
 			stroke_weights[index] = weight
+			stroke_exact[index] = target
 			set_height(index, target)
 			touched = true
 	if touched:
@@ -362,7 +427,14 @@ func brush_weight(offset: Vector2, radius: float, shape: int) -> float:
 	return influence if shape == BrushShape.CONE else smoothstep(0.0, 1.0, influence)
 
 
-func dab_material(point: Vector2, radius_m: float, value: int, shape: int, pressure: float, lane := 0) -> void:
+func _color_dist_sq(a: Color, b: Color) -> float:
+	var dr := a.r - b.r
+	var dg := a.g - b.g
+	var db := a.b - b.b
+	return dr * dr + dg * dg + db * db
+
+
+func dab_material(point: Vector2, radius_m: float, value: int, shape: int, pressure: float, lane := 0, accumulate := false) -> void:
 	if not stroke_active or stroke_layer not in [Terrain.Layer.COLOR, Terrain.Layer.TILES] or not is_finite(pressure):
 		return
 	var tiles := stroke_layer == Terrain.Layer.TILES
@@ -373,6 +445,8 @@ func dab_material(point: Vector2, radius_m: float, value: int, shape: int, press
 		return
 	var terrain := package.terrain
 	var radius := radius_m / Terrain.SPACING
+	var target_col := Color.BLACK if tiles else Terrain.word_color(value)
+	var p := clampf(pressure, 0.0, 1.0)
 	var changes := {}
 	for z in range(region.position.y, region.end.y):
 		for x in range(region.position.x, region.end.x):
@@ -380,7 +454,9 @@ func dab_material(point: Vector2, radius_m: float, value: int, shape: int, press
 			if weight <= 0:
 				continue
 			var index := terrain.block_at(Vector2i(x, z)) if tiles else z * terrain.dimensions.x + x
-			if changes.has(index) or weight <= stroke_weights.get(index, 0.0):
+			if changes.has(index):
+				continue
+			if not accumulate and weight <= stroke_weights.get(index, 0.0):
 				continue
 			var current := terrain.material_value(stroke_layer, index)
 			var start: int = stroke.get(index, current)
@@ -389,10 +465,23 @@ func dab_material(point: Vector2, radius_m: float, value: int, shape: int, press
 				var shift := lane * 4
 				paint = (start & ~(15 << shift)) | (value << shift)
 			else:
-				paint = Terrain.rgb_word(Terrain.word_color(start).lerp(Terrain.word_color(value), weight * clampf(pressure, 0.0, 1.0)))
+				var current_col: Color = stroke_exact.get(index, Terrain.word_color(current))
+				var next_col: Color
+				if accumulate:
+					next_col = current_col.lerp(target_col, clampf(weight * p, 0.0, 1.0))
+					if _color_dist_sq(next_col, target_col) < 0.00001:
+						next_col = target_col
+					stroke_exact[index] = next_col
+				else:
+					next_col = Terrain.word_color(start).lerp(target_col, weight * p)
+					if stroke_exact.has(index) and _color_dist_sq(next_col, target_col) >= _color_dist_sq(current_col, target_col):
+						continue
+					stroke_exact[index] = next_col
+				paint = Terrain.rgb_word(next_col)
 			if paint != current:
 				stroke[index] = start
-				stroke_weights[index] = weight
+				if not accumulate:
+					stroke_weights[index] = weight
 				changes[index] = paint
 	apply_materials(stroke_layer, changes)
 
@@ -443,10 +532,24 @@ func neighborhood_average(point: Vector2i, size: Vector2i) -> float:
 	return sum / count
 
 
+func neighborhood_average_current(point: Vector2i, size: Vector2i) -> float:
+	var sum := 0.0
+	var count := 0
+	for z in range(maxi(0, point.y - 1), mini(size.y, point.y + 2)):
+		for x in range(maxi(0, point.x - 1), mini(size.x, point.x + 2)):
+			var index := z * size.x + x
+			sum += float(stroke_exact.get(index, package.terrain.heights[index]))
+			count += 1
+	return sum / count
+
+
 func end_stroke() -> void:
 	if not stroke_active:
 		return
 	stroke_active = false
+	stroke_exact = {}
+	stroke_weights = {}
+	stroke_tick = 0
 	if stroke.is_empty():
 		return
 	var after := {}
@@ -534,6 +637,8 @@ func apply_history(change: Dictionary, direction: String) -> void:
 		water_changed.emit()
 	elif change.has("target_profile"):
 		_apply_target_profile(change[direction])
+	elif change.has("profile_conversion"):
+		_apply_profile_conversion(change[direction])
 	else:
 		var materials := {}
 		for layer: int in change.get("materials", {}):
@@ -976,6 +1081,23 @@ func read_object_label_edits(saved: Variant) -> bool:
 	return true
 
 
+func read_object_odf_edits(saved: Variant) -> bool:
+	if saved == null:
+		return true
+	if not saved is Dictionary or saved.size() > package.objects.size():
+		return fail("Invalid project object ODF edits.")
+	for key: String in saved:
+		var index := key.to_int()
+		var value: Variant = saved[key]
+		if str(index) != key or index < 0 or index >= package.objects.size() or not (value is String):
+			return fail("Invalid saved object ODF edit.")
+		var clean := String(value).strip_edges()
+		if clean.is_empty() or clean.length() > 127 or clean.get_file() != clean or ":" in clean:
+			return fail("Invalid saved object ODF identifier.")
+		set_base_object_odf(index, clean)
+	return true
+
+
 func read_water_edits(saved: Variant) -> bool:
 	if package.water == null:
 		return true if saved == null or (saved is Dictionary and saved.is_empty()) else fail("This map has no native water.")
@@ -1289,7 +1411,100 @@ func object_transform(view: int) -> Transform3D:
 
 
 func object_odf(view: int) -> String:
+	if object_is_added(view):
+		var add := object_addition(view)
+		if add.has("odf") and not String(add["odf"]).is_empty():
+			return String(add["odf"])
+		var tpl_idx := int(add.get("template", -1))
+		if object_odf_edits.has(tpl_idx):
+			return String(object_odf_edits[tpl_idx])
+	else:
+		var base := object_actual_index(view)
+		if object_odf_edits.has(base):
+			return String(object_odf_edits[base])
 	return String(object_template(view).get("odf", ""))
+
+
+func set_base_object_odf(base: int, new_odf: String) -> void:
+	if base < 0 or base >= package.objects.size():
+		return
+	var orig := String(package.objects[base].get("odf", ""))
+	if orig == new_odf or new_odf.is_empty():
+		object_odf_edits.erase(base)
+	else:
+		object_odf_edits[base] = new_odf
+
+
+func convert_objects_to_profile(target_mod_id: String, target_mission_id: String = "", manual_map: Dictionary = {}, allow_drop_vrv: bool = false) -> Dictionary:
+	if stroke_active or has_preview():
+		fail("Finish the current terrain edit before converting objects.")
+		return {"ok": false, "error": error}
+	var tgt_mod := target_mod_id.strip_edges().to_lower()
+	var tgt_mis := target_mission_id.strip_edges().to_lower() if not target_mission_id.strip_edges().is_empty() else mission_profile
+	if not valid_mod_profile_id(tgt_mod) or not valid_mission_profile_id(tgt_mis):
+		fail("Invalid target profile identifiers for conversion.")
+		return {"ok": false, "error": error}
+	var effective_entries: Array = []
+	var base_for_slot: Array[int] = []
+	for base in package.objects.size():
+		if object_removals.has(base):
+			continue
+		var entry: Dictionary = package.objects[base].duplicate(true)
+		if object_odf_edits.has(base):
+			entry["odf"] = String(object_odf_edits[base])
+		if object_label_edits.has(base):
+			entry["label"] = String(object_label_edits[base])
+		effective_entries.append(entry)
+		base_for_slot.append(base)
+	var ptr_counts := path_pointer_counts()
+	var plan := ModRegistry.plan_bzn_odf_conversion(effective_entries, ptr_counts, tgt_mod, manual_map, allow_drop_vrv)
+	if not bool(plan.get("ok", false)):
+		var msg := "; ".join(plan.get("unsupported", ["Unsupported ODF conversion"]))
+		fail(msg)
+		return {"ok": false, "error": msg, "plan": plan}
+	var before_state := {
+		"engine": engine_profile,
+		"mod": mod_profile,
+		"mission": mission_profile,
+		"explicit": profile_explicit,
+		"odf_edits": object_odf_edits.duplicate(),
+		"removals": object_removals.duplicate(),
+	}
+	var next_odf_edits := object_odf_edits.duplicate()
+	var plan_edits: Dictionary = plan["odfEdits"]
+	for slot_idx: int in plan_edits:
+		var base_idx := base_for_slot[slot_idx]
+		var next_odf := String(plan_edits[slot_idx])
+		if String(package.objects[base_idx].get("odf", "")) == next_odf:
+			next_odf_edits.erase(base_idx)
+		else:
+			next_odf_edits[base_idx] = next_odf
+	var next_removals := object_removals.duplicate()
+	for slot_idx: int in plan["removals"]:
+		next_removals[base_for_slot[slot_idx]] = true
+	var after_state := {
+		"engine": engine_profile,
+		"mod": tgt_mod,
+		"mission": tgt_mis,
+		"explicit": true,
+		"odf_edits": next_odf_edits,
+		"removals": next_removals,
+	}
+	if before_state != after_state:
+		push_history({"profile_conversion": true, "before": before_state, "after": after_state})
+		_apply_profile_conversion(after_state)
+	return {"ok": true, "error": "", "plan": plan, "replacedCount": plan_edits.size(), "removedCount": (plan["removals"] as Array).size()}
+
+
+func _apply_profile_conversion(state: Dictionary) -> void:
+	engine_profile = String(state["engine"])
+	mod_profile = String(state["mod"])
+	mission_profile = String(state["mission"])
+	profile_explicit = bool(state["explicit"])
+	object_odf_edits = (state["odf_edits"] as Dictionary).duplicate()
+	object_removals = (state["removals"] as Dictionary).duplicate()
+	objects_changed.emit()
+	profile_changed.emit()
 
 
 func object_label(view: int) -> String:
@@ -1326,7 +1541,7 @@ func object_pool_reference(view: int) -> int:
 
 
 func has_object_file_edits() -> bool:
-	return not object_edits.is_empty() or not object_label_edits.is_empty() or not object_removals.is_empty() or not object_additions.is_empty()
+	return not object_edits.is_empty() or not object_label_edits.is_empty() or not object_odf_edits.is_empty() or not object_removals.is_empty() or not object_additions.is_empty()
 
 
 func move_object(view: int, position: Vector3) -> bool:

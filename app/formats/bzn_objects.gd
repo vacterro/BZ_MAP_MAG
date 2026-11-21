@@ -204,10 +204,11 @@ static func write_transform(data: PackedByteArray, matrix_offset: int, origin_of
 	data.encode_float(origin_offset + 8, transform.origin.z)
 
 
-static func build_block(source: PackedByteArray, entry: Dictionary, sequence: int, label: String, transform: Transform3D, pointer_id: int = -1) -> PackedByteArray:
-	var result := string_record(entry["odf"])
+static func build_block(source: PackedByteArray, entry: Dictionary, sequence: int, label: String, transform: Transform3D, pointer_id: int = -1, odf_override: String = "", team_override: int = -1) -> PackedByteArray:
+	var use_odf := odf_override if not odf_override.is_empty() else String(entry["odf"])
+	var result := string_record(use_odf)
 	result.append_array(tag_record(4, u32(sequence)))
-	var team: int = entry["team"]
+	var team: int = team_override if team_override >= 0 else int(entry["team"])
 	if entry["team_is_byte"]:
 		result.append_array(tag_record(2, PackedByteArray([team & 0xff])))
 	else:
@@ -229,8 +230,57 @@ static func build_block(source: PackedByteArray, entry: Dictionary, sequence: in
 	return result
 
 
+static func build_spawnpoint_block(sequence: int, transform: Transform3D, pointer_id: int, team: int = 0) -> PackedByteArray:
+	var result := string_record("pspwn_1")
+	result.append_array(tag_record(4, u32(sequence | 0x800000)))
+	result.append_array(tag_record(2, PackedByteArray([team & 0xff])))
+	result.append_array(tag_record(1, PackedByteArray([0])))
+	result.append_array(tag_record(8, u32(pointer_id)))
+	var matrix := PackedByteArray()
+	matrix.resize(64)
+	matrix.encode_float(0, 1.0)
+	matrix.encode_float(20, 1.0)
+	matrix.encode_float(40, 1.0)
+	matrix.encode_float(60, 1.0)
+	write_transform(matrix, 0, 48, transform)
+	result.append(12)
+	result.append_array(u16(64))
+	result.append_array(matrix)
+	var spawn_tail := PackedByteArray()
+	spawn_tail.resize(32)
+	var prefix := "Spawn".to_ascii_buffer()
+	for i in prefix.size():
+		spawn_tail[i] = prefix[i]
+	var root_str := "myroot".to_ascii_buffer()
+	for i in root_str.size():
+		spawn_tail[6 + i] = root_str[i]
+	spawn_tail[31] = 2
+	result.append_array(tag_record(2, spawn_tail))
+	return result
+
+
+static func patch_mission_dll(source: PackedByteArray, insert_offset: int, table_start: int, new_dll: String) -> PackedByteArray:
+	# Framing between insert_offset and table_start:
+	# [0, 640] groupTargets (643 bytes) -> string(dllName) -> [4, 4] post-DLL int (7 bytes) -> [4, 4] pathCount (7 bytes).
+	var dll_start := insert_offset + 643
+	var dll_end := table_start - 14
+	if insert_offset < 0 or dll_start > dll_end or dll_end < 0 or table_start > source.size():
+		return PackedByteArray()
+	if source[insert_offset] != 0 or source.decode_u16(insert_offset + 1) != 640:
+		return PackedByteArray()
+	if source[dll_end] != 4 or source.decode_u16(dll_end + 1) != 4:
+		return PackedByteArray()
+	var clean_dll := new_dll.strip_edges()
+	var encoded_dll := PackedByteArray([2, 1, 0, 0]) if clean_dll.is_empty() else string_record(clean_dll)
+	var result := PackedByteArray()
+	result.append_array(source.slice(0, dll_start))
+	result.append_array(encoded_dll)
+	result.append_array(source.slice(dll_end))
+	return result
+
+
 static func patch_objects(source: PackedByteArray, entries: Array[Dictionary], transforms: Dictionary,
-		removals: Array, insert_blocks: Array, count_offset: int, insert_offset: int, label_edits: Dictionary = {}) -> Dictionary:
+		removals: Array, insert_blocks: Array, count_offset: int, insert_offset: int, label_edits: Dictionary = {}, odf_edits: Dictionary = {}) -> Dictionary:
 	if count_offset < 0 or insert_offset <= 0 or insert_offset + 7 > source.size() or count_offset + 4 > insert_offset:
 		return {}
 	var result := PackedByteArray()
@@ -257,16 +307,20 @@ static func patch_objects(source: PackedByteArray, entries: Array[Dictionary], t
 			return {}
 		result.append_array(source.slice(cursor, start))
 		var transform: Transform3D = transforms[index] if transforms.has(index) else entry["transform"]
-		if label_edits.has(index):
-			var new_label := String(label_edits[index])
+		if label_edits.has(index) or odf_edits.has(index):
+			var new_label := String(label_edits[index]) if label_edits.has(index) else String(entry["label"])
 			if new_label.length() > 128:
 				return {}
+			var new_odf := String(odf_edits[index]).strip_edges() if odf_edits.has(index) else String(entry["odf"])
+			if new_odf.is_empty() or new_odf.length() > 127 or new_odf.get_file() != new_odf or ":" in new_odf:
+				return {}
 			var seq := int(entry["sequence"])
-			if new_label.is_empty():
-				seq = seq | 0x800000
-			else:
-				seq = seq & ~0x800000
-			var rebuilt := build_block(source, entry, seq, new_label, transform)
+			if label_edits.has(index):
+				if new_label.is_empty():
+					seq = seq | 0x800000
+				else:
+					seq = seq & ~0x800000
+			var rebuilt := build_block(source, entry, seq, new_label, transform, int(entry["flag8"]), new_odf, int(entry["team"]))
 			result.append_array(rebuilt)
 			shift += rebuilt.size() - (end - start)
 		else:

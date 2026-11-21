@@ -6,9 +6,9 @@ const TILE_PIXELS := 128
 const SHADER := preload("res://render/terrain_surface.gdshader")
 
 
-func load_native(game: String, map_folder: String, adapter: String, terrain: Terrain, settings: Dictionary) -> Dictionary:
+func load_native(game: String, map_folder: String, adapter: String, terrain: Terrain, settings: Dictionary, extra_roots: Array = [], mod_profile: String = "stock") -> Dictionary:
 	var assets := Assets.new()
-	assets.index_game(game, map_folder)
+	assets.index_game(game, map_folder, extra_roots, mod_profile)
 	return layers(terrain, settings, assets.index, adapter)
 
 

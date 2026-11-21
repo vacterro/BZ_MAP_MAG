@@ -16,21 +16,21 @@ const VRV_WORKSHOP_ID := "3820486276"
 const ENGINE_PROFILES := {
 	"bzcc-2.0.185": {
 		"id": "bzcc-2.0.185",
-		"displayName": "BZCC 2.0.185 (Verified)",
+		"displayName": "BZCC 2.0.185",
 		"version": "2.0.185",
 		"verified": true,
 		"supportedRoutes": ["native-1192", "convert-1196"],
 	},
 	"bzcc-auto-detected": {
 		"id": "bzcc-auto-detected",
-		"displayName": "BZCC (Auto-detected)",
+		"displayName": "BZCC (Auto)",
 		"version": "auto",
 		"verified": false,
 		"supportedRoutes": [],
 	},
 	"bzcc-unknown-readonly": {
 		"id": "bzcc-unknown-readonly",
-		"displayName": "Unknown / No Game Install (Read-only Playtest)",
+		"displayName": "No Install (Read-only)",
 		"version": "unknown",
 		"verified": false,
 		"supportedRoutes": [],
@@ -515,10 +515,515 @@ func _dfs_cycle(node: String, state: Dictionary, cycles: Array[String]) -> void:
 	state[node] = 2
 
 
+const STOCK_KNOWN_DLLS := ["strategy02.dll", "instant.dll", "mpinstant.dll", "deathmatch01.dll", "stratctf.dll", "luamission.dll"]
+
+## Verified semantic ODF conversion table (vsr -> stock).
+## Every entry is backed by direct ODF inspection of Workshop 3532748119
+## (VSR Standard Recycler Variants) and Stock BZ2R/bz2r_res. Heuristic string
+## stripping (e.g. odf.replace("_vsr", "")) is strictly forbidden.
+const VERIFIED_VSR_TO_STOCK_ODFS := {
+	"ivtank_vsr": {
+		"sourceOdf": "ivtank_vsr", "targetOdf": "ivtank", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "ivtank", "targetClass": "wingman", "classFamily": "craft", "faction": "ISDF",
+		"geometry": "ivtank00.fbx", "missionRole": "combat_craft", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 ivtank_vsr.odf (classLabel=ivtank) -> Stock bz2r_res ivtank.odf (ivtank00.fbx)",
+	},
+	"ivscout_vsr": {
+		"sourceOdf": "ivscout_vsr", "targetOdf": "ivscout", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "ivscout", "targetClass": "wingman", "classFamily": "craft", "faction": "ISDF",
+		"geometry": "ivscout00.fbx", "missionRole": "scout_craft", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 ivscout_vsr.odf (classLabel=ivscout) -> Stock bz2r_res ivscout.odf (ivscout00.fbx)",
+	},
+	"ivmisl_vsr": {
+		"sourceOdf": "ivmisl_vsr", "targetOdf": "ivmisl", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "ivmisl", "targetClass": "wingman", "classFamily": "craft", "faction": "ISDF",
+		"geometry": "ivmisl00.fbx", "missionRole": "combat_craft", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 ivmisl_vsr.odf (classLabel=ivmisl) -> Stock bz2r_res ivmisl.odf (ivmisl00.fbx)",
+	},
+	"ivturr_vsr": {
+		"sourceOdf": "ivturr_vsr", "targetOdf": "ivturr", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "ivturr", "targetClass": "turrettank", "classFamily": "craft", "faction": "ISDF",
+		"geometry": "ivturr00.fbx", "missionRole": "turret_craft", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 ivturr_vsr.odf (classLabel=ivturr) -> Stock bz2r_res ivturr.odf (ivturr00.fbx)",
+	},
+	"ivscav_vsr": {
+		"sourceOdf": "ivscav_vsr", "targetOdf": "ivscav", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "ivscav", "targetClass": "scavenger", "classFamily": "craft", "faction": "ISDF",
+		"geometry": "ivscav00.fbx", "missionRole": "scavenger", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 ivscav_vsr.odf (classLabel=ivscav) -> Stock bz2r_res ivscav.odf (ivscav00.fbx)",
+	},
+	"ivcons_vsr": {
+		"sourceOdf": "ivcons_vsr", "targetOdf": "ivcons", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "ivcons", "targetClass": "constructionrig", "classFamily": "craft", "faction": "ISDF",
+		"geometry": "ivcons_skel.fbx", "missionRole": "constructor", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 ivcons_vsr.odf (classLabel=ivcons) -> Stock bz2r_res ivcons.odf (ivcons_skel.fbx)",
+	},
+	"ivserv_vsr": {
+		"sourceOdf": "ivserv_vsr", "targetOdf": "ivserv", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "ivserv", "targetClass": "service", "classFamily": "craft", "faction": "ISDF",
+		"geometry": "ivserv00.fbx", "missionRole": "service_craft", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 ivserv_vsr.odf (classLabel=ivserv) -> Stock bz2r_res ivserv.odf (ivserv00.fbx)",
+	},
+	"ivatank_vsr": {
+		"sourceOdf": "ivatank_vsr", "targetOdf": "ivatank", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "ivatank", "targetClass": "assaulttank", "classFamily": "craft", "faction": "ISDF",
+		"geometry": "ivatank00.fbx", "missionRole": "combat_craft", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 ivatank_vsr.odf (classLabel=ivatank) -> Stock bz2r_res ivatank.odf (ivatank00.fbx)",
+	},
+	"ivrckt_vsr": {
+		"sourceOdf": "ivrckt_vsr", "targetOdf": "ivrckt", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "ivrckt", "targetClass": "wingman", "classFamily": "craft", "faction": "ISDF",
+		"geometry": "ivrckt00.fbx", "missionRole": "combat_craft", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 ivrckt_vsr.odf (classLabel=ivrckt) -> Stock bz2r_res ivrckt.odf (ivrckt00.fbx)",
+	},
+	"ivmbike_vsr": {
+		"sourceOdf": "ivmbike_vsr", "targetOdf": "ivmbike", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "ivmbike", "targetClass": "wingman", "classFamily": "craft", "faction": "ISDF",
+		"geometry": "ivmbike00.fbx", "missionRole": "combat_craft", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 ivmbike_vsr.odf (classLabel=ivmbike) -> Stock bz2r_res ivmbike.odf (ivmbike00.fbx)",
+	},
+	"ivwalk_vsr": {
+		"sourceOdf": "ivwalk_vsr", "targetOdf": "ivwalk", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "ivwalk", "targetClass": "walker", "classFamily": "craft", "faction": "ISDF",
+		"geometry": "ivwalk_skel.fbx", "missionRole": "combat_craft", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 ivwalk_vsr.odf (classLabel=ivwalk) -> Stock bz2r_res ivwalk.odf (ivwalk_skel.fbx)",
+	},
+	"ivrecy_vsr": {
+		"sourceOdf": "ivrecy_vsr", "targetOdf": "ivrecy", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "ivrecy", "targetClass": "recyclervehicle", "classFamily": "craft", "faction": "ISDF",
+		"geometry": "ivrecy00.fbx", "missionRole": "recycler_vehicle", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 ivrecy_vsr.odf (classLabel=ivrecy) -> Stock bz2r_res ivrecy.odf (ivrecy00.fbx)",
+	},
+	"ibrecy_vsr": {
+		"sourceOdf": "ibrecy_vsr", "targetOdf": "ibrecy", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "ibrecy", "targetClass": "recycler", "classFamily": "building", "faction": "ISDF",
+		"geometry": "ibrecy00.fbx", "missionRole": "recycler_building", "requiredState": "building_binary_tail",
+		"evidence": "VSR 3532748119 ibrecy_vsr.odf (classLabel=ibrecy) -> Stock bz2r_res ibrecy.odf (ibrecy00.fbx)",
+	},
+	"fvscout_vsr": {
+		"sourceOdf": "fvscout_vsr", "targetOdf": "fvscout", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "fvscout", "targetClass": "morphtank", "classFamily": "craft", "faction": "Scion",
+		"geometry": "fvscout_skel.fbx", "missionRole": "scout_craft", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 fvscout_vsr.odf (classLabel=fvscout) -> Stock bz2r_res fvscout.odf (fvscout_skel.fbx)",
+	},
+	"fvtank_vsr": {
+		"sourceOdf": "fvtank_vsr", "targetOdf": "fvtank", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "fvtank", "targetClass": "morphtank", "classFamily": "craft", "faction": "Scion",
+		"geometry": "fvtank_skel.fbx", "missionRole": "combat_craft", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 fvtank_vsr.odf (classLabel=fvtank) -> Stock bz2r_res fvtank.odf (fvtank_skel.fbx)",
+	},
+	"fvsent_vsr": {
+		"sourceOdf": "fvsent_vsr", "targetOdf": "fvsent", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "fvsent", "targetClass": "morphtank", "classFamily": "craft", "faction": "Scion",
+		"geometry": "fvsent_skel.fbx", "missionRole": "combat_craft", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 fvsent_vsr.odf (classLabel=fvsent) -> Stock bz2r_res fvsent.odf (fvsent_skel.fbx)",
+	},
+	"fvturr_vsr": {
+		"sourceOdf": "fvturr_vsr", "targetOdf": "fvturr", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "fvturr", "targetClass": "turrettank", "classFamily": "craft", "faction": "Scion",
+		"geometry": "fvturr_skel.fbx", "missionRole": "turret_craft", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 fvturr_vsr.odf (classLabel=fvturr) -> Stock bz2r_res fvturr.odf (fvturr_skel.fbx)",
+	},
+	"fvscav_vsr": {
+		"sourceOdf": "fvscav_vsr", "targetOdf": "fvscav", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "fvscav", "targetClass": "scavenger", "classFamily": "craft", "faction": "Scion",
+		"geometry": "fvscav00.fbx", "missionRole": "scavenger", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 fvscav_vsr.odf (classLabel=fvscav) -> Stock bz2r_res fvscav.odf (fvscav00.fbx)",
+	},
+	"fvcons_vsr": {
+		"sourceOdf": "fvcons_vsr", "targetOdf": "fvcons", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "fvcons", "targetClass": "constructionrig", "classFamily": "craft", "faction": "Scion",
+		"geometry": "fvconst_skel.fbx", "missionRole": "constructor", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 fvcons_vsr.odf (classLabel=fvcons) -> Stock bz2r_res fvcons.odf (fvconst_skel.fbx)",
+	},
+	"fvrecy_vsr": {
+		"sourceOdf": "fvrecy_vsr", "targetOdf": "fvrecy", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "fvrecy", "targetClass": "recyclervehicle", "classFamily": "craft", "faction": "Scion",
+		"geometry": "fvrecy00.fbx", "missionRole": "recycler_vehicle", "requiredState": "craft_binary_tail",
+		"evidence": "VSR 3532748119 fvrecy_vsr.odf (classLabel=fvrecy) -> Stock bz2r_res fvrecy.odf (fvrecy00.fbx)",
+	},
+	"fbrecy_vsr": {
+		"sourceOdf": "fbrecy_vsr", "targetOdf": "fbrecy", "sourceMod": "vsr", "targetMod": "stock",
+		"sourceClass": "fbrecy", "targetClass": "recycler", "classFamily": "building", "faction": "Scion",
+		"geometry": "fbrecy00.fbx", "missionRole": "recycler_building", "requiredState": "building_binary_tail",
+		"evidence": "VSR 3532748119 fbrecy_vsr.odf (classLabel=fbrecy) -> Stock bz2r_res fbrecy.odf (fbrecy00.fbx)",
+	},
+}
+
+const VERIFIED_STOCK_ODF_FAMILIES := {
+	"player": "craft",
+	"ivtank": "craft", "ivscout": "craft", "ivmisl": "craft", "ivturr": "craft",
+	"ivscav": "craft", "ivcons": "craft", "ivserv": "craft", "ivatank": "craft",
+	"ivrckt": "craft", "ivmbike": "craft", "ivwalk": "craft", "ivapc": "craft",
+	"ivrecy": "craft", "ivrecy_m": "craft", "ivrecycpu": "craft", "ivtug": "craft",
+	"ivintc": "craft", "ivbomb": "craft", "ivdrop": "craft", "ivdrop_fly": "craft",
+	"ivdrop_land": "craft", "ivdrop_sh": "craft", "ivpdrop": "craft",
+	"fvscout": "craft", "fvtank": "craft", "fvsent": "craft", "fvturr": "craft",
+	"fvscav": "craft", "fvcons": "craft", "fvserv": "craft", "fvatank": "craft",
+	"fvarch": "craft", "fvwalk": "craft", "fvartl": "craft", "fvrecy": "craft",
+	"fvrecy_m": "craft", "fvrecycpu": "craft", "fvtug": "craft",
+	"ibrecy": "building", "ibrecy_m": "building", "ibfact": "building", "ibsbay": "building",
+	"ibbomb": "building", "ibtele": "building", "ibtcen": "building", "ibtrain": "building",
+	"ibarmo": "building", "ibcbun": "building", "ibgtow": "building", "ibpgen": "building",
+	"ibbstr": "building", "ibbseg": "building", "ibcrat00": "building", "ibcrat01": "building",
+	"iblite": "building", "ibscav": "building", "ibscup": "building", "ibwseg": "building",
+	"ibwstr": "building", "fbrecy": "building", "fbrecy_m": "building", "fbfact": "building",
+	"fbkiln": "building", "fbforb": "building", "fbdowe": "building", "fbstro": "building",
+	"fbover": "building", "fbspir": "building", "fbantm": "building", "fbjamm": "building",
+	"fbscav": "building", "fbscup": "building", "ipdrop": "building",
+	"ispilo": "pilot", "issold": "pilot", "fspilo": "pilot", "fssold": "pilot",
+	"becras02a": "building", "perecy": "building", "petank": "building", "pescav": "building", "peapc": "building",
+	"pspwn_1": "spawnpoint",
+	"npscrx": "pool", "npscr1": "pool", "npscr2": "pool", "npscr3": "pool",
+	"npba": "pool", "uepool01": "pool", "tepool01": "pool", "cpool01": "pool",
+}
+
+
+static func classify_odf_family(odf: String) -> String:
+	var clean := odf.strip_edges().to_lower()
+	if clean.ends_with(".odf"):
+		clean = clean.substr(0, clean.length() - 4)
+	if VERIFIED_STOCK_ODF_FAMILIES.has(clean):
+		return String(VERIFIED_STOCK_ODF_FAMILIES[clean])
+	if VERIFIED_VSR_TO_STOCK_ODFS.has(clean):
+		return String(VERIFIED_VSR_TO_STOCK_ODFS[clean]["classFamily"])
+	if clean == "vrv_sndpoint" or clean.begins_with("vrv_"):
+		return "vrv_runtime"
+	if clean.begins_with("pspwn"):
+		return "spawnpoint"
+	if "pool" in clean or clean.begins_with("npscr"):
+		return "pool"
+	return ""
+
+
+static func is_verified_stock_odf(odf: String) -> bool:
+	var clean := odf.strip_edges().to_lower()
+	if clean.ends_with(".odf"):
+		clean = clean.substr(0, clean.length() - 4)
+	if clean.is_empty():
+		return false
+	if clean.begins_with("vrv_") or clean == "vrv_sndpoint" or clean.ends_with("_vsr") or "_vsr" in clean or ":" in clean:
+		return false
+	if VERIFIED_STOCK_ODF_FAMILIES.has(clean):
+		return true
+	return _is_likely_stock_odf(clean)
+
+
+## Looks up a verified semantic conversion for a single ODF from source_mod to target_mod.
+## Never performs heuristic name-stripping (such as odf.replace("_vsr", "")).
+static func lookup_verified_odf_conversion(source_odf: String, target_mod: String = "stock", manual_map: Dictionary = {}) -> Dictionary:
+	var clean := source_odf.strip_edges().to_lower()
+	if clean.ends_with(".odf"):
+		clean = clean.substr(0, clean.length() - 4)
+	var tgt_mod := target_mod.strip_edges().to_lower()
+	if manual_map.has(clean) or manual_map.has(source_odf):
+		var chosen_raw := String(manual_map.get(clean, manual_map.get(source_odf, ""))).strip_edges().to_lower()
+		if chosen_raw.ends_with(".odf"):
+			chosen_raw = chosen_raw.substr(0, chosen_raw.length() - 4)
+		if chosen_raw.is_empty():
+			return {"status": "missing_target", "sourceOdf": source_odf, "targetOdf": "", "error": "Manual replacement ODF for '%s' cannot be empty." % source_odf}
+		if tgt_mod == "stock" and not VERIFIED_STOCK_ODF_FAMILIES.has(chosen_raw):
+			return {"status": "missing_target", "sourceOdf": source_odf, "targetOdf": chosen_raw, "error": "Manual replacement '%s' is not a verified Stock ODF." % chosen_raw}
+		var src_fam := classify_odf_family(clean)
+		var tgt_fam := classify_odf_family(chosen_raw)
+		if not src_fam.is_empty() and not tgt_fam.is_empty() and src_fam != tgt_fam:
+			return {
+				"status": "incompatible_class",
+				"sourceOdf": source_odf,
+				"targetOdf": chosen_raw,
+				"sourceClass": src_fam,
+				"targetClass": tgt_fam,
+				"error": "Incompatible object class: cannot replace '%s' (%s) with '%s' (%s)." % [source_odf, src_fam, chosen_raw, tgt_fam],
+			}
+		return {
+			"status": "verified_manual",
+			"sourceOdf": source_odf,
+			"targetOdf": chosen_raw,
+			"sourceMod": "custom",
+			"targetMod": tgt_mod,
+			"classFamily": tgt_fam if not tgt_fam.is_empty() else src_fam,
+			"classCompatible": true,
+			"evidence": "Verified manual same-class replacement %s -> %s" % [source_odf, chosen_raw],
+			"error": "",
+		}
+	if tgt_mod == "stock":
+		if is_verified_stock_odf(clean):
+			return {
+				"status": "native",
+				"sourceOdf": source_odf,
+				"targetOdf": source_odf,
+				"sourceMod": "stock",
+				"targetMod": "stock",
+				"classFamily": classify_odf_family(clean),
+				"classCompatible": true,
+				"error": "",
+			}
+		if VERIFIED_VSR_TO_STOCK_ODFS.has(clean):
+			var rec: Dictionary = VERIFIED_VSR_TO_STOCK_ODFS[clean].duplicate(true)
+			rec["status"] = "verified"
+			rec["classCompatible"] = true
+			rec["error"] = ""
+			return rec
+		if clean == "vrv_sndpoint" or clean.begins_with("vrv_"):
+			return {
+				"status": "unsupported_vrv",
+				"sourceOdf": source_odf,
+				"targetOdf": "",
+				"sourceMod": "vrv",
+				"targetMod": "stock",
+				"classCompatible": false,
+				"error": "VRV runtime object '%s' has no Stock counterpart." % source_odf,
+			}
+		return {
+			"status": "unverified",
+			"sourceOdf": source_odf,
+			"targetOdf": "",
+			"sourceMod": "vsr" if "_vsr" in clean else "unknown",
+			"targetMod": "stock",
+			"classCompatible": false,
+			"error": "No verified Stock counterpart for '%s' (heuristic _vsr stripping is prohibited)." % source_odf,
+		}
+	elif tgt_mod == "vsr":
+		if clean == "vrv_sndpoint" or clean.begins_with("vrv_"):
+			return {
+				"status": "unsupported_vrv",
+				"sourceOdf": source_odf,
+				"targetOdf": "",
+				"sourceMod": "vrv",
+				"targetMod": "vsr",
+				"classCompatible": false,
+				"error": "VRV runtime object '%s' is not supported in VSR without VRV runtime." % source_odf,
+			}
+		if is_verified_stock_odf(clean) or VERIFIED_VSR_TO_STOCK_ODFS.has(clean):
+			return {
+				"status": "native",
+				"sourceOdf": source_odf,
+				"targetOdf": source_odf,
+				"sourceMod": "vsr",
+				"targetMod": "vsr",
+				"classCompatible": true,
+				"error": "",
+			}
+		return {
+			"status": "unverified",
+			"sourceOdf": source_odf,
+			"targetOdf": "",
+			"sourceMod": "unknown",
+			"targetMod": "vsr",
+			"classCompatible": false,
+			"error": "Unverified ODF '%s' for target mod VSR." % source_odf,
+		}
+	return {
+		"status": "native",
+		"sourceOdf": source_odf,
+		"targetOdf": source_odf,
+		"sourceMod": tgt_mod,
+		"targetMod": tgt_mod,
+		"classCompatible": true,
+		"error": "",
+	}
+
+
+## Plans and validates semantic ODF conversion across a BZN object list.
+## Checks duplicate object pointer IDs, duplicate sequences, pointer reference
+## safety on removals, and verified ODF replacement mappings.
+static func plan_bzn_odf_conversion(entries: Array, ptr_counts: Dictionary, target_mod: String = "stock", manual_map: Dictionary = {}, allow_drop_vrv: bool = false) -> Dictionary:
+	var odf_edits := {}
+	var removals: Array[int] = []
+	var replacements: Array[Dictionary] = []
+	var unsupported: Array[String] = []
+	var unverified_odfs: Array[String] = []
+	var seen_ptrs := {}
+	var seen_seqs := {}
+	for idx in entries.size():
+		var entry: Dictionary = entries[idx]
+		var ptr_id := int(entry.get("flag8", 0))
+		if ptr_id > 0:
+			if seen_ptrs.has(ptr_id):
+				unsupported.append("Duplicate object pointer ID %d at object #%d and #%d." % [ptr_id, int(seen_ptrs[ptr_id]), idx])
+			else:
+				seen_ptrs[ptr_id] = idx
+		var seq := int(entry.get("sequence", -1))
+		if seq >= 0:
+			if seen_seqs.has(seq):
+				unsupported.append("Duplicate object sequence %d at object #%d and #%d." % [seq, int(seen_seqs[seq]), idx])
+			else:
+				seen_seqs[seq] = idx
+		var odf := String(entry.get("odf", ""))
+		var lbl := String(entry.get("label", ""))
+		var check_odf := "vrv_sndpoint" if lbl.to_lower().begins_with("vrvsnd:") and odf.to_lower() != "vrv_sndpoint" else odf
+		var lookup := lookup_verified_odf_conversion(check_odf, target_mod, manual_map)
+		var st := String(lookup.get("status", ""))
+		if st == "native":
+			continue
+		elif st in ["verified", "verified_manual"]:
+			var target_odf := String(lookup["targetOdf"])
+			if target_odf.nocasecmp_to(odf) != 0:
+				odf_edits[idx] = target_odf
+				var rep := lookup.duplicate(true)
+				rep["index"] = idx
+				replacements.append(rep)
+		elif st == "unsupported_vrv" and allow_drop_vrv:
+			if ptr_id > 0 and int(ptr_counts.get(ptr_id, 0)) > 1:
+				unsupported.append("Invalid reference: cannot remove VRV object #%d (%s, ptr %d) referenced by another BZN record." % [idx, odf, ptr_id])
+				if not (odf.to_lower() in unverified_odfs):
+					unverified_odfs.append(odf.to_lower())
+			else:
+				removals.append(idx)
+				replacements.append({
+					"index": idx,
+					"status": "removed_vrv",
+					"sourceOdf": odf,
+					"targetOdf": "(removed)",
+					"evidence": "Explicit VRV sound-point removal requested",
+				})
+		else:
+			var err_msg := String(lookup.get("error", "Unsupported ODF '%s'" % odf))
+			if not (err_msg in unsupported):
+				unsupported.append(err_msg)
+			if not (odf.to_lower() in unverified_odfs):
+				unverified_odfs.append(odf.to_lower())
+	var summary_lines: Array[String] = []
+	var seen_pairs := {}
+	for rep: Dictionary in replacements:
+		var pair_key := "%s->%s" % [String(rep["sourceOdf"]).to_lower(), String(rep["targetOdf"]).to_lower()]
+		if not seen_pairs.has(pair_key):
+			seen_pairs[pair_key] = true
+			summary_lines.append("%s -> %s (%s)" % [
+				String(rep["sourceOdf"]), String(rep["targetOdf"]), String(rep.get("evidence", "verified"))])
+	return {
+		"ok": unsupported.is_empty(),
+		"targetMod": target_mod,
+		"odfEdits": odf_edits,
+		"removals": removals,
+		"replacements": replacements,
+		"unsupported": unsupported,
+		"unverifiedOdfs": unverified_odfs,
+		"summaryLines": summary_lines,
+	}
+
+
+## Builds a single unified ResolvedContentEnvironment for models, terrain
+## materials, ODF lookup, sound lookup, mission assets, export validation, and
+## Playtest. Strict Stock isolation: when mod_profile == 'stock', modAssetRoots
+## is ALWAYS empty (never mounts VRV/Core, VRV/deps, or Workshop mod folders).
+func resolve_content_environment(document: Object, game_dir: String = "", vrv_dir: String = "") -> Dictionary:
+	var eff_game := game_dir.strip_edges() if not game_dir.strip_edges().is_empty() else last_game_dir
+	var mod_id := String(document.mod_profile).strip_edges().to_lower() if document != null and "mod_profile" in document else "stock"
+	var mis_id := String(document.mission_profile).strip_edges().to_lower() if document != null and "mission_profile" in document else "blank"
+	var eng_id := String(document.engine_profile).strip_edges() if document != null and "engine_profile" in document else "bzcc-2.0.185"
+	var map_folder: String = String(document.package.source_path).get_base_dir() if document != null and document.package != null else ""
+
+	var linked_folders: Array[String] = []
+	if document != null and "asset_profile" in document and not String(document.asset_profile).is_empty():
+		var ap := String(document.asset_profile)
+		if FileAccess.file_exists(ap):
+			var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(ap))
+			if parsed is Dictionary and parsed.get("folders", null) is Array:
+				var base_dir := ap.get_base_dir()
+				for entry_v in parsed["folders"]:
+					var entry := String(entry_v).strip_edges()
+					if entry.is_empty():
+						continue
+					var full := entry if entry.is_absolute_path() else base_dir.path_join(entry).simplify_path()
+					if DirAccess.dir_exists_absolute(full) and not (full in linked_folders):
+						linked_folders.append(full)
+
+	var mod_roots: Array[String] = []
+	if mod_id != "stock":
+		var prof := get_profile(mod_id)
+		for r_v in prof.get("assetRoots", []):
+			var r := String(r_v).strip_edges()
+			if not r.is_empty() and DirAccess.dir_exists_absolute(r) and not (r in mod_roots):
+				mod_roots.append(r)
+		# Local VRV/deps fallback only for VSR/VRV when Workshop roots are absent
+		if mod_roots.is_empty() and not eff_game.is_empty() and mod_id in ["vsr", "vrv"]:
+			if mod_id == "vrv":
+				var vrv_core := eff_game.path_join("VRV/Core")
+				if DirAccess.dir_exists_absolute(vrv_core):
+					mod_roots.append(vrv_core)
+			var deps_dir := eff_game.path_join("VRV/deps")
+			for sub in ["VSR", "3532748119", "1329659846", "2785557433", "2785542655", "2814914461", "2049956570", "3493379153", "2467249743"]:
+				var p := deps_dir.path_join(sub)
+				if DirAccess.dir_exists_absolute(p) and not (p in mod_roots):
+					mod_roots.append(p)
+
+	var native_roots: Array[String] = []
+	if not eff_game.is_empty():
+		for sub in ["bz2r_res", "bz2r_loc"]:
+			var p := eff_game.path_join(sub)
+			if DirAccess.dir_exists_absolute(p):
+				native_roots.append(p)
+
+	var search_roots: Array[String] = []
+	if not map_folder.is_empty():
+		search_roots.append(map_folder)
+	for r in linked_folders + mod_roots + native_roots:
+		if not (r in search_roots):
+			search_roots.append(r)
+
+	var sound_roots: Array[String] = []
+	if not map_folder.is_empty():
+		sound_roots.append(map_folder)
+	for r in linked_folders + mod_roots:
+		if not (r in sound_roots):
+			sound_roots.append(r)
+	if not eff_game.is_empty():
+		for sub in ["bz2r_res/audio", "bz2r_res"]:
+			var p := eff_game.path_join(sub)
+			if DirAccess.dir_exists_absolute(p) and not (p in sound_roots):
+				sound_roots.append(p)
+
+	var dll_roots: Array[String] = []
+	if not map_folder.is_empty():
+		dll_roots.append(map_folder)
+	for r in linked_folders + mod_roots:
+		if not (r in dll_roots):
+			dll_roots.append(r)
+	if not eff_game.is_empty():
+		var m_dir := eff_game.path_join("Missions")
+		if DirAccess.dir_exists_absolute(m_dir) and not (m_dir in dll_roots):
+			dll_roots.append(m_dir)
+	for r in native_roots:
+		if not (r in dll_roots):
+			dll_roots.append(r)
+
+	return {
+		"engineProfile": eng_id,
+		"modProfile": mod_id,
+		"missionProfile": mis_id,
+		"mapFolder": map_folder,
+		"gameRoot": eff_game,
+		"vrvRoot": vrv_dir.strip_edges(),
+		"linkedFolders": linked_folders,
+		"modAssetRoots": mod_roots,
+		"nativeRoots": native_roots,
+		"searchRoots": search_roots,
+		"soundRoots": sound_roots,
+		"missionDllRoots": dll_roots,
+	}
+
+
+static func _is_likely_stock_odf(odf: String) -> bool:
+	var clean := odf.strip_edges().to_lower()
+	if clean.ends_with(".odf"):
+		clean = clean.substr(0, clean.length() - 4)
+	if clean.is_empty():
+		return true
+	if clean.begins_with("vrv_") or clean.ends_with("_vsr") or "_vsr" in clean or ":" in clean:
+		return false
+	# Standard BZCC Stock ODF faction/prop prefixes (ISDF i*, Scion f*, scrap/pools np*/sp*/ap*/gp*/ep*/cp*/pb*/mb*/ob*/bb*/cb*/sb*/tb*/ub*/wb*/xb*/yb*)
+	for prefix in ["iv", "ib", "is", "ie", "fv", "fb", "fs", "fe", "av", "ab", "bv", "bb", "be", "cv", "cb", "ev", "eb", "gv", "gb", "hv", "hb", "mv", "mb", "nv", "nb", "ov", "ob", "pv", "pb", "pe", "ps", "sv", "sb", "tv", "tb", "uv", "ub", "wv", "wb", "xv", "xb", "yv", "yb", "np", "sp", "ap", "op", "gp", "ep", "cp", "fp", "ip", "mp", "rp", "tp", "vp", "wp", "xp", "mo", "ba", "mi", "du", "pl", "cr", "tr", "bu", "tu", "wa", "la", "br", "ro", "st", "cl", "pi", "co", "de", "fl", "gl", "gr", "hi", "ic", "ju", "ma", "me", "mu", "pa", "po", "qu", "ra", "re", "ri", "ru", "sa", "sc", "se", "sh", "si", "sk", "sl", "sm", "sn", "so", "sq", "su", "sw", "ta", "te", "th", "ti", "to", "un", "va", "ve", "vi", "vo", "wi", "wo", "wr", "ze"]:
+		if clean.begins_with(prefix):
+			return true
+	return false
+
+
 ## Inspects real map package data (BZN DLL, ODF names, path names, Lua files)
 ## and produces evidence-based candidate ModProfile + MissionProfile rankings.
-## Never selects VRV merely because a converter or VRV tools exist locally.
-static func detect_map_profiles(package: Object) -> Dictionary:
+## Never selects VRV merely because a converter or VRV tools exist locally,
+## and never assumes an unknown custom DLL or unknown mod ODFs are Stock.
+static func detect_map_profiles(package: Object, registry: Object = null) -> Dictionary:
 	var dll := String(package.mission_dll).strip_edges().to_lower() if package != null else ""
 	var has_lua := false
 	if package != null:
@@ -528,18 +1033,24 @@ static func detect_map_profiles(package: Object) -> Dictionary:
 				break
 	var vsr_odfs: Array[String] = []
 	var vrv_odfs: Array[String] = []
+	var unknown_odfs: Array[String] = []
 	var stock_odf_count := 0
 	if package != null:
 		for obj: Dictionary in package.objects:
 			var odf := String(obj.get("odf", "")).to_lower()
-			if odf.begins_with("vrv_") or odf == "vrv_sndpoint":
+			var lbl := String(obj.get("label", "")).to_lower()
+			if odf.begins_with("vrv_") or odf == "vrv_sndpoint" or lbl.begins_with("vrvsnd:"):
 				if not (odf in vrv_odfs):
 					vrv_odfs.append(odf)
 			elif odf.ends_with("_vsr") or "_vsr" in odf:
 				if not (odf in vsr_odfs):
 					vsr_odfs.append(odf)
 			elif not odf.is_empty():
-				stock_odf_count += 1
+				if is_verified_stock_odf(odf):
+					stock_odf_count += 1
+				else:
+					if not (odf in unknown_odfs):
+						unknown_odfs.append(odf)
 	var path_lower := {}
 	if package != null:
 		for p: Dictionary in package.paths:
@@ -548,6 +1059,7 @@ static func detect_map_profiles(package: Object) -> Dictionary:
 	var has_vrv_paths := path_lower.has("11patrol1") or path_lower.has("11mlay1") or path_lower.has("capturegoal1")
 	var has_instant_paths := path_lower.has("recyclerenemy") or path_lower.has("gtow2")
 	var has_vsr_strat_paths := path_lower.has("enemy_11") and path_lower.has("player_1")
+	var is_custom_dll := not dll.is_empty() and not (dll in STOCK_KNOWN_DLLS)
 
 	# Determine mission mode independently from mod
 	var mission_mode := "blank"
@@ -604,46 +1116,94 @@ static func detect_map_profiles(package: Object) -> Dictionary:
 				"evidence": ["VSR ODFs + VRV/AIP patrol paths (11Patrol1/11MLay1)"] + mission_evidence,
 			})
 	if vrv_odfs.is_empty() and vsr_odfs.is_empty():
-		candidates.append({
-			"modProfile": "stock",
-			"missionProfile": mission_mode,
-			"confidence": "high" if stock_odf_count > 0 or not dll.is_empty() else "medium",
-			"evidence": ["No VSR/VRV-prefixed ODFs found (%d stock/generic objects)" % stock_odf_count] + mission_evidence,
-		})
+		# Check if a custom DLL or unknown ODFs indicate a non-Stock mod
+		var matched_custom_mod := ""
+		if is_custom_dll and registry != null and registry.has_method("all_profile_ids"):
+			for mid: String in registry.all_profile_ids():
+				if mid in ["stock", "vsr", "vrv"]:
+					continue
+				var prof: Dictionary = registry.get_profile(mid)
+				for mdll_v in prof.get("missionDlls", []):
+					if String(mdll_v).to_lower() == dll:
+						matched_custom_mod = mid
+						break
+				if not matched_custom_mod.is_empty():
+					break
+		if not matched_custom_mod.is_empty():
+			candidates.append({
+				"modProfile": matched_custom_mod,
+				"missionProfile": mission_mode,
+				"confidence": "high",
+				"evidence": ["Matched custom mod DLL '%s' in profile %s" % [package.mission_dll, matched_custom_mod]] + mission_evidence,
+			})
+		elif is_custom_dll or not unknown_odfs.is_empty():
+			var u_ev: Array[String] = []
+			if is_custom_dll:
+				u_ev.append("Unrecognized non-Stock mission DLL '%s'" % package.mission_dll)
+			if not unknown_odfs.is_empty():
+				u_ev.append("Non-Stock ODF prefix(es): " + ", ".join(unknown_odfs.slice(0, 4)))
+			candidates.append({
+				"modProfile": "custom:unknown",
+				"missionProfile": mission_mode,
+				"confidence": "medium",
+				"evidence": u_ev + mission_evidence,
+			})
+			candidates.append({
+				"modProfile": "stock",
+				"missionProfile": mission_mode,
+				"confidence": "low",
+				"evidence": ["Fallback Stock profile (unverified with custom DLL/ODFs)"] + mission_evidence,
+			})
+		else:
+			candidates.append({
+				"modProfile": "stock",
+				"missionProfile": mission_mode,
+				"confidence": "high" if stock_odf_count > 0 or not dll.is_empty() else "medium",
+				"evidence": ["No VSR/VRV-prefixed ODFs found (%d stock/generic objects)" % stock_odf_count] + mission_evidence,
+			})
 
 	var recommended_mod := String(candidates[0]["modProfile"]) if not candidates.is_empty() else "stock"
-	var ambiguous := candidates.size() > 1 and String(candidates[0]["confidence"]) != "high"
+	var ambiguous := (candidates.size() > 1 and String(candidates[0]["confidence"]) != "high") or recommended_mod == "custom:unknown"
 	return {
 		"recommendedMod": recommended_mod,
 		"recommendedMission": mission_mode,
 		"ambiguous": ambiguous,
+		"unknownMod": recommended_mod == "custom:unknown",
 		"missionDll": String(package.mission_dll) if package != null else "",
 		"formatProfile": String(package.layout_id) if package != null else "",
 		"candidates": candidates,
 		"vsrOdfs": vsr_odfs,
 		"vrvOdfs": vrv_odfs,
+		"unknownOdfs": unknown_odfs,
 	}
 
 
 ## Read-only dry-run compatibility report when converting a map from its current
 ## profile to a different target (ModProfile, MissionProfile). Mutates nothing.
-func analyze_conversion(document: Object, target_mod_id: String, target_mission_id: String, mission_profiles_script: Script) -> Dictionary:
+func analyze_conversion(document: Object, target_mod_id: String, target_mission_id: String, mission_profiles_script: Script, manual_map: Dictionary = {}) -> Dictionary:
 	var missing_odfs: Array[String] = []
 	var incompatible_odfs: Array[String] = []
+	var verified_replacements: Array[String] = []
+	var unverified_odfs: Array[String] = []
 	var seen := {}
 	for view in document.object_count():
 		var odf := String(document.object_odf(view)).to_lower()
-		if odf.is_empty() or seen.has(odf):
+		var lbl := String(document.object_label(view)).to_lower()
+		var key_odf := "vrv_sndpoint" if lbl.begins_with("vrvsnd:") and odf != "vrv_sndpoint" else odf
+		if key_odf.is_empty() or seen.has(key_odf):
 			continue
-		seen[odf] = true
-		if target_mod_id == "stock":
-			if odf.begins_with("vrv_") or odf == "vrv_sndpoint":
-				incompatible_odfs.append(odf + " (VRV-specific)")
-			elif odf.ends_with("_vsr") or "_vsr" in odf:
-				incompatible_odfs.append(odf + " (VSR-specific)")
-		elif target_mod_id == "vsr":
-			if odf.begins_with("vrv_") or odf == "vrv_sndpoint":
-				incompatible_odfs.append(odf + " (VRV-specific)")
+		seen[key_odf] = true
+		var lookup := lookup_verified_odf_conversion(key_odf, target_mod_id, manual_map)
+		var st := String(lookup.get("status", "native"))
+		if st == "native":
+			continue
+		elif st in ["verified", "verified_manual"]:
+			incompatible_odfs.append("%s -> %s (verified)" % [key_odf, String(lookup["targetOdf"])])
+			verified_replacements.append("%s -> %s" % [key_odf, String(lookup["targetOdf"])])
+		else:
+			var reason := String(lookup.get("error", "unverified"))
+			incompatible_odfs.append("%s (UNSUPPORTED: %s)" % [key_odf, reason])
+			unverified_odfs.append(key_odf)
 	var target_manifest := get_profile(target_mod_id)
 	var mod_installed := bool(target_manifest.get("installed", target_mod_id == "stock"))
 	var validation: Dictionary = mission_profiles_script.validate(document, target_mission_id, target_mod_id)
@@ -653,8 +1213,12 @@ func analyze_conversion(document: Object, target_mod_id: String, target_mission_
 	if not expected_dll.is_empty() and current_dll.nocasecmp_to(expected_dll) != 0:
 		dll_change = "%s -> %s" % [current_dll if not current_dll.is_empty() else "(none)", expected_dll]
 	var lossy: Array[String] = []
-	if not incompatible_odfs.is_empty():
-		lossy.append("Target mod '%s' does not include %d mod-specific ODF class(es); source objects will NOT be silently replaced." % [target_mod_id, incompatible_odfs.size()])
+	if not unverified_odfs.is_empty():
+		lossy.append("Target mod '%s' has %d unverified/unsupported ODF class(es) (%s); conversion is blocked without a verified same-class mapping." % [
+			target_mod_id, unverified_odfs.size(), ", ".join(unverified_odfs)])
+	elif not verified_replacements.is_empty():
+		lossy.append("Target mod '%s' requires verified semantic ODF conversion for %d class(es): %s." % [
+			target_mod_id, verified_replacements.size(), ", ".join(verified_replacements)])
 	if not mod_installed:
 		lossy.append("Target mod '%s' is not detected locally; preview and Playtest assets may be unavailable." % target_mod_id)
 	return {
@@ -665,6 +1229,9 @@ func analyze_conversion(document: Object, target_mod_id: String, target_mission_
 		"formatProfile": String(document.package.layout_id),
 		"modInstalled": mod_installed,
 		"incompatibleOdfs": incompatible_odfs,
+		"verifiedReplacements": verified_replacements,
+		"unverifiedOdfs": unverified_odfs,
+		"conversionFeasible": unverified_odfs.is_empty(),
 		"missingOdfs": missing_odfs,
 		"dllChange": dll_change,
 		"missingRequiredPaths": validation.get("missing_required", []),

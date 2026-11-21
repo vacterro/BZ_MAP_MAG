@@ -9,6 +9,9 @@ extends AcceptDialog
 const Document := preload("res://core/map_document.gd")
 const ModRegistry := preload("res://core/mod_registry.gd")
 const MissionProfiles := preload("res://core/mission_profiles.gd")
+const Wintage := preload("res://themes/wintage.gd")
+const ChoiceGroup := preload("res://themes/choice_group.gd")
+const DIALOG_WIDTH := 640
 
 signal profile_applied(message: String)
 signal mods_changed(default_mod_id: String)
@@ -21,11 +24,12 @@ var default_new_mod := "stock"
 
 var tabs := TabContainer.new()
 var detected_label := RichTextLabel.new()
-var engine_select := OptionButton.new()
-var mod_select := OptionButton.new()
-var mission_select := OptionButton.new()
+var engine_select := ChoiceGroup.new(0)
+var mod_select := ChoiceGroup.new(0)
+var mission_select := ChoiceGroup.new(0)
 var switch_btn: Button
 var analyze_btn: Button
+var convert_btn: Button
 var analysis_output := RichTextLabel.new()
 
 var mod_list := ItemList.new()
@@ -41,35 +45,49 @@ var custom_dir_picker := FileDialog.new()
 func _ready() -> void:
 	title = "Target Profile & Mod Manager"
 	ok_button_text = "Close"
-	min_size = Vector2i(720, 540)
 
 	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	tabs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	tabs.custom_minimum_size.x = DIALOG_WIDTH - 24
+	tabs.tab_changed.connect(func(_t): _fit_dialog())
 	add_child(tabs)
 
 	# --- Tab 1: Project Target Profile ---
+	var prof_scroll := ScrollContainer.new()
+	prof_scroll.name = "Target Profile"
+	prof_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	prof_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	prof_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	prof_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	tabs.add_child(prof_scroll)
+
 	var prof_tab := VBoxContainer.new()
-	prof_tab.name = "Target Profile"
-	prof_tab.add_theme_constant_override("separation", 6)
-	tabs.add_child(prof_tab)
+	prof_tab.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	prof_tab.add_theme_constant_override("separation", 4)
+	prof_scroll.add_child(prof_tab)
 
 	var det_hdr := Label.new()
 	det_hdr.text = "Detected Map Evidence (read-only inspection — native source bytes are never altered by switching)"
 	prof_tab.add_child(det_hdr)
-	detected_label.custom_minimum_size.y = 80
+	detected_label.fit_content = true
+	detected_label.scroll_active = false
+	detected_label.custom_minimum_size = Vector2(DIALOG_WIDTH - 48, 0)
 	prof_tab.add_child(detected_label)
 
 	_add_row(prof_tab, "Engine Profile", engine_select)
 	for eid: String in ["bzcc-2.0.185", "bzcc-auto-detected", "bzcc-unknown-readonly"]:
 		engine_select.add_item(String(ModRegistry.ENGINE_PROFILES[eid]["displayName"]))
 		engine_select.set_item_metadata(engine_select.item_count - 1, eid)
+	mod_select.set_overflow_limit(6, 54)
 	_add_row(prof_tab, "Mod Profile", mod_select)
 	_add_row(prof_tab, "Mission Profile", mission_select)
 	for mode: String in MissionProfiles.MISSION_MODES:
 		mission_select.add_item(String(MissionProfiles.MODE_LABELS.get(mode, mode)))
 		mission_select.set_item_metadata(mission_select.item_count - 1, mode)
 
-	var actions := HBoxContainer.new()
+	var actions := HFlowContainer.new()
+	actions.add_theme_constant_override("h_separation", 6)
+	actions.add_theme_constant_override("v_separation", 4)
 	prof_tab.add_child(actions)
 	switch_btn = Button.new()
 	switch_btn.text = "Change Editing Environment (Non-Destructive)"
@@ -79,18 +97,25 @@ func _ready() -> void:
 	analyze_btn.text = "Analyze Conversion (Dry-Run)"
 	analyze_btn.pressed.connect(run_conversion_analysis)
 	actions.add_child(analyze_btn)
+	convert_btn = Button.new()
+	convert_btn.text = "Convert Objects (Verified / Undoable)"
+	convert_btn.pressed.connect(apply_verified_conversion)
+	actions.add_child(convert_btn)
 
-	analysis_output.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	analysis_output.custom_minimum_size.y = 140
+	analysis_output.fit_content = true
+	analysis_output.scroll_active = false
+	analysis_output.custom_minimum_size = Vector2(DIALOG_WIDTH - 48, 0)
+	analysis_output.hide()
 	prof_tab.add_child(analysis_output)
 
 	# --- Tab 2: Game & Mods Manager ---
 	var mods_tab := VBoxContainer.new()
 	mods_tab.name = "Game & Mods"
-	mods_tab.add_theme_constant_override("separation", 6)
+	mods_tab.add_theme_constant_override("separation", 4)
 	tabs.add_child(mods_tab)
 
-	var scan_row := HBoxContainer.new()
+	var scan_row := HFlowContainer.new()
+	scan_row.add_theme_constant_override("h_separation", 4)
 	mods_tab.add_child(scan_row)
 	var scan_btn := Button.new()
 	scan_btn.text = "Scan Installed Mods"
@@ -111,21 +136,23 @@ func _ready() -> void:
 
 	var split := HSplitContainer.new()
 	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	split.custom_minimum_size.y = 220
 	mods_tab.add_child(split)
 
-	mod_list.custom_minimum_size.x = 280
+	mod_list.custom_minimum_size.x = 260
 	mod_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	mod_list.item_selected.connect(func(_i): show_selected_mod_detail())
 	split.add_child(mod_list)
 
-	mod_detail.custom_minimum_size.x = 320
+	mod_detail.custom_minimum_size.x = 280
 	mod_detail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	split.add_child(mod_detail)
 
 	var custom_row := HBoxContainer.new()
+	custom_row.add_theme_constant_override("separation", 4)
 	mods_tab.add_child(custom_row)
 	custom_name_field.placeholder_text = "Custom mod name"
-	custom_name_field.custom_minimum_size.x = 150
+	custom_name_field.custom_minimum_size.x = 140
 	custom_row.add_child(custom_name_field)
 	custom_dir_field.placeholder_text = "Custom mod asset folder"
 	custom_dir_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -146,13 +173,28 @@ func _ready() -> void:
 
 func _add_row(parent: Control, caption: String, widget: Control) -> void:
 	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
 	parent.add_child(row)
 	var lbl := Label.new()
 	lbl.text = caption
-	lbl.custom_minimum_size.x = 140
+	lbl.custom_minimum_size.x = 120
 	row.add_child(lbl)
 	widget.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(widget)
+
+
+func _set_analysis_text(text: String) -> void:
+	analysis_output.text = text
+	analysis_output.visible = not text.strip_edges().is_empty()
+	_fit_dialog()
+
+
+func _fit_dialog(initial_popup: bool = false) -> void:
+	var min_h := 360 if tabs.current_tab == 1 else 0
+	if initial_popup:
+		Wintage.popup_fit(self, DIALOG_WIDTH, min_h)
+	elif visible:
+		Wintage.shrink_dialog(self, DIALOG_WIDTH, min_h)
 
 
 func begin(doc: Document, mod_reg: ModRegistry, game_path: String, vrv_path: String, current_default_mod: String = "stock", initial_tab: int = 0) -> void:
@@ -163,7 +205,7 @@ func begin(doc: Document, mod_reg: ModRegistry, game_path: String, vrv_path: Str
 	default_new_mod = current_default_mod
 	tabs.current_tab = clampi(initial_tab, 0, 1)
 	refresh_all()
-	popup_centered()
+	_fit_dialog(true)
 
 
 func refresh_all() -> void:
@@ -197,9 +239,11 @@ func _refresh_project_tab() -> void:
 	var has_doc := document != null
 	switch_btn.disabled = not has_doc
 	analyze_btn.disabled = not has_doc
+	if convert_btn != null:
+		convert_btn.disabled = not has_doc
 	if not has_doc:
 		detected_label.text = "Open a map or BZMAG project to inspect or switch its Target Profile."
-		analysis_output.text = ""
+		_set_analysis_text("")
 		return
 	var info := document.detected_profile_info
 	var lines: Array[String] = [
@@ -225,7 +269,7 @@ func _refresh_project_tab() -> void:
 		if String(mission_select.get_item_metadata(i)) == document.mission_profile:
 			mission_select.select(i)
 			break
-	analysis_output.text = ""
+	_set_analysis_text("")
 
 
 func selected_target_engine() -> String:
@@ -247,10 +291,10 @@ func apply_environment_switch() -> void:
 	var mid := selected_target_mod()
 	var mis := selected_target_mission()
 	if not document.set_target_profile(mid, mis, eng):
-		analysis_output.text = "[ERR] " + document.error
+		_set_analysis_text("[ERR] " + document.error)
 		return
 	_refresh_project_tab()
-	analysis_output.text = "[OK] Switched editing environment to %s / %s (%s). Source map bytes untouched; Undo reverses this change." % [mid, mis, eng]
+	_set_analysis_text("[OK] Switched editing environment to %s / %s (%s). Source map bytes untouched; Undo reverses this change." % [mid, mis, eng])
 	profile_applied.emit("Target profile switched to %s / %s." % [mid, mis])
 
 
@@ -261,7 +305,9 @@ func run_conversion_analysis() -> void:
 	var lines: Array[String] = [
 		"=== Dry-Run Conversion Report (%s/%s -> %s/%s) ===" % [
 			report["sourceMod"], report["sourceMission"], report["targetMod"], report["targetMission"]],
-		"Format profile: %s | Target mod installed: %s" % [report["formatProfile"], "yes" if report["modInstalled"] else "NO"],
+		"Format profile: %s | Target mod installed: %s | Feasible: %s" % [
+			report["formatProfile"], "yes" if report["modInstalled"] else "NO",
+			"YES (verified)" if bool(report.get("conversionFeasible", true)) else "NO (blocked by unverified ODFs)"],
 	]
 	if not String(report["dllChange"]).is_empty():
 		lines.append("Mission DLL change: " + String(report["dllChange"]))
@@ -269,14 +315,31 @@ func run_conversion_analysis() -> void:
 	if bad_odfs.is_empty():
 		lines.append("ODF compatibility: all placed ODF classes appear compatible with target mod.")
 	else:
-		lines.append("[WARN] Incompatible / mod-specific ODFs (%d): %s" % [bad_odfs.size(), ", ".join(bad_odfs)])
+		lines.append("[WARN] Mod-specific ODFs (%d): %s" % [bad_odfs.size(), ", ".join(bad_odfs)])
 	var missing_paths: Array = report["missingRequiredPaths"]
 	if not missing_paths.is_empty():
 		lines.append("[WARN] Missing required paths for target mission: " + ", ".join(missing_paths))
 	for w in report["lossyWarnings"]:
 		lines.append("[LOSSY] " + String(w))
 	lines.append("Note: Original native map files stay untouched. Use Export Native to publish a new target copy.")
-	analysis_output.text = "\n".join(lines)
+	_set_analysis_text("\n".join(lines))
+
+
+func apply_verified_conversion() -> void:
+	if document == null:
+		return
+	var mid := selected_target_mod()
+	var mis := selected_target_mission()
+	var res := document.convert_objects_to_profile(mid, mis)
+	if not bool(res.get("ok", false)):
+		_set_analysis_text("[ERR] Semantic conversion refused: " + String(res.get("error", document.error)))
+		return
+	_refresh_project_tab()
+	var rep_cnt := int(res.get("replacedCount", 0))
+	var rem_cnt := int(res.get("removedCount", 0))
+	_set_analysis_text("[OK] Converted %d object ODF(s) (removed %d) to %s / %s in 1 undo step. Source files remain untouched until Export Native." % [
+		rep_cnt, rem_cnt, mid, mis])
+	profile_applied.emit("Converted %d object(s) to %s / %s (1 undo step)." % [rep_cnt, mid, mis])
 
 
 func rescan_mods() -> void:

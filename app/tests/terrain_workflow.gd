@@ -16,6 +16,7 @@ const TerrainView := preload("res://render/terrain_view.gd")
 const Package := preload("res://formats/map_package.gd")
 const VrvShapes := preload("res://core/vrv_shapes.gd")
 const Wintage := preload("res://themes/wintage.gd")
+const NativeAssets := preload("res://formats/native_assets.gd")
 
 var failures := 0
 
@@ -75,9 +76,10 @@ func run() -> void:
 	var editor := EditorScene.instantiate()
 	root.add_child(editor)
 	if OS.get_name() == "Windows":
-		check(editor.theme.default_font.get_font_name() == "Verdana", "main UI loads actual Verdana")
-		check(editor.studio.theme.default_font.get_font_name() == "Verdana", "node window uses actual Verdana")
-		check(editor.open_dialog.theme.default_font.get_font_name() == "Verdana", "dialogs use actual Verdana")
+		check(editor.theme.default_font.get_font_name().begins_with("Verdana"), "main UI loads embedded Verdana_m1: " + editor.theme.default_font.get_font_name())
+		check(editor.studio.theme.default_font.get_font_name().begins_with("Verdana"), "node window uses embedded Verdana_m1")
+		check(editor.open_dialog.theme.default_font.get_font_name().begins_with("Verdana"), "dialogs use embedded Verdana_m1")
+		check(FileAccess.file_exists("res://themes/fonts/Verdana_m1.ttf") and FileAccess.file_exists("res://themes/fonts/Verdana_m1-Bold.ttf"), "embedded Verdana_m1 font files exist in project")
 		check(editor.game_picker.use_native_dialog and editor.vrv_picker.use_native_dialog and editor.game_picker.file_mode == FileDialog.FILE_MODE_OPEN_DIR, "native folder pickers in Playtest Setup")
 	editor.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	editor.size = Vector2(1120, 690) if DisplayServer.get_name() == "headless" else Vector2(root.size)
@@ -189,6 +191,7 @@ func run() -> void:
 	test_empty_object_table(args[0], args[1], args[2])
 	test_sound_point_labels(editor)
 	test_vrv_parity_wave7(editor, args[0], args[2])
+	await test_hold_ui_font_playtest(editor, args[0], args[1], args[2])
 	print("Native height at (0,0): %.4f -> %.4f, changed samples: %d" % [baseline, intended, document.edits.size()])
 	print("FAILURES: %d" % failures)
 	quit(0 if failures == 0 else 1)
@@ -2315,3 +2318,740 @@ func test_universal_mod_architecture(editor: Control, brave_source: String, blan
 		and migrated.mod_profile == "stock" and not migrated.profile_explicit,
 		"legacy BZMAG migrates cleanly, preserves assetProfile and infers Stock without auto-selecting VRV")
 	print("Universal mod-agnostic architecture, Stock-first New Map, profile switching & legacy migration verified.")
+
+
+func test_hold_ui_font_playtest(editor: Control, brave_source: String, blank_source: String, scratch: String) -> void:
+	# 1. Continuous hold brush application (Raise, Smooth, Flatten, Color, Mirror X, 1-step Undo)
+	check(editor.open_map(brave_source), "open map for continuous hold brush test")
+	var doc: Document = editor.document
+	var terrain := doc.package.terrain
+	var brush = editor.brush_panel
+	brush.surface.select(0)
+	brush.set_mode(brush.Mode.RAISE)
+	brush.set_shape(Document.BrushShape.BELL)
+	brush.set_brush_size(32)
+	brush.set_pressure(20)
+	var idx := 512 * terrain.dimensions.x + 512
+	var base_h: float = terrain.heights[idx]
+	var press := InputEventMouseButton.new()
+	press.position = editor.top.view_rect().get_center()
+	press.button_index = MOUSE_BUTTON_LEFT
+	press.pressed = true
+	editor.view_input(press, editor.top)
+	var after_click: float = terrain.heights[idx]
+	check(after_click > base_h + 7.5, "initial click raises terrain")
+	check(editor.step_hold_paint(0.25), "continuous hold ticks while stationary")
+	var after_hold: float = terrain.heights[idx]
+	check(after_hold > after_click + 4.0, "holding button continuously raises terrain without mouse motion")
+	editor.finish_stroke()
+	check(doc.undo_stack.size() == 1, "click plus continuous hold records one undo entry")
+	doc.undo()
+	check(is_equal_approx(terrain.heights[idx], base_h), "one undo reverses full click plus continuous hold stroke")
+
+	# Sub-granularity continuous hold at low pressure on soft brush edge
+	brush.set_pressure(10)
+	doc.begin_stroke()
+	var edge_idx := 512 * terrain.dimensions.x + 526 # near bell edge (low weight)
+	var edge_base: float = terrain.heights[edge_idx]
+	for _i in 20:
+		brush.apply_dab(doc, Vector2(512.0, 512.0), editor.HOLD_DAB_SCALE, true)
+	doc.end_stroke()
+	check(terrain.heights[edge_idx] > edge_base, "sub-granularity hold accumulates cleanly on soft edges")
+	doc.undo()
+
+	# Continuous hold Smooth iterates across ticks
+	doc.begin_stroke()
+	doc.dab(Vector2(512.0, 512.0), 8.0, 30.0)
+	doc.end_stroke()
+	var spike_h: float = terrain.heights[idx]
+	brush.set_mode(brush.Mode.BLEND)
+	brush.set_pressure(50)
+	doc.begin_stroke()
+	brush.apply_dab(doc, Vector2(512.0, 512.0), editor.HOLD_DAB_SCALE, true)
+	var smooth1: float = terrain.heights[idx]
+	for _i in 8:
+		brush.apply_dab(doc, Vector2(512.0, 512.0), editor.HOLD_DAB_SCALE, true)
+	var smooth2: float = terrain.heights[idx]
+	doc.end_stroke()
+	check(smooth2 < smooth1 and smooth1 <= spike_h, "continuous hold Smooth progressively blends spikes")
+	doc.undo()
+	doc.undo()
+
+	# Continuous hold Color builds up at low pressure
+	brush.surface.select(1)
+	brush.update_buttons()
+	brush.set_pressure(20)
+	brush.rgb.text = "#1537B3"
+	var orig_col := terrain.material_value(Terrain.Layer.COLOR, idx)
+	var target_col := Color.html("#1537B3")
+	doc.begin_stroke(Terrain.Layer.COLOR)
+	brush.apply_dab(doc, Vector2(512.0, 512.0))
+	var col1 := Terrain.word_color(terrain.material_value(Terrain.Layer.COLOR, idx))
+	for _i in 15:
+		brush.apply_dab(doc, Vector2(512.0, 512.0), editor.HOLD_DAB_SCALE, true)
+	var col2 := Terrain.word_color(terrain.material_value(Terrain.Layer.COLOR, idx))
+	doc.end_stroke()
+	var dist1 := Vector3(col1.r - target_col.r, col1.g - target_col.g, col1.b - target_col.b).length()
+	var dist2 := Vector3(col2.r - target_col.r, col2.g - target_col.g, col2.b - target_col.b).length()
+	check(dist2 < dist1, "continuous hold Color progressively tints toward target RGB (%.3f -> %.3f)" % [dist1, dist2])
+	doc.undo()
+	check(terrain.material_value(Terrain.Layer.COLOR, idx) == orig_col, "one undo restores continuous hold Color")
+	brush.surface.select(0)
+	brush.update_buttons()
+
+	# 2. Crisp embedded Verdana_m1 bitmap strikes + ChoiceGroup overflow + compact dialogs + Houdini SliderField matrix
+	var def_font: Font = editor.theme.default_font
+	if def_font is FontFile:
+		var ff := def_font as FontFile
+		check(not ff.disable_embedded_bitmaps and ff.antialiasing == TextServer.FONT_ANTIALIASING_NONE
+			and ff.subpixel_positioning == TextServer.SUBPIXEL_POSITIONING_DISABLED,
+			"Verdana_m1 FontFile enables embedded 1-bit bitmap strikes with AA and subpixel positioning off")
+	check(not (brush.surface is OptionButton) and brush.surface.item_count == 3, "Terrain Brush surface uses buttons instead of combobox")
+	check(not (brush.target is SpinBox) and not (brush.texture_slot is SpinBox) and not (brush.texture_lane is SpinBox), "Brush panel uses sliders instead of SpinBox arrows")
+	check(not (editor.terrain_tools.operation is OptionButton) and not (editor.terrain_tools.height is SpinBox), "Shape Terrain uses buttons and sliders")
+
+	# Dynamic BrushPanel layer visibility
+	brush.surface.select(0)
+	brush.update_buttons()
+	check(brush._height_box.visible and not brush._color_box.visible and not brush._tile_box.visible,
+		"BrushPanel shows only height controls in Height mode")
+	brush.surface.select(1)
+	brush.update_buttons()
+	check(not brush._height_box.visible and brush._color_box.visible and not brush._tile_box.visible,
+		"BrushPanel shows only RGB controls in Color mode")
+	brush.surface.select(2)
+	brush.update_buttons()
+	check(not brush._height_box.visible and not brush._color_box.visible and brush._tile_box.visible,
+		"BrushPanel shows only slot/lane controls in Tile mode")
+	brush.surface.select(0)
+	brush.update_buttons()
+
+	# Houdini-style SliderField & Value Ladder regression matrix across subsystems
+	var sf = brush.target
+	sf.value = 100.0
+	sf.set_default_value(100.0)
+	var started_count := [0]
+	var preview_count := [0]
+	var committed_count := [0]
+	var cancelled_count := [0]
+	var on_start := func(_v: float): started_count[0] += 1
+	var on_prev := func(_v: float): preview_count[0] += 1
+	var on_commit := func(_i: float, _f: float): committed_count[0] += 1
+	var on_cancel := func(_r: float): cancelled_count[0] += 1
+	sf.gesture_started.connect(on_start)
+	sf.preview_changed.connect(on_prev)
+	sf.value_committed.connect(on_commit)
+	sf.gesture_cancelled.connect(on_cancel)
+
+	# 2a. MMB Value Ladder: vertical rung selection + horizontal scrubbing + single commit on release
+	var ladder_steps: Array = sf.get_ladder_steps()
+	check(ladder_steps.has(100.0) and ladder_steps.has(10.0) and ladder_steps.has(1.0) and ladder_steps.has(0.1),
+		"Height SliderField (step 0.1) provides 100, 10, 1, 0.1 m Value Ladder rungs")
+	sf.begin_ladder(Vector2(200.0, 200.0))
+	check(sf.is_ladder_active() and started_count[0] == 1, "MMB press starts Value Ladder gesture")
+	var one_idx: int = ladder_steps.find(1.0)
+	for _tick in 15:
+		sf.step_ladder_by(1, one_idx)
+	var point_one_idx: int = ladder_steps.find(0.1)
+	for _tick in 5:
+		sf.step_ladder_by(1, point_one_idx)
+	check(is_equal_approx(sf.value, 115.5) and preview_count[0] == 20 and committed_count[0] == 0,
+		"20 ladder scrub steps update live value to 115.5 m with 0 premature commit events")
+	sf.end_ladder(true)
+	check(not sf.is_ladder_active() and committed_count[0] == 1 and is_equal_approx(sf.value, 115.5),
+		"MMB release commits Value Ladder gesture as exactly 1 commit event")
+
+	# 2b. MMB Value Ladder cancellation (Escape / RMB) restores exact initial value with 0 commits
+	sf.begin_ladder(Vector2(200.0, 200.0))
+	sf.step_ladder_by(8, ladder_steps.find(10.0))
+	check(is_equal_approx(sf.value, 195.5), "ladder scrub previews 195.5 m before cancel")
+	sf.end_ladder(false)
+	check(not sf.is_ladder_active() and is_equal_approx(sf.value, 115.5) and cancelled_count[0] == 1 and committed_count[0] == 1,
+		"cancelling Value Ladder restores 115.5 m and emits 0 additional commits")
+
+	# 2c. Direct numeric entry: out-of-slider-range value, locale comma, unit suffix stripping, invalid input rejection
+	sf._commit_text("1250,4 m")
+	check(is_equal_approx(sf.value, 1250.4) and sf.slider.max_value >= 1250.4,
+		"direct typing accepts locale comma, unit suffix, and values above slider display range within native max")
+	sf._commit_text("-45,2 m")
+	check(is_equal_approx(sf.value, -45.2), "direct typing accepts negative floats with locale comma")
+	sf._commit_text("not_a_number")
+	check(is_equal_approx(sf.value, -45.2) and sf.readout.text == "-45.2",
+		"invalid text input is rejected and restores previous readout")
+	sf._commit_text("nan")
+	sf._commit_text("inf")
+	sf._commit_text("-inf")
+	check(is_equal_approx(sf.value, -45.2), "NaN and Infinity text inputs are rejected")
+	sf.reset_to_default()
+	check(is_equal_approx(sf.value, 100.0), "reset_to_default restores 100.0 m")
+
+	# 2c-real: Real Godot InputEvent integration testing (MMB press, vertical rung switch accumulator reset, horizontal scrub, Escape/RMB cancel, Ctrl+MMB reset, context menu, focus loss, dialog close, map switch, 3D camera isolation)
+	var cam_center_before: Vector3 = editor.scene_view.center
+	var mmb_press := InputEventMouseButton.new()
+	mmb_press.button_index = MOUSE_BUTTON_MIDDLE
+	mmb_press.pressed = true
+	mmb_press.position = Vector2(10.0, 8.0)
+	mmb_press.global_position = Vector2(220.0, 220.0)
+	sf._on_readout_gui_input(mmb_press)
+	check(sf.is_ladder_active() and sf._ladder_layer != null and sf._ladder_layer.visible,
+		"real InputEventMouseButton MMB press on readout activates Value Ladder and shows CanvasLayer")
+	# Partial horizontal motion (5 px < 8 px tick) followed by vertical rung change must reset accumulator
+	var motion_partial := InputEventMouseMotion.new()
+	motion_partial.global_position = Vector2(225.0, 220.0)
+	motion_partial.relative = Vector2(5.0, 0.0)
+	sf._input(motion_partial)
+	check(is_equal_approx(sf.value, 100.0) and sf._ladder_accum_x > 0.0,
+		"sub-tick horizontal motion accumulates without premature step")
+	var motion_rung := InputEventMouseMotion.new()
+	motion_rung.global_position = Vector2(225.0, 220.0 - 36.0) # shift up 2 rungs to larger magnitude
+	motion_rung.relative = Vector2(2.0, -36.0)
+	sf._input(motion_rung)
+	check(is_equal_approx(sf._ladder_accum_x, 0.0) and is_equal_approx(sf.value, 100.0),
+		"vertical rung switch resets horizontal accumulator so sub-tick jitter never causes a large magnitude jump")
+	# Scrub horizontally on active rung via real InputEventMouseMotion
+	var active_step_mag: float = sf.active_ladder_step()
+	var motion_scrub := InputEventMouseMotion.new()
+	motion_scrub.global_position = Vector2(245.0, 220.0 - 36.0)
+	motion_scrub.relative = Vector2(16.0, 0.0) # 2 ticks
+	sf._input(motion_scrub)
+	check(is_equal_approx(sf.value, 100.0 + 2.0 * active_step_mag),
+		"real InputEventMouseMotion scrubs Value Ladder by 2 ticks on selected rung")
+	check(editor.scene_view.center == cam_center_before,
+		"MMB Value Ladder gesture on SliderField never moves 3D viewport camera")
+	var mmb_release := InputEventMouseButton.new()
+	mmb_release.button_index = MOUSE_BUTTON_MIDDLE
+	mmb_release.pressed = false
+	mmb_release.global_position = Vector2(245.0, 184.0)
+	sf._input(mmb_release)
+	check(not sf.is_ladder_active() and not sf._ladder_layer.visible,
+		"real InputEventMouseButton MMB release commits Value Ladder and hides CanvasLayer")
+	# RMB cancel via real InputEventMouseButton (scrub horizontally on active rung)
+	var motion_same_rung := InputEventMouseMotion.new()
+	motion_same_rung.global_position = Vector2(245.0, 220.0)
+	motion_same_rung.relative = Vector2(16.0, 0.0)
+	var pre_rmb_val: float = sf.value
+	sf._on_readout_gui_input(mmb_press)
+	sf._input(motion_same_rung)
+	check(not is_equal_approx(sf.value, pre_rmb_val), "value changes during ladder scrub before RMB cancel")
+	var rmb_cancel := InputEventMouseButton.new()
+	rmb_cancel.button_index = MOUSE_BUTTON_RIGHT
+	rmb_cancel.pressed = true
+	sf._input(rmb_cancel)
+	check(not sf.is_ladder_active() and is_equal_approx(sf.value, pre_rmb_val),
+		"real InputEventMouseButton RMB press cancels Value Ladder and restores initial value")
+	# Escape cancel via real InputEventKey
+	sf._on_readout_gui_input(mmb_press)
+	sf._input(motion_same_rung)
+	var esc_key := InputEventKey.new()
+	esc_key.keycode = KEY_ESCAPE
+	esc_key.pressed = true
+	sf._input(esc_key)
+	check(not sf.is_ladder_active() and is_equal_approx(sf.value, pre_rmb_val),
+		"real InputEventKey Escape cancels Value Ladder and restores initial value")
+	# Ctrl+MMB reset via real InputEventMouseButton
+	var ctrl_mmb := InputEventMouseButton.new()
+	ctrl_mmb.button_index = MOUSE_BUTTON_MIDDLE
+	ctrl_mmb.pressed = true
+	ctrl_mmb.ctrl_pressed = true
+	sf._on_readout_gui_input(ctrl_mmb)
+	check(is_equal_approx(sf.value, 100.0), "Ctrl+MMB press resets SliderField to default value 100.0 m")
+	# Context menu Copy / Paste / Reset
+	sf.value = 142.5
+	sf._on_context_menu_id(0) # Copy
+	sf.value = 100.0
+	sf._on_context_menu_id(1) # Paste
+	check(is_equal_approx(sf.value, 142.5), "context menu Copy & Paste round-trips numeric readout value via clipboard")
+	sf._on_context_menu_id(2) # Reset
+	check(is_equal_approx(sf.value, 100.0), "context menu Reset restores default value")
+	# Window focus loss during active gesture cancels cleanly
+	sf._on_readout_gui_input(mmb_press)
+	sf._input(motion_same_rung)
+	sf.notification(Node.NOTIFICATION_WM_WINDOW_FOCUS_OUT)
+	check(not sf.is_ladder_active() and is_equal_approx(sf.value, 100.0) and not sf._ladder_layer.visible,
+		"window focus loss during Value Ladder gesture cancels and hides CanvasLayer")
+	# Direct-document-edit role binding test (Class C: 20 scrub steps -> 0 undo on cancel, 1 undo on commit)
+	var direct_sf := preload("res://themes/slider_field.gd").new()
+	direct_sf.min_value = 0.0
+	direct_sf.max_value = 500.0
+	direct_sf.step = 1.0
+	direct_sf.value = 50.0
+	editor.add_child(direct_sf)
+	var direct_undo_commits := [0]
+	var direct_preview_val := [50.0]
+	direct_sf.bind_direct_edit(
+		func(init_v: float): direct_preview_val[0] = init_v,
+		func(prev_v: float): direct_preview_val[0] = prev_v,
+		func(_init_v: float, final_v: float): direct_preview_val[0] = final_v; direct_undo_commits[0] += 1,
+		func(rest_v: float): direct_preview_val[0] = rest_v
+	)
+	direct_sf.begin_ladder(Vector2(100.0, 100.0))
+	for _t in 20:
+		direct_sf.step_ladder_by(1, 0)
+	check(direct_undo_commits[0] == 0 and direct_preview_val[0] > 50.0,
+		"Class C direct-edit SliderField updates live preview across 20 steps with 0 premature undo commits")
+	direct_sf.end_ladder(false)
+	check(direct_undo_commits[0] == 0 and is_equal_approx(direct_preview_val[0], 50.0),
+		"Class C direct-edit SliderField cancel restores initial state with 0 undo commits")
+	direct_sf.begin_ladder(Vector2(100.0, 100.0))
+	for _t in 20:
+		direct_sf.step_ladder_by(1, 0)
+	direct_sf.end_ladder(true)
+	check(direct_undo_commits[0] == 1,
+		"Class C direct-edit SliderField commit records exactly 1 undo command after 20 scrub steps")
+	direct_sf.queue_free()
+
+	sf.gesture_started.disconnect(on_start)
+	sf.preview_changed.disconnect(on_prev)
+	sf.value_committed.disconnect(on_commit)
+	sf.gesture_cancelled.disconnect(on_cancel)
+
+	# 2d. Integer-only fields never allow fractional ladder steps
+	for int_field: Control in [brush.texture_slot, brush.texture_lane, editor.sound_editor.volume_spin, editor.terrain_tools.vrv_seed]:
+		var isf = int_field
+		var steps: Array = isf.get_ladder_steps()
+		var has_frac: bool = steps.any(func(s: float): return s < 1.0 or not is_equal_approx(s, roundf(s)))
+		check(isf.is_integer_field() and not steps.is_empty() and not has_frac,
+			"integer SliderField provides only whole-number ladder steps: " + str(steps))
+
+	# 2e. Verify all subsystem SliderFields respond to direct entry, slider, and Value Ladder
+	var all_fields: Array = [
+		brush.target, brush.texture_slot, brush.texture_lane,
+		editor.water_tools.elevation, editor.water_tools.radius,
+		editor.terrain_tools.height, editor.terrain_tools.grade_x, editor.terrain_tools.vrv_strength,
+		editor.slope_studio.from_height, editor.slope_studio.target_height, editor.slope_studio.angle,
+		editor.slope_studio.width, editor.slope_studio.batch_spacing,
+		editor.mission_studio.delta_x, editor.mission_studio.rotate_deg, editor.mission_studio.spacing_m,
+		editor.path_inspector.position_x,
+		editor.sound_editor.volume_spin, editor.sound_editor.range_spin, editor.sound_editor.pitch_spin,
+		editor.studio.range_field, editor.studio.parameters["opacity"], editor.studio.parameters["amplitude"],
+	]
+	var all_ok := true
+	for f in all_fields:
+		var orig_v: float = f.value
+		f.begin_ladder(Vector2(100.0, 100.0))
+		f.step_ladder_by(1, 0)
+		f.end_ladder(false)
+		if not is_equal_approx(f.value, orig_v):
+			all_ok = false
+			break
+	check(all_ok, "all 23 subsystem SliderField instances support Value Ladder scrub and clean cancel")
+
+	# 3. Dialog layout compactness, dynamic section collapse, ChoiceGroup overflow, 10 mandatory screenshots, and multi-resolution / theme matrix
+	if DisplayServer.get_name() != "headless":
+		root.size = Vector2i(1120, 690)
+		editor.size = Vector2(1120, 690)
+		await process_frame
+	editor.last_cursor = Vector2(512.0, 512.0)
+
+	# 3.0 Terrain Commands (Shape Terrain) dialog + screenshot #7
+	editor.open_terrain_tools()
+	var ttools = editor.terrain_tools
+	var ttools_cmin: Vector2 = ttools.get_contents_minimum_size()
+	check(ttools.size.y < 360 and ttools.size.x >= int(ttools_cmin.x) and not ttools.get_ok_button().disabled,
+		"Shape Terrain dialog fits tightly without empty void or clipping: size=%s content=%s" % [str(ttools.size), str(ttools_cmin)])
+	if DisplayServer.get_name() != "headless":
+		await process_frame
+		await RenderingServer.frame_post_draw
+		check(root.get_texture().get_image().save_png(scratch.path_join("terrain-commands.png")) == OK, "capture Terrain Commands (Shape Terrain) screenshot")
+	ttools.hide()
+
+	# 3a. Slope Studio dynamic row visibility, live preview scrubbing (Class B: 0 undo entries during drag), dialog-close gesture cancel & screenshots #4 and #5
+	editor.open_slope_studio()
+	var sstudio = editor.slope_studio
+	sstudio.mode_choice.select(0)
+	sstudio.profile.select(0) # flat
+	sstudio.batch_mode.select(0) # single
+	sstudio._sync_visible_rows()
+	check(sstudio._target_height_row.visible and not sstudio._angle_row.visible
+		and not sstudio._terrace_row.visible and not sstudio._amplitude_row.visible
+		and not sstudio._batch_count_row.visible and not sstudio._batch_spacing_row.visible,
+		"Slope Studio hides angle, terrace, amplitude and batch rows when flat/elevation/single is active")
+	if DisplayServer.get_name() != "headless":
+		await process_frame
+		await RenderingServer.frame_post_draw
+		check(root.get_texture().get_image().save_png(scratch.path_join("slope-studio.png")) == OK, "capture compact Slope Studio screenshot")
+	var slope_size_before: Vector2i = sstudio.size
+	var undo_before_slope_scrub: int = editor.document.undo_stack.size()
+	check(sstudio.preview_shape() and sstudio._preview_armed and editor.document.has_preview(),
+		"Slope Studio arms live preview without adding an undo entry")
+	sstudio.target_height.begin_ladder(Vector2(280.0, 260.0))
+	for _t in 10:
+		sstudio.target_height.step_ladder_by(1, sstudio.target_height.get_ladder_steps().find(1.0))
+	check(sstudio.size == slope_size_before and editor.document.has_preview() and editor.document.undo_stack.size() == undo_before_slope_scrub,
+		"Class B Slope Studio live preview scrubbing updates terrain preview across 10 ticks with 0 undo entries and 0 dialog displacement")
+	if DisplayServer.get_name() != "headless":
+		await process_frame
+		await RenderingServer.frame_post_draw
+		check(root.get_texture().get_image().save_png(scratch.path_join("slope-studio-ladder.png")) == OK, "capture Slope Studio with active Value Ladder")
+	sstudio.target_height.end_ladder(false)
+	check(editor.document.undo_stack.size() == undo_before_slope_scrub,
+		"cancelling Slope Studio Value Ladder restores initial preview height with 0 undo entries")
+	# Dialog close while Value Ladder is active must cancel gesture and hide CanvasLayer
+	var th_before_close: float = sstudio.target_height.value
+	sstudio.target_height.begin_ladder(Vector2(280.0, 260.0))
+	sstudio.target_height.step_ladder_by(5, 0)
+	sstudio.hide()
+	editor.document.clear_preview()
+	check(not sstudio.target_height.is_ladder_active() and is_equal_approx(sstudio.target_height.value, th_before_close)
+		and (sstudio.target_height._ladder_layer == null or not sstudio.target_height._ladder_layer.visible),
+		"closing dialog during active Value Ladder gesture cancels gesture, restores value, and hides CanvasLayer")
+	editor.open_slope_studio()
+	sstudio.mode_choice.select(1) # exact angle
+	sstudio.profile.select(Shapes.PROFILES.find("terrace"))
+	sstudio.batch_mode.select(1) # linear
+	sstudio._sync_visible_rows()
+	check(not sstudio._target_height_row.visible and sstudio._angle_row.visible
+		and sstudio._terrace_row.visible and sstudio._batch_count_row.visible,
+		"Slope Studio reveals angle, terrace and batch rows when selected")
+	sstudio.mode_choice.select(0)
+	sstudio.profile.select(0)
+	sstudio.batch_mode.select(0)
+	sstudio._sync_visible_rows()
+	sstudio.hide()
+	editor.document.clear_preview()
+
+	# 3b. Target Profile Dialog dynamic analysis collapse + screenshot #2
+	editor.open_target_profile(0)
+	var tpd = editor.target_profile_dialog
+	check(not tpd.analysis_output.visible and tpd.size.y < 420,
+		"Target Profile dialog starts compact with empty conversion analysis collapsed: y=%d" % tpd.size.y)
+	if DisplayServer.get_name() != "headless":
+		await process_frame
+		await RenderingServer.frame_post_draw
+		check(root.get_texture().get_image().save_png(scratch.path_join("target-profile-compact.png")) == OK, "capture compact Target Profile dialog")
+	tpd.run_conversion_analysis()
+	check(tpd.analysis_output.visible and not tpd.analysis_output.text.is_empty(),
+		"Target Profile dialog expands conversion analysis when run")
+	tpd.hide()
+
+	# 3b-extra: Mission Studio (#3), Node Studio (#6), Water (#8), Sound (#9) layout & screenshot acceptance
+	editor.open_mission_studio()
+	var mstudio = editor.mission_studio
+	check(mstudio.size.x <= 1100 and mstudio.size.y <= 650 and not mstudio.get_ok_button().disabled,
+		"Mission Studio dialog fits compactly with accessible controls: size=%s" % str(mstudio.size))
+	if DisplayServer.get_name() != "headless":
+		await process_frame
+		await RenderingServer.frame_post_draw
+		check(root.get_texture().get_image().save_png(scratch.path_join("mission-studio.png")) == OK, "capture Mission Studio screenshot")
+	mstudio.hide()
+
+	editor.open_studio()
+	var nstudio = editor.studio
+	check(nstudio.size.x <= 1100 and nstudio.size.y <= 650,
+		"Node Studio window fits compactly: size=%s" % str(nstudio.size))
+	if DisplayServer.get_name() != "headless":
+		await process_frame
+		await RenderingServer.frame_post_draw
+		check(root.get_texture().get_image().save_png(scratch.path_join("node-studio.png")) == OK, "capture Node Studio screenshot")
+	nstudio.close_studio()
+
+	editor.toggle_water_edit()
+	var wtools = editor.water_tools
+	check(wtools.size.y < 340 and not wtools.get_ok_button().disabled,
+		"Edit Water dialog fits compactly without empty void: size=%s" % str(wtools.size))
+	if DisplayServer.get_name() != "headless":
+		await process_frame
+		await RenderingServer.frame_post_draw
+		check(root.get_texture().get_image().save_png(scratch.path_join("water-commands.png")) == OK, "capture Edit Water screenshot")
+	wtools.hide()
+
+	editor.open_sound_editor()
+	var sedit = editor.sound_editor
+	check(sedit.size.y < 420,
+		"Sound Point Editor dialog fits compactly: size=%s" % str(sedit.size))
+	if DisplayServer.get_name() != "headless":
+		await process_frame
+		await RenderingServer.frame_post_draw
+		check(root.get_texture().get_image().save_png(scratch.path_join("sound-editor.png")) == OK, "capture Sound Point Editor screenshot")
+	sedit.hide()
+
+	# 3c. New Map Wizard with 22+ Workshop mods: ChoiceGroup overflow + compact summary + fits 640x540, 1120x690, 1280x720, 1920x1080, 2560x1440 (#1)
+	var many_reg := ModRegistry.new()
+	for i in 20:
+		many_reg.register_custom_mod("ws_mod_%02d" % i, "Workshop Mod %02d" % i, scratch, ["stock"])
+	var wiz = editor.new_map_wizard
+	wiz.begin(many_reg, editor.game_path.text.strip_edges(), "stock", scratch, blank_source)
+	check(wiz.mod_select.item_count >= 23 and wiz.mod_select._header_row.visible and wiz.mod_select._scroll.custom_minimum_size.y <= 60,
+		"New Map Wizard activates compact searchable overflow for 23+ mod profiles")
+	wiz.mod_select.filter_options("Mod 15")
+	check(wiz.mod_select.button_at(0).visible and not wiz.mod_select.button_at(5).visible,
+		"ChoiceGroup filter narrows mod buttons while keeping active selection visible")
+	wiz.mod_select.filter_options("")
+	check(wiz.size.y <= 520 and not wiz.status_label.visible,
+		"New Map Wizard with 23+ mods fits comfortably within 520 px height without clipping: y=%d" % wiz.size.y)
+	if DisplayServer.get_name() != "headless":
+		await process_frame
+		await RenderingServer.frame_post_draw
+		check(root.get_texture().get_image().save_png(scratch.path_join("wizard-720p.png")) == OK, "capture compact New Map Wizard at 1120x690")
+		root.size = Vector2i(1920, 1080)
+		editor.size = Vector2(1920, 1080)
+		wiz.popup_centered(wiz.size)
+		await process_frame
+		await RenderingServer.frame_post_draw
+		check(root.get_texture().get_image().save_png(scratch.path_join("wizard-1080p.png")) == OK, "capture compact New Map Wizard at 1920x1080")
+		root.size = Vector2i(1120, 690)
+		editor.size = Vector2(1120, 690)
+		await process_frame
+
+	# 4. P0 New Map Wizard Stock Safety: Refuse incompatible Stock source unless verified conversion is explicitly enabled (Section 4)
+	wiz.source_bzn_field.text = blank_source # contains ivtank_vsr
+	wiz.output_parent_field.text = scratch
+	wiz.sanitize_stock_check.set_pressed_no_signal(false)
+	wiz.refresh_summary()
+	var doc_before_refusal = editor.document
+	wiz.create_selected_map()
+	check(wiz.visible and wiz.status_label.visible and "[ERR] Cannot create Stock map" in wiz.status_label.text
+		and editor.document == doc_before_refusal,
+		"New Map Wizard refuses Stock map creation from VSR source when conversion checkbox is off")
+	wiz.hide()
+
+	# 3d. Resolution, Font Size (10..24) & All-Theme (Golden Default, Vintage Dark, Vintage Classic, Nord) matrix verification (#10)
+	var orig_editor_size: Vector2 = editor.size
+	var orig_font_size: int = editor.ui_font_size
+	for slug in Wintage.theme_slugs():
+		editor.set_wintage_theme(slug, false, false)
+		Wintage.shrink_dialog(editor.slope_studio, 480)
+		check(editor.theme != null and editor.slope_studio.size.x >= 300 and editor.slope_studio.size.y < 520,
+			"Wintage theme '%s' sizes dialogs compactly without hardcoded theme drift" % slug)
+	for res: Vector2 in [Vector2(640, 540), Vector2(1120, 690), Vector2(1280, 720), Vector2(1920, 1080), Vector2(2560, 1440)]:
+		editor.size = res
+		await process_frame
+		check(editor.scene_view.size.x > 100 and editor.top.size.x > 80,
+			"2D and 3D viewports retain usable workspace at %dx%d" % [int(res.x), int(res.y)])
+	for fsz in [10, 12, 16, 24]:
+		editor.ui_font_size = fsz
+		editor.set_wintage_theme(Wintage.DEFAULT_THEME, false, false)
+		check(editor.theme.default_font_size == fsz, "font scaling applies %d px cleanly" % fsz)
+	editor.ui_font_size = orig_font_size
+	editor.set_wintage_theme(Wintage.DEFAULT_THEME, false, false)
+	editor.size = orig_editor_size
+	await process_frame
+	check(editor.empty_state_hint != null and not editor.empty_state_hint.visible,
+		"empty-state hint stays hidden while a map document is open")
+	if DisplayServer.get_name() != "headless":
+		await RenderingServer.frame_post_draw
+		check(root.get_texture().get_image().save_png(scratch.path_join("editor-verdana-m1.png")) == OK, "capture crisp Verdana_m1 main editor")
+
+	# Map switch while Value Ladder gesture is active cancels cleanly
+	brush.target.value = 100.0
+	brush.target.begin_ladder(Vector2(120.0, 420.0))
+	brush.target.step_ladder_by(5, 0)
+	check(brush.target.is_ladder_active(), "Value Ladder active on BrushPanel before map switch")
+
+	# 4b. Product regression safeguard: Explicit Stock + VSR ODF must NEVER silently become VSR
+	var writer := Snapshots.new()
+	var vsr_flat := scratch.path_join("playtest-vsr-blank")
+	check(writer.create_native_flat_map(blank_source, vsr_flat, 1024, 100.0), "create blank VSR fixture")
+	var vsr_flat_bzn := vsr_flat.path_join(blank_source.get_file())
+	editor._on_wizard_map_created(vsr_flat_bzn, "bzcc-2.0.185", "stock", "blank")
+	check(not brush.target.is_ladder_active() and is_equal_approx(brush.target.value, 100.0),
+		"switching map while Value Ladder gesture is active cancels gesture and restores value")
+	check(editor.document.mod_profile == "stock" and editor.document.profile_explicit,
+		"New Map Wizard preserves explicit 'stock' selection even when template contains VSR ODF")
+	check(editor._effective_playtest_mod() == "stock",
+		"_effective_playtest_mod never silently overrides explicit 'stock' with 'vsr'")
+	var pt_compat: Dictionary = editor.validate_playtest_profile()
+	check(not bool(pt_compat["ok"]) and String(pt_compat["selectedMod"]) == "stock"
+		and String(pt_compat["suggestedMod"]) == "vsr" and not (pt_compat["incompatibleOdfs"] as Array).is_empty(),
+		"Playtest preflight detects Stock vs VSR contradiction and refuses unsafe route without mutating mod_profile")
+
+	# 5. P0 Semantic ODF Conversion Matrix (Section 5: known valid, unknown _vsr, missing Stock counterpart, different classes, VRV sound point, duplicate IDs, invalid refs, mixed map, undoable document conversion & native reimport)
+	var conv_valid := ModRegistry.lookup_verified_odf_conversion("ivtank_vsr", "stock")
+	check(String(conv_valid["status"]) == "verified" and String(conv_valid["targetOdf"]) == "ivtank"
+		and String(conv_valid["classFamily"]) == "craft" and String(conv_valid["geometry"]) == "ivtank00.fbx",
+		"known valid VSR->Stock replacement carries verified class, geometry and evidence")
+	var conv_unknown := ModRegistry.lookup_verified_odf_conversion("unknown_custom_vsr", "stock")
+	check(String(conv_unknown["status"]) == "unverified" and String(conv_unknown["targetOdf"]).is_empty(),
+		"unknown _vsr ODF is refused instead of heuristically stripping _vsr")
+	var conv_missing := ModRegistry.lookup_verified_odf_conversion("sepool01_vsr", "stock")
+	check(String(conv_missing["status"]) == "unverified" and String(conv_missing["targetOdf"]).is_empty(),
+		"VSR-only pool ODF without Stock counterpart (sepool01_vsr) is refused")
+	var conv_bad_class := ModRegistry.lookup_verified_odf_conversion("ivtank_vsr", "stock", {"ivtank_vsr": "ibgtow"})
+	check(String(conv_bad_class["status"]) == "incompatible_class",
+		"manual replacement across different object classes (craft ivtank_vsr -> building ibgtow) is refused")
+	var conv_snd := ModRegistry.lookup_verified_odf_conversion("vrv_sndpoint", "stock")
+	check(String(conv_snd["status"]) == "unsupported_vrv",
+		"VRV sound point (vrv_sndpoint) is refused as unsupported in Stock")
+
+	# Plan-level checks: duplicate pointer IDs, duplicate sequences, pointer-referenced VRV sound point, and mixed Stock/VSR object list
+	var dup_ptr_entries := [
+		{"odf": "ivtank_vsr", "label": "", "flag8": 5, "sequence": 100},
+		{"odf": "ivscout", "label": "", "flag8": 5, "sequence": 101},
+	]
+	var dup_ptr_plan := ModRegistry.plan_bzn_odf_conversion(dup_ptr_entries, {5: 1}, "stock")
+	check(not bool(dup_ptr_plan["ok"]) and String(dup_ptr_plan["unsupported"][0]).contains("Duplicate object pointer ID"),
+		"ODF conversion refuses object tables with duplicate pointer IDs")
+	var dup_seq_entries := [
+		{"odf": "ivtank_vsr", "label": "", "flag8": 5, "sequence": 100},
+		{"odf": "ivscout", "label": "", "flag8": 6, "sequence": 100},
+	]
+	var dup_seq_plan := ModRegistry.plan_bzn_odf_conversion(dup_seq_entries, {5: 1, 6: 1}, "stock")
+	check(not bool(dup_seq_plan["ok"]) and String(dup_seq_plan["unsupported"][0]).contains("Duplicate object sequence"),
+		"ODF conversion refuses object tables with duplicate sequence numbers")
+	var ref_vrv_entries := [
+		{"odf": "vrv_sndpoint", "label": "vrvsnd:amb.wav:70:150:0:0:100:20", "flag8": 9, "sequence": 200},
+	]
+	var ref_vrv_plan := ModRegistry.plan_bzn_odf_conversion(ref_vrv_entries, {9: 2}, "stock", {}, true)
+	check(not bool(ref_vrv_plan["ok"]) and String(ref_vrv_plan["unsupported"][0]).contains("Invalid reference"),
+		"ODF conversion refuses to remove a VRV sound point referenced by another BZN record")
+	var mixed_entries := [
+		{"odf": "ivscout", "label": "", "flag8": 1, "sequence": 10},
+		{"odf": "ivtank_vsr", "label": "", "flag8": 2, "sequence": 11},
+		{"odf": "fvscout_vsr", "label": "", "flag8": 3, "sequence": 12},
+	]
+	var mixed_plan := ModRegistry.plan_bzn_odf_conversion(mixed_entries, {1: 1, 2: 1, 3: 1}, "stock")
+	check(bool(mixed_plan["ok"]) and (mixed_plan["odfEdits"] as Dictionary).size() == 2
+		and String(mixed_plan["odfEdits"][1]) == "ivtank" and String(mixed_plan["odfEdits"][2]) == "fvscout"
+		and not (mixed_plan["odfEdits"] as Dictionary).has(0),
+		"mixed Stock/VSR object list converts only VSR ODFs with verified mappings while leaving native Stock ODFs untouched")
+
+	# Undoable semantic conversion on open MapDocument + BZMAG save/reopen + Native export reimport
+	check(editor.document.object_odf(0) == "ivtank_vsr", "open map starts with ivtank_vsr before semantic conversion")
+	var bad_doc_conv: Dictionary = editor.document.convert_objects_to_profile("stock", "strategy", {"ivtank_vsr": "ibgtow"})
+	check(not bool(bad_doc_conv["ok"]) and editor.document.object_odf(0) == "ivtank_vsr",
+		"MapDocument refuses incompatible-class manual conversion and preserves original ODF")
+	var undo_before_conv: int = editor.document.undo_stack.size()
+	var ok_doc_conv: Dictionary = editor.document.convert_objects_to_profile("stock", "strategy")
+	check(bool(ok_doc_conv["ok"]) and int(ok_doc_conv["replacedCount"]) == 1
+		and editor.document.object_odf(0) == "ivtank" and editor.document.mod_profile == "stock"
+		and editor.document.undo_stack.size() == undo_before_conv + 1,
+		"MapDocument.convert_objects_to_profile converts ivtank_vsr -> ivtank in 1 undo step")
+	editor.document.undo()
+	check(editor.document.object_odf(0) == "ivtank_vsr", "Undo restores original ivtank_vsr ODF")
+	editor.document.redo()
+	check(editor.document.object_odf(0) == "ivtank" and bool(editor.validate_playtest_profile()["ok"]),
+		"Redo reapplies semantic ivtank conversion and passes Playtest profile validation")
+	var conv_bzmag := scratch.path_join("converted-stock.bzmag")
+	check(writer.save_project(editor.document, conv_bzmag), "save converted Stock project to .bzmag")
+	var reopened_conv := Document.new()
+	check(reopened_conv.open(conv_bzmag) and reopened_conv.object_odf(0) == "ivtank" and reopened_conv.mod_profile == "stock",
+		"reopening .bzmag preserves semantic objectOdfEdits and Stock profile")
+	var conv_export_dir := scratch.path_join("converted-stock-export")
+	check(writer.export_native(reopened_conv, conv_export_dir), "export converted Stock map to native BZN and verify reimport: " + writer.error)
+	var reimported_conv := Document.new()
+	check(reimported_conv.open(conv_export_dir.path_join(blank_source.get_file()))
+		and reimported_conv.object_odf(0) == "ivtank"
+		and int(reimported_conv.package.objects[0]["flag8"]) == 1,
+		"native exported BZN reimports with converted Stock ivtank and preserved player pointer ID 1")
+
+	# Negative test: NewMapWizard and Snapshots refuse template containing unverified _vsr ODF even with sanitize_stock_objects=true
+	var unverified_src_dir := scratch.path_join("unverified-vsr-tpl")
+	check(writer.create_native_flat_map(blank_source, unverified_src_dir, 1024, 100.0), "stage template for unverified _vsr ODF test")
+	var unv_bzn := unverified_src_dir.path_join(blank_source.get_file())
+	var unv_bytes := FileAccess.get_file_as_bytes(unv_bzn)
+	var unv_pc := BznPaths.new()
+	unv_pc.read(unv_bytes, 1192)
+	var unv_oc := BznObjects.new()
+	unv_oc.read(unv_bytes, 1192, unv_pc.table_start)
+	var unv_patched := BznObjects.patch_objects(unv_bytes, unv_oc.objects, {}, [], [], unv_oc.count_offset, unv_oc.insert_offset, {}, {0: "sepool01_vsr"})
+	check(writer.write_bytes(unv_bzn, unv_patched["bytes"]), "write unverified sepool01_vsr ODF into test template")
+	var refused_out := scratch.path_join("refused-unverified-stock")
+	check(not writer.create_native_flat_map(unv_bzn, refused_out, 1024, 100.0, "", {
+		"mod_profile": "stock",
+		"mission_profile": "strategy",
+		"configure_mission": true,
+		"sanitize_stock_objects": true,
+	}) and not DirAccess.dir_exists_absolute(refused_out),
+		"Snapshots.create_native_flat_map refuses to convert unverified sepool01_vsr ODF to Stock")
+
+	# 6. Real Stock Strategy & Stock Instant native mission creation + asset isolation + unknown mod detection
+	var stock_strat_dir := scratch.path_join("stock-strategy-native")
+	check(writer.create_native_flat_map(blank_source, stock_strat_dir, 1024, 100.0, "", {
+		"mod_profile": "stock",
+		"mission_profile": "strategy",
+		"configure_mission": true,
+		"sanitize_stock_objects": true,
+	}), "create native Stock Strategy mission with DLL, paths and sanitized Stock objects: " + writer.error)
+	var stock_strat_doc := Document.new()
+	check(stock_strat_doc.open(stock_strat_dir.path_join(blank_source.get_file())), "open native Stock Strategy mission")
+	check(stock_strat_doc.package.mission_dll == "Strategy02.dll"
+		and stock_strat_doc.mod_profile == "stock"
+		and stock_strat_doc.mission_profile == "strategy"
+		and stock_strat_doc.object_count() == 3
+		and stock_strat_doc.object_odf(0) == "ivtank"
+		and int(stock_strat_doc.package.objects[0]["flag8"]) == 1
+		and stock_strat_doc.object_odf(1) == "pspwn_1"
+		and stock_strat_doc.object_odf(2) == "pspwn_1"
+		and MissionProfiles.validate(stock_strat_doc, "strategy", "stock")["ok"],
+		"Stock Strategy new map writes Strategy02.dll, required edge_path, pure Stock ivtank (ptr 1) and 2 pspwn_1 spawnpoints")
+
+	var stock_inst_dir := scratch.path_join("stock-instant-native")
+	check(writer.create_native_flat_map(blank_source, stock_inst_dir, 1024, 100.0, "", {
+		"mod_profile": "stock",
+		"mission_profile": "instant",
+		"configure_mission": true,
+		"sanitize_stock_objects": true,
+	}), "create native Stock Instant mission with Instant.dll and Recycler/RecyclerEnemy paths: " + writer.error)
+	var stock_inst_doc := Document.new()
+	check(stock_inst_doc.open(stock_inst_dir.path_join(blank_source.get_file())), "open native Stock Instant mission")
+	check(stock_inst_doc.package.mission_dll == "Instant.dll"
+		and stock_inst_doc.object_count() == 3
+		and stock_inst_doc.object_odf(0) == "ivtank"
+		and int(stock_inst_doc.package.objects[0]["flag8"]) == 1
+		and MissionProfiles.validate(stock_inst_doc, "instant", "stock")["ok"],
+		"Stock Instant new map writes Instant.dll, preserves player pointer ID 1, adds pspwn_1 spawnpoints and passes Stock Instant path validation")
+
+	# 6b. ResolvedContentEnvironment, NativeAssets strict Stock isolation & Stock -> VSR -> VRV -> Stock switching matrix (Section 8)
+	var fake_game := scratch.path_join("fake-bz2r")
+	DirAccess.make_dir_recursive_absolute(fake_game.path_join("bz2r_res"))
+	DirAccess.make_dir_recursive_absolute(fake_game.path_join("VRV/Core"))
+	DirAccess.make_dir_recursive_absolute(fake_game.path_join("VRV/deps/VSR"))
+	var src_bzn_hash_before := FileAccess.get_sha256(stock_strat_doc.package.source_path)
+	editor.open_map(stock_strat_doc.package.source_path)
+	var sw_doc: Document = editor.document
+	var env_stock_1: Dictionary = editor.mod_registry.resolve_content_environment(sw_doc, fake_game, fake_game)
+	check((env_stock_1["modAssetRoots"] as Array).is_empty(),
+		"Stock profile environment mounts 0 modAssetRoots")
+	check(sw_doc.set_target_profile("vsr", "strategy"), "switch profile Stock -> VSR")
+	var env_vsr: Dictionary = editor.mod_registry.resolve_content_environment(sw_doc, fake_game, fake_game)
+	var vsr_roots: Array = env_vsr["modAssetRoots"]
+	check(not vsr_roots.is_empty() and not vsr_roots.any(func(r: String): return r.ends_with("VRV/Core")),
+		"VSR profile environment mounts VSR dependency roots without VRV/Core")
+	check(sw_doc.set_target_profile("vrv", "strategy"), "switch profile VSR -> VRV")
+	var env_vrv: Dictionary = editor.mod_registry.resolve_content_environment(sw_doc, fake_game, fake_game)
+	var vrv_roots: Array = env_vrv["modAssetRoots"]
+	check(vrv_roots.any(func(r: String): return r.ends_with("VRV/Core")) and vrv_roots.any(func(r: String): return r.ends_with("VRV/deps/VSR")),
+		"VRV profile environment mounts both VRV/Core and VSR dependency roots")
+	check(sw_doc.set_target_profile("stock", "strategy"), "switch profile VRV -> Stock")
+	var env_stock_2: Dictionary = editor.mod_registry.resolve_content_environment(sw_doc, fake_game, fake_game)
+	check((env_stock_2["modAssetRoots"] as Array).is_empty() and editor.loaded_objects == null and editor.scene_view.tile_material == null,
+		"switching back to Stock clears cached mod assets/materials and restores strict 0-modAssetRoots isolation")
+	sw_doc.undo()
+	check(sw_doc.mod_profile == "vrv", "Undo reverses Stock -> VRV profile switch")
+	sw_doc.undo()
+	check(sw_doc.mod_profile == "vsr", "Undo reverses VRV -> VSR profile switch")
+	sw_doc.undo()
+	check(sw_doc.mod_profile == "stock", "Undo reverses VSR -> Stock profile switch")
+	sw_doc.redo()
+	sw_doc.redo()
+	sw_doc.redo()
+	check(sw_doc.mod_profile == "stock" and FileAccess.get_sha256(sw_doc.package.source_path) == src_bzn_hash_before,
+		"Redo chain restores final profile and native source BZN bytes remain 100% unchanged across all switches")
+
+	var na := NativeAssets.new()
+	na.index_game(fake_game, stock_strat_dir, env_stock_2["modAssetRoots"], "stock")
+	var has_vrv_root := na.indexed_roots.any(func(r: String): return "vrv" in r.to_lower())
+	check(not has_vrv_root, "NativeAssets.index_game never mounts VRV/Core or VRV/deps for Stock profile")
+
+	# 6c. Unknown mod detection never silently classifies custom DLL as high-confidence Stock
+	var custom_dll_dir := scratch.path_join("unknown-mod-map")
+	check(writer.create_native_flat_map(blank_source, custom_dll_dir, 1024, 100.0, "", {
+		"mod_profile": "stock",
+		"mission_profile": "blank",
+		"configure_mission": false,
+		"sanitize_stock_objects": true,
+	}), "create base map for unknown mod detection test")
+	var c_bzn_path := custom_dll_dir.path_join(blank_source.get_file())
+	var c_raw := FileAccess.get_file_as_bytes(c_bzn_path)
+	var c_paths := BznPaths.new()
+	c_paths.read(c_raw, 1192)
+	var c_objs := BznObjects.new()
+	c_objs.read(c_raw, 1192, c_paths.table_start)
+	var patched_custom_dll := BznObjects.patch_mission_dll(c_raw, c_objs.insert_offset, c_paths.table_start, "UnknownTotalMod.dll")
+	check(writer.write_bytes(c_bzn_path, patched_custom_dll), "write UnknownTotalMod.dll into test BZN")
+	var unk_doc := Document.new()
+	check(unk_doc.open(c_bzn_path), "open UnknownTotalMod.dll map")
+	check(unk_doc.mod_profile == "custom:unknown" and bool(unk_doc.detected_profile_info.get("unknownMod", false)),
+		"unknown custom DLL detects as 'custom:unknown' instead of falsely claiming high-confidence Stock")
+
+	print("Continuous hold brush, crisp Verdana_m1 bitmaps, Houdini Value Ladder, compact dialogs, Stock safety & Universal Authoring verified.")

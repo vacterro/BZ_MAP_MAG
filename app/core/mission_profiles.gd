@@ -15,11 +15,11 @@ const PROFILE_ORDER := ["blank", "strategy", "instant", "mpi", "duel", "lua", "c
 const MODE_LABELS := {
 	"blank": "Blank / Sandbox",
 	"strategy": "Strategy (Strategy02)",
-	"instant": "Instant Action (Instant)",
+	"instant": "Instant (Instant)",
 	"mpi": "MPI (mpinstant)",
-	"duel": "Duel / Deathmatch",
-	"lua": "Lua Mission (LuaMission)",
-	"custom-dll": "Custom Mission DLL",
+	"duel": "Duel / DM",
+	"lua": "Lua (LuaMission)",
+	"custom-dll": "Custom DLL",
 }
 
 ## Evidence-backed rules contracts keyed by "<mission>.<mod>".

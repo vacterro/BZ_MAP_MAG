@@ -3,6 +3,10 @@ extends RefCounted
 const Package := preload("res://formats/map_package.gd")
 const Document := preload("res://core/map_document.gd")
 const BznObjects := preload("res://formats/bzn_objects.gd")
+const BznPaths := preload("res://formats/bzn_paths.gd")
+const Layouts := preload("res://formats/bzn_layouts.gd")
+const MissionProfiles := preload("res://core/mission_profiles.gd")
+const ModRegistry := preload("res://core/mod_registry.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
 const Water := preload("res://formats/water_v5.gd")
 
@@ -34,7 +38,7 @@ func create_flat_map(mission: String, template: String, target: String, helper: 
 ## [Size] to the requested dimensions/height, synthesizes a verified native TER
 ## v5 file via Terrain.create_flat (or copies an explicit template TER), and
 ## validates by full Package.open() before atomic publish.
-func create_native_flat_map(source_bzn: String, target: String, size_m: int = 2048, height: float = 100.0, template_ter: String = "") -> bool:
+func create_native_flat_map(source_bzn: String, target: String, size_m: int = 2048, height: float = 100.0, template_ter: String = "", options: Dictionary = {}) -> bool:
 	if not source_bzn.is_absolute_path() or not FileAccess.file_exists(source_bzn) or source_bzn.get_extension().to_lower() != "bzn":
 		return fail("Choose an existing blank BZN source file.")
 	if not target.is_absolute_path() or exists(target):
@@ -90,6 +94,23 @@ func create_native_flat_map(source_bzn: String, target: String, size_m: int = 20
 		if DirAccess.copy_absolute(src_dir.path_join(fname), stage.path_join(fname)) != OK:
 			return rollback(stage, written, "Could not copy " + fname)
 		written.append(fname)
+	var bzn_file := source_bzn.get_file()
+	if not options.is_empty():
+		var flat_ter := Terrain.new()
+		if not flat_ter.decode(ter_bytes):
+			return rollback(stage, written, "Could not decode generated TER.")
+		var configured_bzn := _configure_mission_bzn(FileAccess.get_file_as_bytes(stage.path_join(bzn_file)), flat_ter, height, options)
+		if configured_bzn.is_empty():
+			return rollback(stage, written, error if not error.is_empty() else "Could not configure native mission BZN.")
+		if not write_bytes(stage.path_join(bzn_file), configured_bzn):
+			return rollback(stage, written, "Could not write configured " + bzn_file)
+		if String(options.get("mission_profile", "")) == "lua":
+			var lua_name := stem + ".lua"
+			if not FileAccess.file_exists(stage.path_join(lua_name)):
+				var lua_stub := "-- Auto-generated BZCC LuaMission companion\r\nfunction Start()\r\nend\r\nfunction Update(timestep)\r\nend\r\n"
+				if not write_bytes(stage.path_join(lua_name), lua_stub.to_utf8_buffer()):
+					return rollback(stage, written, "Could not write " + lua_name)
+				written.append(lua_name)
 	if inf_name.is_empty():
 		var synth_inf := stem + ".inf"
 		var synth_text := "[DESCRIPTION]\r\nmissionName = \"%s\"\r\n" % stem
@@ -115,6 +136,179 @@ func create_native_flat_map(source_bzn: String, target: String, size_m: int = 20
 	if exists(target) or DirAccess.rename_absolute(stage, target) != OK:
 		return rollback(stage, written, "Could not publish new map folder.")
 	return true
+
+
+func _configure_mission_bzn(source_bytes: PackedByteArray, terrain: Terrain, height: float, options: Dictionary) -> PackedByteArray:
+	var mod_id := String(options.get("mod_profile", "stock")).strip_edges().to_lower()
+	var mis_id := String(options.get("mission_profile", "blank")).strip_edges().to_lower()
+	var configure_mission := bool(options.get("configure_mission", false))
+	var sanitize_stock := bool(options.get("sanitize_stock_objects", false))
+	var allow_drop_vrv := bool(options.get("allow_drop_vrv_objects", false))
+	var manual_odf_map: Dictionary = options.get("manual_odf_map", {})
+	var layout := Layouts.recognize(source_bytes)
+	var ver := int(layout.get("version", 0))
+	if ver <= 0:
+		fail("Unrecognized BZN layout in template.")
+		return PackedByteArray()
+	var path_codec := BznPaths.new()
+	if not path_codec.read(source_bytes, ver):
+		fail("Could not decode BZN path table in template.")
+		return PackedByteArray()
+	var obj_codec := BznObjects.new()
+	if not obj_codec.read(source_bytes, ver, path_codec.table_start):
+		fail("Could not decode BZN object table in template.")
+		return PackedByteArray()
+
+	var current_bytes := source_bytes
+	var table_start := path_codec.table_start
+	var ptr_counts := path_codec.pointer_counts(current_bytes)
+
+	# 1. Validate & apply semantic ODF conversion (never heuristic _vsr stripping!)
+	if mod_id in ["stock", "vsr"]:
+		var plan := ModRegistry.plan_bzn_odf_conversion(obj_codec.objects, ptr_counts, mod_id, manual_odf_map, allow_drop_vrv)
+		var odf_edits: Dictionary = plan["odfEdits"]
+		var removals: Array = plan["removals"].duplicate()
+		var unsupported: Array = plan["unsupported"]
+		if not unsupported.is_empty():
+			fail("Incompatible template ODF(s) for '%s': %s" % [mod_id, "; ".join(unsupported)])
+			return PackedByteArray()
+		if (not odf_edits.is_empty() or not removals.is_empty()) and not sanitize_stock:
+			var needed: Array = plan["summaryLines"]
+			fail("Source template requires explicit verified ODF conversion for '%s': %s" % [mod_id, "; ".join(needed)])
+			return PackedByteArray()
+
+		# Trim unreferenced PLGR playground showcase objects (obj[1..N]) when creating a clean Stock map from plgr.bzn
+		var is_plgr_showcase := (mod_id == "stock" and obj_codec.mission_dll.to_lower() == "luamission.dll"
+			and obj_codec.objects.size() > 20 and String(obj_codec.objects[0].get("odf", "")).to_lower() == "player")
+		if is_plgr_showcase and bool(options.get("trim_showcase_objects", true)):
+			for idx in range(1, obj_codec.objects.size()):
+				var pid := int(obj_codec.objects[idx].get("flag8", 0))
+				if pid <= 0 or int(ptr_counts.get(pid, 0)) <= 1:
+					if not (idx in removals):
+						removals.append(idx)
+			if mis_id in ["strategy", "instant", "mpi", "duel"] and not odf_edits.has(0):
+				odf_edits[0] = "ivscout"
+
+		var xform_edits := {}
+		for idx in obj_codec.objects.size():
+			if idx in removals:
+				continue
+			var entry: Dictionary = obj_codec.objects[idx]
+			if odf_edits.has(idx) or is_plgr_showcase or configure_mission:
+				var xf: Transform3D = entry["transform"]
+				if not is_equal_approx(xf.origin.y, height):
+					xf.origin.y = height
+					xform_edits[idx] = xf
+
+		var insert_blocks: Array = []
+		if configure_mission and mod_id == "stock" and mis_id in ["strategy", "instant", "mpi", "duel"]:
+			var spawn_count := 0
+			for idx in obj_codec.objects.size():
+				if not (idx in removals) and String(obj_codec.objects[idx].get("odf", "")).to_lower() == "pspwn_1":
+					spawn_count += 1
+			if spawn_count < 2:
+				var next_ptr := 1
+				for pid: int in ptr_counts:
+					if pid < 4294967295:
+						next_ptr = maxi(next_ptr, pid + 1)
+				var max_seq := 1
+				for entry: Dictionary in obj_codec.objects:
+					max_seq = maxi(max_seq, (int(entry["sequence"]) & ~0x800000) + 1)
+				var p1_pts := MissionProfiles.preset_points("Player_1", terrain, Vector2.INF)
+				var p2_pts := MissionProfiles.preset_points("RecyclerEnemy", terrain, Vector2.INF)
+				var p1_xz := p1_pts[0] if not p1_pts.is_empty() else Vector2(-256.0, -256.0)
+				var p2_xz := p2_pts[0] if not p2_pts.is_empty() else Vector2(256.0, 256.0)
+				for sp_xz: Vector2 in [p1_xz, p2_xz]:
+					if spawn_count >= 2:
+						break
+					var alloc_ptr := allocate_unique_pointer_id(ptr_counts, next_ptr)
+					if alloc_ptr <= 0:
+						fail("Could not allocate unique pointer ID for spawnpoint.")
+						return PackedByteArray()
+					ptr_counts[alloc_ptr] = 1
+					next_ptr = alloc_ptr + 1
+					var sp_xf := Transform3D(Basis.IDENTITY, Vector3(sp_xz.x, height, sp_xz.y))
+					insert_blocks.append(BznObjects.build_spawnpoint_block(max_seq, sp_xf, alloc_ptr, 0))
+					max_seq += 1
+					spawn_count += 1
+
+		if not odf_edits.is_empty() or not removals.is_empty() or not xform_edits.is_empty() or not insert_blocks.is_empty():
+			var patched_obj := BznObjects.patch_objects(current_bytes, obj_codec.objects, xform_edits, removals, insert_blocks, obj_codec.count_offset, obj_codec.insert_offset, {}, odf_edits)
+			if patched_obj.is_empty():
+				fail("Could not patch template objects for %s mission." % mod_id)
+				return PackedByteArray()
+			current_bytes = patched_obj["bytes"]
+			if not path_codec.read(current_bytes, ver) or not obj_codec.read(current_bytes, ver, path_codec.table_start):
+				fail("Re-reading patched object table failed.")
+				return PackedByteArray()
+			table_start = path_codec.table_start
+
+	if not configure_mission and not sanitize_stock:
+		return current_bytes
+
+	# 2. Configure Mission DLL & Required Paths when configure_mission is enabled
+	if configure_mission or (mod_id == "stock" and mis_id == "blank" and obj_codec.mission_dll.to_lower() == "luamission.dll"):
+		var contract := MissionProfiles.contract_for(mis_id, mod_id)
+		var target_dll := String(contract.get("dll", "")).strip_edges()
+		if not target_dll.is_empty() or mis_id == "blank":
+			var with_dll := BznObjects.patch_mission_dll(current_bytes, obj_codec.insert_offset, table_start, target_dll)
+			if with_dll.is_empty():
+				fail("Could not patch BZN mission DLL.")
+				return PackedByteArray()
+			current_bytes = with_dll
+			if not path_codec.read(current_bytes, ver):
+				fail("Could not decode BZN path table after DLL update.")
+				return PackedByteArray()
+		var req_paths: Array = contract.get("required", [])
+		var rec_paths: Array = contract.get("recommended", [])
+		var wanted: Array[String] = []
+		for r_v in req_paths:
+			var r := String(r_v)
+			if not (r in wanted):
+				wanted.append(r)
+		if mis_id in ["strategy", "instant", "mpi", "duel"]:
+			for r_v in rec_paths:
+				var r := String(r_v)
+				if r in ["Player_1", "Player_2", "Recycler", "RecyclerEnemy", "gtow1", "gtow2", "gtow3", "gtow4", "gtow5", "turretEnemy1", "turretEnemy2", "hold1", "hold2", "stage1", "Stage1"] and not (r in wanted):
+					wanted.append(r)
+		var existing_by_lower := {}
+		for idx in path_codec.paths.size():
+			existing_by_lower[String(path_codec.paths[idx]["name"]).to_lower()] = idx
+		var path_edits := {}
+		var ptr_ids := path_codec.pointer_counts(current_bytes)
+		var next_id := 1
+		for p: Dictionary in path_codec.paths:
+			next_id = maxi(next_id, int(p["id"]) + 1)
+		var next_slot := path_codec.paths.size()
+		# Update existing edge_path to fit new terrain bounds
+		if existing_by_lower.has("edge_path"):
+			var e_idx: int = existing_by_lower["edge_path"]
+			var e_rec: Dictionary = path_codec.paths[e_idx]
+			path_edits[e_idx] = {
+				"id": e_rec["id"],
+				"name": e_rec["name"],
+				"points": MissionProfiles.propose_edge_path(terrain),
+				"type": 2,
+			}
+		for pname: String in wanted:
+			var key := pname.to_lower()
+			if existing_by_lower.has(key):
+				continue
+			var alloc_id := allocate_unique_pointer_id(ptr_ids, next_id)
+			if alloc_id <= 0:
+				alloc_id = next_id
+			ptr_ids[alloc_id] = 1
+			next_id = alloc_id + 1
+			path_edits[next_slot] = {
+				"id": alloc_id,
+				"name": pname,
+				"points": MissionProfiles.preset_points(pname, terrain, Vector2.INF),
+				"type": MissionProfiles.preset_type(pname),
+			}
+			next_slot += 1
+		if not path_edits.is_empty():
+			current_bytes = path_codec.patch(current_bytes, path_edits)
+	return current_bytes
 
 
 static func _rewrite_trn_size(content: String, origin: Vector2i, dims: Vector2i, height: float) -> String:
@@ -195,6 +389,9 @@ func save_project(document: Document, target: String) -> bool:
 	var object_label_edits := {}
 	for index: int in document.object_label_edits:
 		object_label_edits[str(index)] = String(document.object_label_edits[index])
+	var object_odf_edits := {}
+	for index: int in document.object_odf_edits:
+		object_odf_edits[str(index)] = String(document.object_odf_edits[index])
 	var water_records := {}
 	for layer: int in document.water_heights:
 		water_records[str(layer)] = {"height": float(document.water_heights[layer])}
@@ -208,7 +405,7 @@ func save_project(document: Document, target: String) -> bool:
 			water_records[str(layer)] = {"cover": cover}
 	var record := {"schema": 1, "source": document.package.source_path, "files": document.package.files, "edits": edits,
 		"layers": document.layers, "pathEdits": path_edits, "objectEdits": object_edits, "objectLabelEdits": object_label_edits,
-		"objectRemovals": object_removals, "objectInserts": object_inserts, "waterEdits": water_records,
+		"objectOdfEdits": object_odf_edits, "objectRemovals": object_removals, "objectInserts": object_inserts, "waterEdits": water_records,
 		"target": {
 			"engineProfile": document.engine_profile,
 			"modProfile": document.mod_profile,
@@ -306,7 +503,10 @@ func export_native(document: Document, target: String) -> bool:
 					add_seq = add_seq | 0x800000
 				else:
 					add_seq = add_seq & ~0x800000
-				var block := BznObjects.build_block(source_bzn, template, add_seq, add_label, addition["transform"], allocated_ptr)
+				var add_odf := String(addition.get("odf", ""))
+				if add_odf.is_empty() and document.object_odf_edits.has(template_idx):
+					add_odf = String(document.object_odf_edits[template_idx])
+				var block := BznObjects.build_block(source_bzn, template, add_seq, add_label, addition["transform"], allocated_ptr, add_odf)
 				blocks.append(block)
 			var removals: Array = []
 			for index: int in document.object_removals:
@@ -317,7 +517,7 @@ func export_native(document: Document, target: String) -> bool:
 					return fail("Cannot remove an object referenced by another mission record.")
 				removals.append(index)
 			var patch := BznObjects.patch_objects(source_bzn, package.objects, document.object_export_edits(),
-				removals, blocks, package.object_count_offset, package.object_insert_offset, document.object_label_edits)
+				removals, blocks, package.object_count_offset, package.object_insert_offset, document.object_label_edits, document.object_odf_edits)
 			if patch.is_empty():
 				return fail("The native object edits could not be applied to this BZN.")
 			bzn = patch["bytes"]
@@ -405,8 +605,7 @@ static func allocate_unique_pointer_id(used_ids: Dictionary, start: int = 1, max
 
 
 static func expected_object_fields(document: Document, view: int) -> Dictionary:
-	var template: Dictionary = document.object_template(view)
-	return {"odf": template["odf"], "label": document.object_label(view), "team": document.object_team(view),
+	return {"odf": document.object_odf(view), "label": document.object_label(view), "team": document.object_team(view),
 		"sequence": document.object_sequence(view), "transform": document.object_transform(view)}
 
 

@@ -2,11 +2,20 @@ extends ConfirmationDialog
 ## Stock-first Universal New Map Wizard.
 ## Step 1: Target Engine -> Step 2: Mod/Content Profile (Stock default) ->
 ## Step 3: Mission Mode -> Step 4: Terrain & Source -> Step 5: Summary -> Create.
-## Stock maps generate native TER v5 directly without requiring VRV or VSR.
+## Stock maps generate native TER v5 directly without requiring VRV or VSR, and
+## never silently override an explicit Stock choice with VSR/VRV.
 
 const ModRegistry := preload("res://core/mod_registry.gd")
 const MissionProfiles := preload("res://core/mission_profiles.gd")
 const Snapshots := preload("res://bridge/snapshots.gd")
+const Package := preload("res://formats/map_package.gd")
+const Layouts := preload("res://formats/bzn_layouts.gd")
+const BznPaths := preload("res://formats/bzn_paths.gd")
+const BznObjects := preload("res://formats/bzn_objects.gd")
+const Wintage := preload("res://themes/wintage.gd")
+const ChoiceGroup := preload("res://themes/choice_group.gd")
+const SliderField := preload("res://themes/slider_field.gd")
+const DIALOG_WIDTH := 640
 
 signal map_created(bzn_path: String, engine_id: String, mod_id: String, mission_id: String)
 
@@ -16,30 +25,45 @@ var default_mod_id := "stock"
 var default_parent_dir := ""
 var fallback_blank_bzn := ""
 
-var engine_select := OptionButton.new()
-var mod_select := OptionButton.new()
-var mission_select := OptionButton.new()
-var size_select := OptionButton.new()
-var height_spin := SpinBox.new()
+var engine_select := ChoiceGroup.new(0)
+var mod_select := ChoiceGroup.new(0)
+var mission_select := ChoiceGroup.new(0)
+var size_select := ChoiceGroup.new(3, true)
+var height_spin := SliderField.new()
 var source_bzn_field := LineEdit.new()
 var template_ter_field := LineEdit.new()
 var output_parent_field := LineEdit.new()
+var incompat_box := VBoxContainer.new()
+var incompat_label := Label.new()
+var switch_profile_btn := Button.new()
+var use_stock_tpl_btn := Button.new()
+var sanitize_stock_check := CheckBox.new()
 var summary_text := RichTextLabel.new()
 var status_label := Label.new()
 var source_picker := FileDialog.new()
 var ter_picker := FileDialog.new()
 var output_picker := FileDialog.new()
 
+var _detected_source_info: Dictionary = {}
+
 
 func _ready() -> void:
 	title = "New Map Wizard"
 	ok_button_text = "Create Map"
 	dialog_hide_on_ok = false
-	min_size = Vector2i(620, 520)
+
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	add_child(scroll)
 
 	var layout := VBoxContainer.new()
-	layout.add_theme_constant_override("separation", 6)
-	add_child(layout)
+	layout.custom_minimum_size.x = DIALOG_WIDTH - 24
+	layout.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	layout.add_theme_constant_override("separation", 2)
+	scroll.add_child(layout)
 
 	# Step 1 — Target Engine
 	_add_row(layout, "1. Target Game / Engine", engine_select)
@@ -48,7 +72,8 @@ func _ready() -> void:
 		engine_select.set_item_metadata(engine_select.item_count - 1, eid)
 	engine_select.item_selected.connect(func(_i): refresh_summary())
 
-	# Step 2 — Content / Mod Profile
+	# Step 2 — Content / Mod Profile (compact overflow for large Workshop lists)
+	mod_select.set_overflow_limit(6, 48)
 	_add_row(layout, "2. Content Profile (Mod)", mod_select)
 	mod_select.item_selected.connect(func(_i): _on_mod_changed())
 
@@ -67,6 +92,8 @@ func _ready() -> void:
 	height_spin.min_value = -1000.0
 	height_spin.max_value = 5000.0
 	height_spin.step = 1.0
+	height_spin.set_slider_range(-200.0, 500.0)
+	height_spin.set_unit_suffix("m")
 	height_spin.value = 100.0
 	height_spin.value_changed.connect(func(_v): refresh_summary())
 	_add_row(layout, "4b. Initial Height (m)", height_spin)
@@ -83,15 +110,36 @@ func _ready() -> void:
 	output_parent_field.text_changed.connect(func(_t): refresh_summary())
 	_add_browse_row(layout, "4e. Output Parent Folder", output_parent_field, output_picker, FileDialog.FILE_MODE_OPEN_DIR, [])
 
-	# Step 5 — Summary
-	var sum_lbl := Label.new()
-	sum_lbl.text = "5. Summary & Capabilities"
-	layout.add_child(sum_lbl)
-	summary_text.custom_minimum_size.y = 125
-	summary_text.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	layout.add_child(summary_text)
+	# Dynamic Incompatibility Notice (visible ONLY when template BZN has ODFs contradicting selected ModProfile)
+	incompat_box.add_theme_constant_override("separation", 2)
+	incompat_box.hide()
+	layout.add_child(incompat_box)
+	incompat_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	incompat_label.custom_minimum_size.x = DIALOG_WIDTH - 32
+	incompat_box.add_child(incompat_label)
+	var incompat_actions := HFlowContainer.new()
+	incompat_actions.add_theme_constant_override("h_separation", 4)
+	incompat_box.add_child(incompat_actions)
+	sanitize_stock_check.text = "Replace non-Stock template ODFs with verified Stock equivalents"
+	sanitize_stock_check.button_pressed = false
+	sanitize_stock_check.toggled.connect(func(_on): refresh_summary())
+	incompat_actions.add_child(sanitize_stock_check)
+	use_stock_tpl_btn.text = "Use Stock Template"
+	use_stock_tpl_btn.pressed.connect(_use_discovered_stock_template)
+	incompat_actions.add_child(use_stock_tpl_btn)
+	switch_profile_btn.text = "Switch Profile to Match Template"
+	switch_profile_btn.pressed.connect(_apply_suggested_profile_from_source)
+	incompat_actions.add_child(switch_profile_btn)
+
+	# Step 5 — Summary (fit-to-content, explicit width so RichTextLabel never wraps at width=0)
+	summary_text.fit_content = true
+	summary_text.scroll_active = false
+	summary_text.custom_minimum_size = Vector2(DIALOG_WIDTH - 190, 0)
+	_add_row(layout, "5. Summary & Checks", summary_text)
 
 	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	status_label.custom_minimum_size.x = DIALOG_WIDTH - 24
+	status_label.hide()
 	layout.add_child(status_label)
 
 	confirmed.connect(create_selected_map)
@@ -99,10 +147,11 @@ func _ready() -> void:
 
 func _add_row(parent: Control, caption: String, widget: Control) -> void:
 	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
 	parent.add_child(row)
 	var lbl := Label.new()
 	lbl.text = caption
-	lbl.custom_minimum_size.x = 190
+	lbl.custom_minimum_size.x = 155
 	row.add_child(lbl)
 	widget.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(widget)
@@ -110,10 +159,11 @@ func _add_row(parent: Control, caption: String, widget: Control) -> void:
 
 func _add_browse_row(parent: Control, caption: String, field: LineEdit, picker: FileDialog, mode: FileDialog.FileMode, filters: PackedStringArray) -> void:
 	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
 	parent.add_child(row)
 	var lbl := Label.new()
 	lbl.text = caption
-	lbl.custom_minimum_size.x = 190
+	lbl.custom_minimum_size.x = 155
 	row.add_child(lbl)
 	field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(field)
@@ -131,13 +181,21 @@ func _add_browse_row(parent: Control, caption: String, field: LineEdit, picker: 
 	row.add_child(btn)
 
 
+func _set_status(msg: String) -> void:
+	status_label.text = msg
+	status_label.visible = not msg.is_empty()
+	if visible:
+		Wintage.shrink_dialog(self, DIALOG_WIDTH)
+
+
 func begin(mod_reg: ModRegistry, game_path: String, preferred_mod: String = "stock", parent_dir: String = "", fallback_bzn: String = "") -> void:
 	registry = mod_reg
 	game_dir = game_path
 	default_mod_id = preferred_mod if mod_reg.has_profile(preferred_mod) else "stock"
 	default_parent_dir = parent_dir
 	fallback_blank_bzn = fallback_bzn
-	status_label.text = ""
+	sanitize_stock_check.set_pressed_no_signal(false)
+	_set_status("")
 
 	mod_select.clear()
 	var selected_idx := 0
@@ -154,7 +212,7 @@ func begin(mod_reg: ModRegistry, game_path: String, preferred_mod: String = "sto
 	if output_parent_field.text.strip_edges().is_empty() and not default_parent_dir.is_empty():
 		output_parent_field.text = default_parent_dir
 	_on_mod_changed()
-	popup_centered()
+	Wintage.popup_fit(self, DIALOG_WIDTH)
 
 
 func selected_engine_id() -> String:
@@ -173,18 +231,85 @@ func selected_size_m() -> int:
 	return int(size_select.get_item_metadata(maxi(size_select.selected, 0)))
 
 
+func inspect_source_bzn(bzn_path: String, target_mod: String = "stock") -> Dictionary:
+	var clean := bzn_path.strip_edges()
+	if clean.is_empty() or not FileAccess.file_exists(clean):
+		return {"valid": false, "vsrOdfs": [], "vrvOdfs": [], "unknownOdfs": [], "recommendedMod": "stock", "dll": "", "conversionPlan": {"ok": false, "unsupported": ["Missing source BZN"]}}
+	var bytes := FileAccess.get_file_as_bytes(clean)
+	var layout := Layouts.recognize(bytes)
+	var ver := int(layout.get("version", 0))
+	if ver <= 0:
+		return {"valid": false, "vsrOdfs": [], "vrvOdfs": [], "unknownOdfs": [], "recommendedMod": "stock", "dll": "", "conversionPlan": {"ok": false, "unsupported": ["Unrecognized BZN layout"]}}
+	var paths := BznPaths.new()
+	if not paths.read(bytes, ver):
+		return {"valid": false, "vsrOdfs": [], "vrvOdfs": [], "unknownOdfs": [], "recommendedMod": "stock", "dll": "", "conversionPlan": {"ok": false, "unsupported": ["Unreadable BZN path table"]}}
+	var objs := BznObjects.new()
+	if not objs.read(bytes, ver, paths.table_start):
+		return {"valid": false, "vsrOdfs": [], "vrvOdfs": [], "unknownOdfs": [], "recommendedMod": "stock", "dll": "", "conversionPlan": {"ok": false, "unsupported": ["Unreadable BZN object table"]}}
+	var vsr_odfs: Array[String] = []
+	var vrv_odfs: Array[String] = []
+	var unknown_odfs: Array[String] = []
+	for obj: Dictionary in objs.objects:
+		var odf := String(obj.get("odf", "")).to_lower()
+		var lbl := String(obj.get("label", "")).to_lower()
+		if odf.begins_with("vrv_") or odf == "vrv_sndpoint" or lbl.begins_with("vrvsnd:"):
+			if not (odf in vrv_odfs):
+				vrv_odfs.append(odf)
+		elif odf.ends_with("_vsr") or "_vsr" in odf:
+			if not (odf in vsr_odfs):
+				vsr_odfs.append(odf)
+		elif not odf.is_empty() and not ModRegistry.is_verified_stock_odf(odf):
+			if not (odf in unknown_odfs):
+				unknown_odfs.append(odf)
+	var rec := "vrv" if not vrv_odfs.is_empty() else ("vsr" if not vsr_odfs.is_empty() else ("custom:unknown" if not unknown_odfs.is_empty() else "stock"))
+	var ptr_counts := paths.pointer_counts(bytes)
+	var conv_plan := ModRegistry.plan_bzn_odf_conversion(objs.objects, ptr_counts, target_mod)
+	return {
+		"valid": true,
+		"version": ver,
+		"vsrOdfs": vsr_odfs,
+		"vrvOdfs": vrv_odfs,
+		"unknownOdfs": unknown_odfs,
+		"recommendedMod": rec,
+		"dll": objs.mission_dll,
+		"conversionPlan": conv_plan,
+	}
+
+
+func _use_discovered_stock_template() -> void:
+	var stock_tpls := ModRegistry.discover_stock_templates(game_dir)
+	if not stock_tpls.is_empty():
+		source_bzn_field.text = stock_tpls[0]
+		sanitize_stock_check.set_pressed_no_signal(false)
+		refresh_summary()
+
+
+func _apply_suggested_profile_from_source() -> void:
+	var suggested := String(_detected_source_info.get("recommendedMod", "stock"))
+	for i in mod_select.item_count:
+		if String(mod_select.get_item_metadata(i)) == suggested:
+			mod_select.select(i)
+			_on_mod_changed()
+			return
+
+
 func _on_mod_changed() -> void:
 	var mid := selected_mod_id()
 	var prof := registry.get_profile(mid) if registry != null else {}
 	var modes: Array = prof.get("missionModes", MissionProfiles.MISSION_MODES)
+	var prev_mis := selected_mission_id()
 	mission_select.clear()
+	var restore_idx := 0
 	for mode_v in modes:
 		var mode := String(mode_v)
 		mission_select.add_item(String(MissionProfiles.MODE_LABELS.get(mode, mode)))
-		mission_select.set_item_metadata(mission_select.item_count - 1, mode)
+		var idx := mission_select.item_count - 1
+		mission_select.set_item_metadata(idx, mode)
+		if mode == prev_mis:
+			restore_idx = idx
 	if mission_select.item_count > 0:
-		mission_select.select(0) # Blank default
-	# Auto-populate a compatible blank BZN without requiring VRV for Stock!
+		mission_select.select(restore_idx)
+	# Auto-populate a compatible blank BZN without requiring VRV for Stock
 	var templates: Array = prof.get("templates", [])
 	var auto_bzn := ""
 	for t_v in templates:
@@ -212,18 +337,75 @@ func refresh_summary() -> void:
 	var prof := registry.get_profile(mid) if registry != null else {}
 	var installed := bool(prof.get("installed", mid == "stock"))
 	var req_paths: Array = contract.get("required", [])
+	_detected_source_info = inspect_source_bzn(source_bzn_field.text, mid)
+	var bad_odfs: Array[String] = []
+	if mid == "stock":
+		for o: String in _detected_source_info.get("vrvOdfs", []):
+			bad_odfs.append(o)
+		for o: String in _detected_source_info.get("vsrOdfs", []):
+			bad_odfs.append(o)
+		for o: String in _detected_source_info.get("unknownOdfs", []):
+			bad_odfs.append(o)
+	elif mid == "vsr":
+		for o: String in _detected_source_info.get("vrvOdfs", []):
+			bad_odfs.append(o)
+		for o: String in _detected_source_info.get("unknownOdfs", []):
+			bad_odfs.append(o)
+
+	var conv_plan: Dictionary = _detected_source_info.get("conversionPlan", {})
+	var conv_ok := bool(conv_plan.get("ok", false))
+	var stock_tpls := ModRegistry.discover_stock_templates(game_dir)
+
+	if not bad_odfs.is_empty():
+		var suggested := String(_detected_source_info.get("recommendedMod", "vsr"))
+		var summary_pairs: Array = conv_plan.get("summaryLines", [])
+		var unsupported_list: Array = conv_plan.get("unsupported", [])
+		var short_pairs: Array[String] = []
+		var seen_short := {}
+		for rep_v in conv_plan.get("replacements", []):
+			var rep: Dictionary = rep_v
+			var pk := "%s->%s" % [String(rep.get("sourceOdf", "")), String(rep.get("targetOdf", ""))]
+			if not seen_short.has(pk):
+				seen_short[pk] = true
+				short_pairs.append("%s -> %s" % [String(rep.get("sourceOdf", "")), String(rep.get("targetOdf", ""))])
+		if conv_ok and not short_pairs.is_empty():
+			incompat_label.text = "[WARN] Source '%s' has non-%s ODF(s): %s (verified map: %s)." % [
+				suggested, mid, ", ".join(bad_odfs), ", ".join(short_pairs)]
+			incompat_label.tooltip_text = "\n".join(summary_pairs)
+		else:
+			incompat_label.text = "[ERR] Source '%s' has unverified %s ODF(s): %s." % [
+				suggested, mid, ", ".join(bad_odfs)]
+			incompat_label.tooltip_text = "\n".join(unsupported_list)
+		switch_profile_btn.text = "Switch to '%s'" % suggested.to_upper()
+		sanitize_stock_check.visible = (mid == "stock" and conv_ok)
+		use_stock_tpl_btn.visible = (mid == "stock" and not stock_tpls.is_empty() and source_bzn_field.text.simplify_path() != stock_tpls[0].simplify_path())
+		incompat_box.show()
+	else:
+		incompat_box.hide()
+
 	var lines: Array[String] = [
 		"Target: %s | Mod: %s | Mission: %s" % [eng, String(prof.get("displayName", mid)), String(contract.get("label", mis))],
-		"Terrain: %d × %d m at %.1f m (%s)" % [
+		"Terrain: %d × %d m @ %.1f m (%s)" % [
 			selected_size_m(), selected_size_m(), height_spin.value,
-			"Native flat TER v5 (zero VRV dependency)" if template_ter_field.text.strip_edges().is_empty() else template_ter_field.text.get_file()],
-		"Expected DLL: %s | Semantics: %s" % [
-			String(contract.get("dll", "(none)")) if not String(contract.get("dll", "")).is_empty() else "(none / source BZN)",
-			String(contract.get("semantics", "UNKNOWN"))],
-		"Required paths: %s" % (", ".join(req_paths) if not req_paths.is_empty() else "(none)"),
+			"Native flat TER v5" if template_ter_field.text.strip_edges().is_empty() else template_ter_field.text.get_file()],
+		"DLL: %s (src: %s) | Rules: %s | Paths: %s" % [
+			String(contract.get("dll", "(none)")) if not String(contract.get("dll", "")).is_empty() else "(none)",
+			String(_detected_source_info.get("dll", "(none)")) if not String(_detected_source_info.get("dll", "")).is_empty() else "(none)",
+			String(contract.get("semantics", "UNKNOWN")),
+			", ".join(req_paths) if not req_paths.is_empty() else "(none)"],
 	]
 	if mid == "stock":
-		lines.append("[OK] Stock BZCC requires NO VRV or VSR installation.")
+		if not bad_odfs.is_empty():
+			if not conv_ok:
+				lines.append("[ERR] Blocked: unverified ODF(s) %s. Pick a Stock template or switch profile." % ", ".join(conv_plan.get("unverifiedOdfs", bad_odfs)))
+			elif not sanitize_stock_check.button_pressed:
+				lines.append("[WARN] Blocked: enable verified ODF conversion above, pick a Stock template, or switch profile.")
+			else:
+				lines.append("[OK] Verified semantic conversion active: %s" % "; ".join(conv_plan.get("summaryLines", [])))
+		else:
+			lines.append("[OK] Native Stock BZCC template verified (zero VRV/VSR dependency).")
+	elif mid == "vsr" and not bad_odfs.is_empty():
+		lines.append("[ERR] Incompatible source template for VSR: contains non-VSR ODF(s) %s." % ", ".join(bad_odfs))
 	elif not installed:
 		lines.append("[WARN] Mod '%s' is not installed locally; generic terrain tools remain available, but mod Playtest assets may be missing." % mid)
 	else:
@@ -231,6 +413,8 @@ func refresh_summary() -> void:
 		if not missing_deps.is_empty():
 			lines.append("[WARN] Missing Workshop dependencies: " + ", ".join(missing_deps))
 	summary_text.text = "\n".join(lines)
+	if visible:
+		Wintage.shrink_dialog(self, DIALOG_WIDTH)
 
 
 func create_selected_map() -> void:
@@ -238,18 +422,58 @@ func create_selected_map() -> void:
 	var parent := output_parent_field.text.strip_edges()
 	var tpl_ter := template_ter_field.text.strip_edges()
 	if src_bzn.is_empty() or not FileAccess.file_exists(src_bzn):
-		status_label.text = "[ERR] Choose an existing blank BZN source file."
+		_set_status("[ERR] Choose an existing blank BZN source file.")
 		return
 	if parent.is_empty() or not DirAccess.dir_exists_absolute(parent):
-		status_label.text = "[ERR] Choose an existing output parent folder."
+		_set_status("[ERR] Choose an existing output parent folder.")
 		return
+	var mid := selected_mod_id()
+	var mis := selected_mission_id()
+	_detected_source_info = inspect_source_bzn(src_bzn, mid)
+	if not bool(_detected_source_info.get("valid", false)):
+		_set_status("[ERR] Selected source BZN is not a valid supported BZN template.")
+		return
+	var bad_odfs: Array[String] = []
+	if mid == "stock":
+		for o: String in _detected_source_info.get("vrvOdfs", []):
+			bad_odfs.append(o)
+		for o: String in _detected_source_info.get("vsrOdfs", []):
+			bad_odfs.append(o)
+		for o: String in _detected_source_info.get("unknownOdfs", []):
+			bad_odfs.append(o)
+	elif mid == "vsr":
+		for o: String in _detected_source_info.get("vrvOdfs", []):
+			bad_odfs.append(o)
+		for o: String in _detected_source_info.get("unknownOdfs", []):
+			bad_odfs.append(o)
+	var conv_plan: Dictionary = _detected_source_info.get("conversionPlan", {})
+	var conv_ok := bool(conv_plan.get("ok", false))
+	if not bad_odfs.is_empty():
+		var suggested := String(_detected_source_info.get("recommendedMod", "mod")).to_upper()
+		if mid == "stock":
+			if not conv_ok:
+				_set_status("[ERR] Cannot create Stock map: source template contains unverified ODF(s) (%s) with no verified Stock equivalent." % ", ".join(conv_plan.get("unverifiedOdfs", bad_odfs)))
+				return
+			if not sanitize_stock_check.button_pressed:
+				_set_status("[ERR] Cannot create Stock map from %s source template containing %s without conversion. Enable verified ODF conversion, choose a Stock source BZN, or switch profile." % [suggested, ", ".join(bad_odfs)])
+				return
+		elif mid == "vsr":
+			_set_status("[ERR] Cannot create VSR map from source template containing incompatible ODF(s): %s." % ", ".join(bad_odfs))
+			return
 	var writer := Snapshots.new()
 	var stem := src_bzn.get_file().get_basename()
-	var mod_tag := selected_mod_id().replace(":", "_")
+	var mod_tag := mid.replace(":", "_")
 	var target := parent.path_join("%s-%s-%s" % [stem, mod_tag, writer.nonce().left(8)])
-	if not writer.create_native_flat_map(src_bzn, target, selected_size_m(), height_spin.value, tpl_ter):
-		status_label.text = "[ERR] " + writer.error
+	var options := {
+		"mod_profile": mid,
+		"mission_profile": mis,
+		"configure_mission": mis != "blank",
+		"sanitize_stock_objects": (mid == "stock" and sanitize_stock_check.button_pressed),
+		"trim_showcase_objects": (mid == "stock"),
+	}
+	if not writer.create_native_flat_map(src_bzn, target, selected_size_m(), height_spin.value, tpl_ter, options):
+		_set_status("[ERR] " + writer.error)
 		return
 	var created_bzn := target.path_join(src_bzn.get_file())
 	hide()
-	map_created.emit(created_bzn, selected_engine_id(), selected_mod_id(), selected_mission_id())
+	map_created.emit(created_bzn, selected_engine_id(), mid, mis)

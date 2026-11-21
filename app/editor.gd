@@ -4,6 +4,7 @@ const Document := preload("res://core/map_document.gd")
 const Snapshots := preload("res://bridge/snapshots.gd")
 const Layouts := preload("res://formats/bzn_layouts.gd")
 const Wintage := preload("res://themes/wintage.gd")
+const ChoiceGroup := preload("res://themes/choice_group.gd")
 const TopView := preload("res://render/top_view.gd")
 const TerrainView := preload("res://render/terrain_view.gd")
 const NodeStudio := preload("res://nodes/node_studio.gd")
@@ -110,9 +111,10 @@ var theme_slug := Wintage.DEFAULT_THEME
 var ui_font_size := 12
 var ui_compact := false
 var backdrop := ColorRect.new()
-var theme_select := OptionButton.new()
+var theme_select := ChoiceGroup.new(0)
 var compact_check := CheckBox.new()
 var tool_search := LineEdit.new()
+var empty_state_hint := Label.new()
 var toolbar_buttons: Array[Button] = []
 var confirmation := ConfirmationDialog.new()
 var keys_dialog := AcceptDialog.new()
@@ -138,6 +140,7 @@ var saved_layers: Array = []
 var saved_path_edits := {}
 var saved_object_edits := {}
 var saved_object_label_edits := {}
+var saved_object_odf_edits := {}
 var saved_object_additions: Array = []
 var saved_object_removals := {}
 var saved_asset_profile := ""
@@ -148,10 +151,13 @@ var saved_colors := {}
 var saved_tiles := {}
 var saved_water_edits := {}
 var saved_water_heights := {}
+const HOLD_STEP_SECONDS := 0.05
+const HOLD_DAB_SCALE := 0.15
 var cursor := Vector2(-1, -1)
 var last_cursor := Vector2(-1, -1)
 var anchor := Vector2(-1, -1)
 var paint_view: Control
+var paint_hold_elapsed := 0.0
 var pending_refresh := Rect2i()
 var pending_materials := {}
 
@@ -209,7 +215,7 @@ func _ready() -> void:
 	toolbar_buttons.append(terrain_tools_button)
 	slope_studio_button = add_button(tools, "Slope Studio", open_slope_studio, "Build exact-angle ramps, terraces, ridges, valleys, trenches and excavations with batch stamps and masks")
 	toolbar_buttons.append(slope_studio_button)
-	toolbar_buttons.append(add_button(tools, "Hotkeys", keys_dialog.popup_centered, "Show editor shortcuts"))
+	toolbar_buttons.append(add_button(tools, "Hotkeys", func(): Wintage.popup_fit(keys_dialog, 420), "Show editor shortcuts"))
 	tool_search.placeholder_text = "Filter tools…"
 	tool_search.custom_minimum_size.x = 110
 	tool_search.tooltip_text = "Filter main toolbar commands by name or hint"
@@ -260,9 +266,11 @@ func _ready() -> void:
 		var dock := VBoxContainer.new()
 		dock.custom_minimum_size.x = 158 if panel == top else 225
 		dock.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		dock.size_flags_stretch_ratio = 2.4 if panel == scene_view else 1.0
+		dock.size_flags_stretch_ratio = 2.05 if panel == scene_view else 1.0
 		views.add_child(dock)
 		var heading := HFlowContainer.new()
+		heading.add_theme_constant_override("h_separation", 3)
+		heading.add_theme_constant_override("v_separation", 3)
 		dock.add_child(heading)
 		if panel == scene_view:
 			add_camera_toolbar(heading)
@@ -279,9 +287,20 @@ func _ready() -> void:
 			water_edit_button = add_button(heading, "Edit Water", toggle_water_edit, "Edit water layer coverage and elevations. Left drag paints, Shift erases.")
 		panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		dock.add_child(panel)
-		panel.mouse_exited.connect(func(): set_cursor(Vector2(-1, -1)))
+		if panel == scene_view:
+			empty_state_hint.text = "No map loaded — click Open or New Map"
+			empty_state_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			empty_state_hint.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			empty_state_hint.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+			empty_state_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			empty_state_hint.add_theme_color_override("font_color", colors["textMuted"])
+			panel.add_child(empty_state_hint)
+		panel.mouse_exited.connect(func():
+			set_cursor(Vector2(-1, -1))
+			if paint_view == panel:
+				anchor = Vector2(-1, -1))
 		panel.gui_input.connect(view_input.bind(panel))
-	coordinates.text = "Paint with left drag. Orbit with right drag. Pan with middle drag. Zoom with wheel."
+	coordinates.text = "Hold or drag left to paint. Orbit with right drag. Pan with middle drag. Zoom with wheel."
 	coordinates.add_theme_color_override("font_color", colors["textSecondary"])
 	coordinates.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	layout.add_child(coordinates)
@@ -324,14 +343,16 @@ func _ready() -> void:
 	object_label_dialog.title = "Object Label Editor"
 	object_label_dialog.ok_button_text = "Apply Label"
 	object_label_dialog.dialog_hide_on_ok = false
-	object_label_dialog.min_size = Vector2i(420, 180)
 	var label_box := VBoxContainer.new()
+	label_box.custom_minimum_size.x = 396
 	label_box.add_theme_constant_override("separation", 6)
 	object_label_target.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	object_label_target.custom_minimum_size.x = 396
 	label_box.add_child(object_label_target)
 	object_label_field.placeholder_text = "ASCII label (empty clears custom label)"
 	label_box.add_child(object_label_field)
 	object_label_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	object_label_status.custom_minimum_size.x = 396
 	label_box.add_child(object_label_status)
 	object_label_dialog.add_child(label_box)
 	object_label_dialog.confirmed.connect(apply_object_label_dialog)
@@ -352,8 +373,9 @@ func _ready() -> void:
 	playtest_dialog.ok_button_text = "Save Settings"
 	playtest_dialog.dialog_hide_on_ok = false
 	playtest_dialog.dialog_autowrap = true
-	playtest_dialog.min_size = Vector2i(560, 230)
 	var paths := VBoxContainer.new()
+	paths.custom_minimum_size.x = 540
+	paths.add_theme_constant_override("separation", 4)
 	add_label(paths, "Battlezone installation folder")
 	add_folder_field(paths, game_path, game_picker, "Select the Battlezone installation folder")
 	add_label(paths, "VRV source folder (optional engine layout converter and VSR assets)")
@@ -370,11 +392,10 @@ func _ready() -> void:
 	asset_profile_browse.disabled = true
 	engine_editor_mode.text = "Start in the engine editor without mission scripts"
 	paths.add_child(engine_editor_mode)
-	var theme_row := HBoxContainer.new()
+	var theme_row := VBoxContainer.new()
 	paths.add_child(theme_row)
 	var theme_lbl := Label.new()
 	theme_lbl.text = "Wintage theme"
-	theme_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	theme_row.add_child(theme_lbl)
 	for slug in Wintage.theme_slugs():
 		theme_select.add_item(Wintage.theme_label(slug))
@@ -596,7 +617,7 @@ func _shortcut_input(event: InputEvent) -> void:
 		playtest()
 		get_viewport().set_input_as_handled()
 	elif event.keycode == KEY_F1:
-		keys_dialog.popup_centered()
+		Wintage.popup_fit(keys_dialog, 420)
 		get_viewport().set_input_as_handled()
 
 
@@ -635,6 +656,8 @@ func sync_actions() -> void:
 		title.text = "%s%s  |  %s · %s  |  BZN %d  |  %d × %d m" % [
 			document.package.mission_name, dirty, document.mod_profile, document.mission_profile,
 			document.package.bzn_version, terrain.dimensions.x * 2, terrain.dimensions.y * 2]
+	if empty_state_hint != null:
+		empty_state_hint.visible = (document == null)
 
 
 func has_unsaved_changes() -> bool:
@@ -643,6 +666,7 @@ func has_unsaved_changes() -> bool:
 		or document.engine_profile != saved_engine_profile or document.mod_profile != saved_mod_profile
 		or document.mission_profile != saved_mission_profile
 		or document.object_edits != saved_object_edits or document.object_label_edits != saved_object_label_edits
+		or document.object_odf_edits != saved_object_odf_edits
 		or document.object_additions != saved_object_additions
 		or document.object_removals != saved_object_removals
 		or document.package.terrain.color_edits != saved_colors or document.package.terrain.tile_edits != saved_tiles
@@ -655,6 +679,7 @@ func remember_saved_changes() -> void:
 	saved_path_edits = document.path_edits.duplicate(true)
 	saved_object_edits = document.object_edits.duplicate(true)
 	saved_object_label_edits = document.object_label_edits.duplicate()
+	saved_object_odf_edits = document.object_odf_edits.duplicate()
 	saved_object_additions = document.object_additions.duplicate(true)
 	saved_object_removals = document.object_removals.duplicate()
 	saved_asset_profile = document.asset_profile
@@ -715,7 +740,16 @@ func open_command_line(path: String) -> void:
 		printerr(status.text)
 
 
+func cancel_all_slider_gestures(root_node: Node = self) -> void:
+	if root_node.has_method("is_gesture_active") and root_node.has_method("cancel_gesture"):
+		if bool(root_node.call("is_gesture_active")):
+			root_node.call("cancel_gesture")
+	for child in root_node.get_children():
+		cancel_all_slider_gestures(child)
+
+
 func open_map(path: String) -> bool:
+	cancel_all_slider_gestures()
 	if not path.is_absolute_path():
 		path = OS.get_executable_path().get_base_dir().path_join(path) if not OS.has_feature("editor") else ProjectSettings.globalize_path("res://").path_join(path)
 	var next := Document.new()
@@ -770,6 +804,7 @@ func open_map(path: String) -> bool:
 	document.profile_changed.connect(on_document_profile_changed)
 	top.bind(document)
 	scene_view.bind(document)
+	brush_panel.sync_height_range(document.package.terrain.min_height, document.package.terrain.max_height)
 	object_tool.bind(document, top, scene_view)
 	refresh_path_list(true)
 	set_cursor(Vector2(-1, -1))
@@ -783,22 +818,35 @@ func open_map(path: String) -> bool:
 
 
 func open_new_map_wizard() -> void:
+	find_steam_game()
+	suggest_vrv()
+	var game := game_path.text.strip_edges()
+	var vrv := vrv_path.text.strip_edges()
+	if mod_registry.last_game_dir != game:
+		mod_registry.discover_installed(game, vrv)
 	var fallback := tool_root().path_join("map_references/blank_map1/duel_map_27_autosave_01.bzn")
 	var parent_dir := document.package.source_path.get_base_dir().get_base_dir() if document != null else tool_root().path_join("build")
-	new_map_wizard.begin(mod_registry, game_path.text.strip_edges(), default_new_mod_profile, parent_dir, fallback)
+	new_map_wizard.begin(mod_registry, game, default_new_mod_profile, parent_dir, fallback)
 
 
 func _on_wizard_map_created(bzn_path: String, engine_id: String, mod_id: String, mission_id: String) -> void:
 	default_new_mod_profile = mod_id
 	_save_new_map_default()
 	if open_map(bzn_path):
+		# Strictly preserve the user's explicit ModProfile selection (never silently override Stock with VSR/VRV).
 		document.engine_profile = engine_id
 		document.mod_profile = mod_id
 		document.mission_profile = mission_id
 		document.profile_explicit = true
 		remember_saved_changes()
 		sync_actions()
-		report("Created %s map (%s / %s) at %s" % [mod_id, mission_id, engine_id, bzn_path.get_base_dir()])
+		var compat := validate_playtest_profile()
+		if not bool(compat["ok"]):
+			report("Created %s map (%s / %s) at %s [WARN: contains %s object(s): %s — use Target Profile to switch or replace]" % [
+				mod_id, mission_id, engine_id, bzn_path.get_base_dir(),
+				String(compat["suggestedMod"]).to_upper(), ", ".join(compat["incompatibleOdfs"])])
+		else:
+			report("Created %s map (%s / %s) at %s" % [mod_id, mission_id, engine_id, bzn_path.get_base_dir()])
 
 
 func open_target_profile(tab_index: int = 0) -> void:
@@ -820,6 +868,16 @@ func _save_new_map_default() -> void:
 
 func on_document_profile_changed() -> void:
 	loaded_objects = null
+	scene_view.object_models.clear_models()
+	scene_view.object_models.hide()
+	top.objects_visible = false
+	top.object_marks.clear()
+	objects_button.set_pressed_no_signal(false)
+	scene_view.tile_material = null
+	scene_view.tile_maps.clear()
+	scene_view.show_textures(false)
+	texture_button.set_pressed_no_signal(false)
+	top.queue_redraw()
 	if mission_studio.visible:
 		mission_studio.refresh_all()
 	if target_profile_dialog.visible:
@@ -1081,14 +1139,20 @@ func start_asset_scan(kind: String, button: Button) -> void:
 	active_object_scan = document
 	asset_kind = kind
 	var game := game_path.text.strip_edges()
-	var folder := document.package.source_path.get_base_dir()
+	var vrv := vrv_path.text.strip_edges()
+	if mod_registry.last_game_dir != game:
+		mod_registry.discover_installed(game, vrv)
+	var env := mod_registry.resolve_content_environment(document, game, vrv)
+	var folder := String(env["mapFolder"])
+	var extra_roots: Array = env["linkedFolders"] + env["modAssetRoots"]
+	var active_mod := String(env["modProfile"])
 	var task: Callable
 	if kind == "objects":
 		asset_worker = NativeAssets.new()
-		task = asset_worker.load_objects.bind(game, folder, adapter, document.package.objects)
+		task = asset_worker.load_objects.bind(game, folder, adapter, document.package.objects, extra_roots, active_mod)
 	else:
 		tile_worker = TerrainTextures.new()
-		task = tile_worker.load_native.bind(game, folder, adapter, document.package.terrain, document.package.metadata["trn"].get("texture", {}))
+		task = tile_worker.load_native.bind(game, folder, adapter, document.package.terrain, document.package.metadata["trn"].get("texture", {}), extra_roots, active_mod)
 	if object_thread.start(task) == OK:
 		report("Loading native meshes and materials…" if kind == "objects" else "Loading native terrain textures…")
 	else:
@@ -1179,7 +1243,7 @@ func suggest_vrv() -> void:
 func show_playtest_setup() -> void:
 	find_steam_game()
 	suggest_vrv()
-	playtest_dialog.popup_centered()
+	Wintage.popup_fit(playtest_dialog, 560)
 
 
 func save_playtest_setup() -> void:
@@ -1281,14 +1345,14 @@ func open_object_label_editor() -> void:
 		object_label_field.editable = false
 		object_label_dialog.get_ok_button().disabled = true
 		object_label_status.text = ""
-		object_label_dialog.popup_centered()
+		Wintage.popup_fit(object_label_dialog, 420)
 		return
 	object_label_target.text = "Object #%d (%s)" % [object_label_view, document.object_odf(object_label_view)]
 	object_label_field.text = document.object_label(object_label_view)
 	object_label_field.editable = true
 	object_label_dialog.get_ok_button().disabled = false
 	object_label_status.text = ""
-	object_label_dialog.popup_centered()
+	Wintage.popup_fit(object_label_dialog, 420)
 
 
 func apply_object_label_dialog() -> void:
@@ -1307,7 +1371,62 @@ func apply_object_label_dialog() -> void:
 func open_sound_editor() -> void:
 	if document == null or document.object_count() == 0:
 		return
-	sound_editor.begin(document, object_tool.selected, game_path.text.strip_edges(), vrv_path.text.strip_edges())
+	var env := mod_registry.resolve_content_environment(document, game_path.text.strip_edges(), vrv_path.text.strip_edges())
+	sound_editor.begin(document, object_tool.selected, game_path.text.strip_edges(), vrv_path.text.strip_edges(), env["linkedFolders"] + env["modAssetRoots"])
+
+
+func validate_playtest_profile() -> Dictionary:
+	if document == null:
+		return {
+			"ok": true,
+			"selectedMod": "stock",
+			"detectedMod": "stock",
+			"suggestedMod": "stock",
+			"verifiedPlaytestMod": "stock",
+			"incompatibleOdfs": [],
+			"error": "",
+		}
+	var selected_mod := document.mod_profile
+	var vsr_odfs: Array[String] = []
+	var vrv_odfs: Array[String] = []
+	for view in document.object_count():
+		var odf := document.object_odf(view).to_lower()
+		var lbl := document.object_label(view).to_lower()
+		if odf.begins_with("vrv_") or odf == "vrv_sndpoint" or lbl.begins_with("vrvsnd:"):
+			if not (odf in vrv_odfs):
+				vrv_odfs.append(odf)
+		elif odf.ends_with("_vsr") or odf.contains("_vsr"):
+			if not (odf in vsr_odfs):
+				vsr_odfs.append(odf)
+	var detected_mod := "vrv" if not vrv_odfs.is_empty() else ("vsr" if not vsr_odfs.is_empty() else "stock")
+	var bad_odfs: Array[String] = []
+	var suggested_mod := selected_mod
+	if selected_mod == "stock":
+		bad_odfs.append_array(vrv_odfs)
+		bad_odfs.append_array(vsr_odfs)
+		if not bad_odfs.is_empty():
+			suggested_mod = detected_mod
+	elif selected_mod == "vsr" and not vrv_odfs.is_empty():
+		bad_odfs.append_array(vrv_odfs)
+		suggested_mod = "vrv"
+	var ok := bad_odfs.is_empty()
+	var err := ""
+	if not ok:
+		err = "Profile contradiction: active profile is '%s' but map contains %s object(s): %s. Switch Target Profile to '%s' or remove incompatible objects before Playtest." % [
+			selected_mod, suggested_mod.to_upper(), ", ".join(bad_odfs), suggested_mod]
+	return {
+		"ok": ok,
+		"selectedMod": selected_mod,
+		"detectedMod": detected_mod,
+		"suggestedMod": suggested_mod,
+		"verifiedPlaytestMod": selected_mod if ok else "",
+		"incompatibleOdfs": bad_odfs,
+		"error": err,
+	}
+
+
+func _effective_playtest_mod() -> String:
+	return document.mod_profile if document != null else "stock"
 
 
 func playtest() -> void:
@@ -1316,16 +1435,23 @@ func playtest() -> void:
 	if (not document.object_additions.is_empty() or not document.object_removals.is_empty()) and not (Layouts.capability_status(document.package.layout_id, Layouts.EDIT_OBJECT_COUNT) in ["NATIVE", "BAKED"]):
 		report(object_count_notice("Undo the object additions or removals before Playtest.").trim_prefix(" | "))
 		return
+	var profile_check := validate_playtest_profile()
+	if not bool(profile_check["ok"]):
+		report("[ERR] " + String(profile_check["error"]))
+		open_target_profile(0)
+		return
 	if not find_steam_game():
-		playtest_dialog.popup_centered()
+		Wintage.popup_fit(playtest_dialog, 560)
 		return
 	suggest_vrv()
 	var game := game_path.text.strip_edges()
 	var vrv := vrv_path.text.strip_edges()
 	if vrv != "" and not valid_vrv(vrv):
 		setup_status.text = "The VRV folder must contain tools/bzn_compat.py."
-		playtest_dialog.popup_centered()
+		Wintage.popup_fit(playtest_dialog, 560)
 		return
+	if mod_registry.last_game_dir != game:
+		mod_registry.discover_installed(game, vrv)
 	var script := tool_root().path_join("tools/Start-Playtest.ps1")
 	if not FileAccess.file_exists(script):
 		report("Playtest helper missing at " + script)
@@ -1345,21 +1471,22 @@ func playtest() -> void:
 		return
 	var mission := target.path_join(document.package.source_path.get_file())
 	playtest_result = run.path_join("playtest.json")
-	var args := PackedStringArray(["-NoProfile", "-NonInteractive", "-File", script, "-Game", game, "-Mission", mission, "-ResultFile", playtest_result, "-PreparedRun", run, "-WaitForGame", "-ModProfile", document.mod_profile, "-MissionProfile", document.mission_profile])
+	var effective_mod := _effective_playtest_mod()
+	var args := PackedStringArray(["-NoProfile", "-NonInteractive", "-File", script, "-Game", game, "-Mission", mission, "-ResultFile", playtest_result, "-PreparedRun", run, "-WaitForGame", "-ModProfile", effective_mod, "-MissionProfile", document.mission_profile])
 	if OS.has_feature("editor"):
 		args.append_array(PackedStringArray(["-Godot", OS.get_executable_path()]))
 	var route := Layouts.playtest_route(document.package.bzn_version, "binary")
 	if route == "convert" and vrv != "":
 		args.append_array(PackedStringArray(["-Converter", vrv]))
-	if document.mod_profile == "vrv" and vrv != "":
+	if effective_mod in ["vsr", "vrv"] and vrv != "":
 		args.append_array(PackedStringArray(["-VrvSource", vrv]))
 	if engine_editor_mode.button_pressed:
 		args.append_array(PackedStringArray(["-StartInEditor", "-WithoutMissionScript"]))
 	if not document.asset_profile.is_empty():
 		args.append_array(PackedStringArray(["-AssetProfile", document.asset_profile]))
-	var mod_prof := mod_registry.get_profile(document.mod_profile)
+	var mod_prof := mod_registry.get_profile(effective_mod)
 	var mod_roots: Array = mod_prof.get("assetRoots", [])
-	if document.mod_profile != "stock" and not mod_roots.is_empty():
+	if effective_mod != "stock" and not mod_roots.is_empty():
 		var joined := PackedStringArray()
 		for r_v in mod_roots:
 			if DirAccess.dir_exists_absolute(String(r_v)):
@@ -1415,12 +1542,22 @@ func mark_material_refresh(region: Rect2i, layer: int) -> void:
 func _process(time: float) -> void:
 	poll_playtest()
 	poll_objects()
+	var fly_moved := false
 	if fly_button != null and fly_button.button_pressed and document != null:
 		var forward: float = (1.0 if Input.is_key_pressed(KEY_W) else 0.0) - (1.0 if Input.is_key_pressed(KEY_S) else 0.0)
 		var side: float = (1.0 if Input.is_key_pressed(KEY_D) else 0.0) - (1.0 if Input.is_key_pressed(KEY_A) else 0.0)
 		var rise: float = (1.0 if Input.is_key_pressed(KEY_E) else 0.0) - (1.0 if Input.is_key_pressed(KEY_Q) else 0.0)
 		if forward != 0.0 or side != 0.0 or rise != 0.0:
 			scene_view.fly_step(forward, side, rise, time)
+			fly_moved = true
+	if paint_view != null:
+		if not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+			if document.water_stroke_active:
+				finish_water_stroke()
+			else:
+				finish_stroke()
+		else:
+			step_hold_paint(time, fly_moved)
 	if document != null:
 		autosave_seconds += time
 		if autosave_seconds >= AUTOSAVE_INTERVAL and has_unsaved_changes() and not document.stroke_active and not document.water_stroke_active and path_drag_view == null and object_tool.drag_view == null and paint_view == null:
@@ -1437,13 +1574,34 @@ func _process(time: float) -> void:
 			top.refresh(region)
 		scene_view.refresh_material(region, layer)
 	pending_materials.clear()
-	if paint_view != null and not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
-		if document.water_stroke_active:
-			finish_water_stroke()
-		else:
-			finish_stroke()
 	if path_drag_view != null and not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
 		finish_point_drag(true)
+
+
+func step_hold_paint(delta: float, fly_moved: bool = false) -> bool:
+	if document == null or paint_view == null or delta <= 0.0:
+		return false
+	if fly_moved and paint_view == scene_view:
+		var moved_point: Vector2 = scene_view.sample_at(scene_view.get_local_mouse_position())
+		if moved_point.x >= 0.0:
+			anchor = moved_point
+	if document.water_stroke_active:
+		if anchor.x >= 0.0:
+			water_paint(anchor)
+			return true
+		return false
+	if not document.stroke_active or anchor.x < 0.0:
+		return false
+	paint_hold_elapsed += minf(delta, 0.25)
+	var ticks := 0
+	while paint_hold_elapsed >= HOLD_STEP_SECONDS and ticks < 5:
+		paint_hold_elapsed -= HOLD_STEP_SECONDS
+		brush_panel.apply_dab(document, anchor, HOLD_DAB_SCALE, true)
+		ticks += 1
+	if ticks > 0:
+		set_cursor(anchor)
+		return true
+	return false
 
 
 func focus_terrain() -> void:
@@ -1505,7 +1663,7 @@ func recover_autosaves() -> void:
 		return
 	recover_dialog.dialog_text = "Open an autosave project file. Unsaved changes are always confirmed first."
 	recover_list.select(found - 1)
-	recover_dialog.popup_centered_ratio(0.62)
+	Wintage.popup_fit(recover_dialog, 520, 260)
 
 
 func open_recovered_autosave() -> void:
@@ -1561,7 +1719,7 @@ func set_cursor(point: Vector2) -> void:
 		else:
 			coordinates.text = "X %.1f m   Z %.1f m   Elevation %.2f m" % [world.x, world.z, world.y]
 	else:
-		coordinates.text = "Paint with left drag. Orbit with right drag. Pan with middle drag. Zoom with wheel."
+		coordinates.text = "Hold or drag left to paint. Orbit with right drag. Pan with middle drag. Zoom with wheel."
 
 
 func view_input(event: InputEvent, panel: Control) -> void:
@@ -1637,6 +1795,7 @@ func view_input(event: InputEvent, panel: Control) -> void:
 						return
 					paint_view = panel
 					anchor = Vector2(-1, -1)
+					paint_hold_elapsed = 0.0
 					document.begin_stroke(layer)
 					paint(point)
 					set_cursor(point)
@@ -1708,6 +1867,7 @@ func finish_stroke() -> void:
 	if paint_view == null:
 		return
 	paint_view = null
+	paint_hold_elapsed = 0.0
 	document.end_stroke()
 	sync_actions()
 	match document.stroke_layer:

@@ -5,19 +5,37 @@ const ASSET_EXTENSIONS := ["odf", "msh", "material", "dds", "png", "tga"]
 const MAX_INDEXED_FILES := 250_000
 
 var index := {}
+var indexed_roots: Array[String] = []
 
 
-func index_game(game: String, map_folder: String) -> void:
-	var roots := [map_folder, game.path_join("VRV/Core")]
-	for name: String in VSR_STREAMS:
-		roots.append(game.path_join("VRV/deps").path_join(name))
-	roots.append(game.path_join("bz2r_res"))
+func index_game(game: String, map_folder: String, extra_roots: Array = [], mod_profile: String = "stock") -> void:
+	index.clear()
+	indexed_roots.clear()
+	var roots: Array[String] = []
+	if not map_folder.is_empty():
+		roots.append(map_folder)
+	for r_v in extra_roots:
+		var r := String(r_v).strip_edges()
+		if not r.is_empty() and not (r in roots):
+			roots.append(r)
+	# Never unconditionally mount VRV/Core or VRV/deps for Stock maps!
+	if mod_profile != "stock" and extra_roots.is_empty() and not game.is_empty():
+		if mod_profile == "vrv":
+			roots.append(game.path_join("VRV/Core"))
+		if mod_profile in ["vsr", "vrv"]:
+			for name: String in VSR_STREAMS:
+				roots.append(game.path_join("VRV/deps").path_join(name))
+	if not game.is_empty():
+		var res_dir := game.path_join("bz2r_res")
+		if not (res_dir in roots):
+			roots.append(res_dir)
 	for root: String in roots:
+		indexed_roots.append(root)
 		add_root(root)
 
 
-func load_objects(game: String, map_folder: String, adapter: String, objects: Array) -> Dictionary:
-	index_game(game, map_folder)
+func load_objects(game: String, map_folder: String, adapter: String, objects: Array, extra_roots: Array = [], mod_profile: String = "stock") -> Dictionary:
+	index_game(game, map_folder, extra_roots, mod_profile)
 	var geometry := {}
 	var definitions := {}
 	var instances := []
