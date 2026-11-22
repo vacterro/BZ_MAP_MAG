@@ -576,13 +576,16 @@ func export_native(document: Document, target: String) -> bool:
 	var stage := target.get_base_dir().path_join(".bzmag-" + nonce())
 	if DirAccess.make_dir_absolute(stage) != OK:
 		return fail("Could not reserve export staging folder.")
-	var terrain := package.terrain.encode(document.edits)
+	# Compose enabled sculpt layers into export staging only. The editable
+	# document, its BZMAG layers and its Undo history stay untouched.
+	var export_edits := document.export_heights()
+	var terrain := package.terrain.encode(export_edits)
 	var names := PackedStringArray(package.files.keys())
 	var hashes := {}
 	for name in names:
 		var output := stage.path_join(name)
 		var expected: String = package.files[name]
-		if name == package.terrain_name and (not document.edits.is_empty() or package.terrain.has_material_edits()):
+		if name == package.terrain_name and (not export_edits.is_empty() or package.terrain.has_material_edits()):
 			if not write_bytes(output, terrain) or FileAccess.get_file_as_bytes(output) != terrain:
 				return rollback(stage, names, "Could not write and verify " + name)
 			expected = FileAccess.get_sha256(output)
@@ -606,7 +609,13 @@ func export_native(document: Document, target: String) -> bool:
 			return rollback(stage, names, "Member verification failed for " + name)
 		hashes[name] = expected
 	var reimport := Package.new()
-	if not reimport.open(stage.path_join(package.source_path.get_file())) or reimport.files != hashes or reimport.terrain.heights != package.terrain.heights:
+	# Verify against the composed export heights, which may include unbaked
+	# sculpt deltas that are intentionally absent from the editable document.
+	var expected_heights := package.terrain.heights.duplicate()
+	for index: int in export_edits:
+		if index >= 0 and index < expected_heights.size():
+			expected_heights[index] = float(export_edits[index])
+	if not reimport.open(stage.path_join(package.source_path.get_file())) or reimport.files != hashes or reimport.terrain.heights != expected_heights:
 		return rollback(stage, names, "Export re-import failed. " + reimport.error)
 	for layer in [Terrain.Layer.COLOR, Terrain.Layer.TILES]:
 		var edits := package.terrain.material_changes(layer)

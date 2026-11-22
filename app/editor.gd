@@ -1410,6 +1410,9 @@ func setup_dialog(dialog: FileDialog, mode: FileDialog.FileMode, filters: Packed
 
 func activate_terrain_brush() -> void:
 	cancel_all_slider_gestures()
+	if document != null and document.sculpt_stroke_active:
+		document.cancel_sculpt_stroke()
+		paint_view = null
 	clear_incompatible_preview("brush")
 	leave_water_paint()
 	leave_object_tool()
@@ -1479,6 +1482,15 @@ func _shortcut_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 	if document == null or document.stroke_active or document.water_stroke_active:
+		return
+	if event.keycode == KEY_ESCAPE and document.sculpt_stroke_active:
+		document.cancel_sculpt_stroke()
+		paint_view = null
+		anchor = Vector2(-1, -1)
+		paint_hold_elapsed = 0.0
+		layers_panel.refresh()
+		report("Sculpt stroke cancelled.")
+		get_viewport().set_input_as_handled()
 		return
 	# When editing inside Nodes/NewMap/Settings, never leak terrain/object viewport shortcuts
 	var in_viewport := workspace_state.center_mode in [WorkspaceState.CenterMode.SPLIT_3D_2D, WorkspaceState.CenterMode.VIEW_3D, WorkspaceState.CenterMode.VIEW_2D]
@@ -1639,6 +1651,9 @@ func remember_saved_changes() -> void:
 
 
 func request_open(path: String) -> void:
+	if document != null and document.sculpt_stroke_active:
+		document.cancel_sculpt_stroke()
+		paint_view = null
 	finish_stroke()
 	if has_unsaved_changes():
 		pending_path = path
@@ -1842,7 +1857,12 @@ func _offer_recovered_draft(payload: Dictionary) -> void:
 	var recovered_base_uids: Array[int] = []
 	for uid in (raw_base as Array):
 		recovered_base_uids.append(int(uid))
-	var base_match: bool = int(inner.get("baseLayerRevision", -1)) == document.layer_stack_revision and recovered_base_uids == document.layer_uids
+	var fingerprint := String(inner.get("baseFingerprint", ""))
+	var base_match: bool = recovered_base_uids == document.layer_uids
+	if fingerprint.is_empty():
+		base_match = base_match and int(inner.get("baseLayerRevision", -1)) == document.layer_stack_revision
+	else:
+		base_match = base_match and fingerprint == AutoSaveStore.base_stack_fingerprint(document)
 	var raw_working: Variant = inner.get("working", [])
 	var raw_work_uids: Variant = inner.get("workingUids", [])
 	var graph := NodeStudio.Graph.new()
@@ -3166,6 +3186,10 @@ func view_input(event: InputEvent, panel: Control) -> void:
 					paint_hold_elapsed = 0.0
 					if document.active_sculpt_uid < 0 or layer != Terrain.Layer.HEIGHT or not brush_panel.mode in [BrushPanel.Mode.RAISE, BrushPanel.Mode.LOWER]:
 						document.begin_stroke(layer)
+					elif not document.begin_sculpt_stroke():
+						report(document.error)
+						paint_view = null
+						return
 					paint(point)
 					set_cursor(point)
 					sync_actions()
@@ -3194,6 +3218,9 @@ func _toggle_move_objects(enable: bool) -> void:
 
 func object_tool_changed() -> void:
 	cancel_all_slider_gestures()
+	if document != null and document.sculpt_stroke_active:
+		document.cancel_sculpt_stroke()
+		paint_view = null
 	if move_objects_button.button_pressed:
 		clear_incompatible_preview("object")
 		leave_water_paint()
@@ -3279,6 +3306,12 @@ func finish_stroke() -> void:
 		return
 	paint_view = null
 	paint_hold_elapsed = 0.0
+	if document.sculpt_stroke_active:
+		document.end_sculpt_stroke()
+		layers_panel.refresh()
+		report("Sculpt stroke recorded as sparse deltas in the active layer.")
+		sync_actions()
+		return
 	if document.active_sculpt_uid >= 0 and document.stroke_layer == Terrain.Layer.HEIGHT and brush_panel.mode in [BrushPanel.Mode.RAISE, BrushPanel.Mode.LOWER] and not document.stroke_active:
 		layers_panel.refresh()
 		report("Sculpt stroke recorded as sparse deltas in the active layer.")

@@ -145,7 +145,11 @@ func publish(document: Document, base_root: String, keep: int, draft: Dictionary
 	var target := directory.path_join("%s%010d-%s-%s.bzmag" % [SLOT_PREFIX, next_sequence(directory), timestamp_name(), writer.nonce()])
 	var draft_target := target + DRAFT_SUFFIX
 	if not draft.is_empty():
-		if not publish_draft(draft, document, draft_target):
+		# The staged slot has the exact bytes that will be renamed into place;
+		# bind the draft to that SHA256 so a sidecar can never be offered as
+		# recovery for a different committed slot.
+		var slot_sha := FileAccess.get_sha256(stage)
+		if not publish_draft(draft, document, draft_target, slot_sha):
 			DirAccess.remove_absolute(stage)
 			DirAccess.remove_absolute(draft_target)
 			return ""
@@ -162,13 +166,15 @@ func publish(document: Document, base_root: String, keep: int, draft: Dictionary
 ## invalidates the published slot.
 ## Draft payload is written beside its committed slot and cross-links the base
 ## stack by UID and revision. A mismatch or corrupt payload is never applied.
-func publish_draft(draft: Dictionary, document: Document, target: String) -> bool:
+func publish_draft(draft: Dictionary, document: Document, target: String, slot_sha: String = "") -> bool:
 	document.ensure_layer_uids()
 	var payload := {
 		"schema": DRAFT_SCHEMA,
 		"source": document.package.source_path,
 		"sourceRevision": digest(JSON.stringify(document.package.files).to_utf8_buffer()),
 		"documentId": document.document_id,
+		"slotSha256": slot_sha,
+		"baseFingerprint": base_stack_fingerprint(document),
 		"baseLayerRevision": studio_base_revision(draft),
 		"baseUids": studio_base_uids(draft),
 		"draft": draft,
@@ -196,6 +202,17 @@ func publish_draft(draft: Dictionary, document: Document, target: String) -> boo
 	return true
 
 
+## Durable identity of the committed layer stack by content and UID, not by a
+## session-local revision counter that restarts when the project reopens.
+static func base_stack_fingerprint(document: Document) -> String:
+	var canonical := []
+	for i in document.layers.size():
+		var layer: Dictionary = document.layers[i]
+		var uid := document.layer_uids[i] if i < document.layer_uids.size() else -1
+		canonical.append({"uid": uid, "layer": layer})
+	return digest(JSON.stringify(canonical, "", true, true).to_utf8_buffer())
+
+
 func studio_base_revision(draft: Dictionary) -> int:
 	return int(draft.get("baseLayerRevision", -1))
 
@@ -215,7 +232,15 @@ static func read_draft(slot: String) -> Dictionary:
 	var parsed: Variant = JSON.parse_string(handle.get_as_text())
 	if not parsed is Dictionary:
 		return {}
-	return parsed as Dictionary
+	var payload := parsed as Dictionary
+	# A sidecar belongs to exactly one slot. Refuse a stale or tampered sidecar
+	# rather than offering a draft for a different committed recovery pair.
+	if not payload.has("slotSha256"):
+		return {}
+	var expected := String(payload["slotSha256"])
+	if expected.is_empty() or expected != FileAccess.get_sha256(slot):
+		return {}
+	return payload
 
 
 func write_manifest(document: Document, directory: String, keep: int) -> void:
@@ -255,9 +280,12 @@ func prune(directory: String, keep: int) -> void:
 		if failure == "prune" and index == 0:
 			error = "Injected prune failure: an old slot could not be removed."
 			continue
-		DirAccess.remove_absolute(found[index] + DRAFT_SUFFIX)
+		# Remove the committed slot FIRST. A failed removal then leaves a
+		# complete recovery pair (slot + sidecar) rather than an orphan slot.
 		if DirAccess.remove_absolute(found[index]) != OK:
 			error = "An old autosave slot could not be removed: " + found[index]
+			continue
+		DirAccess.remove_absolute(found[index] + DRAFT_SUFFIX)
 
 
 ## Removes abandoned stage files and interrupted save staging folders so a

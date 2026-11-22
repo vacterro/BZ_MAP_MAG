@@ -52,7 +52,12 @@ static func validate_stack(stack: Array, sample_count: int) -> bool:
 	return true
 
 
-static func compose(base_heights: PackedFloat32Array, stack: Array, limit: float) -> Dictionary:
+## Composes sculpt deltas over the committed terrain revision. `committed`
+## holds the document's height edits keyed by TER sample index; a sample absent
+## from it falls back to the original TER height in `base_heights`. Composition
+## must start from committed heights, never from the raw TER, or applying a
+## sculpt layer would silently discard the user's earlier terrain edits.
+static func compose(base_heights: PackedFloat32Array, stack: Array, limit: float, committed: Dictionary = {}) -> Dictionary:
 	var values := {}
 	for layer_v in stack:
 		var layer: Dictionary = normalize(layer_v as Dictionary)
@@ -62,7 +67,7 @@ static func compose(base_heights: PackedFloat32Array, stack: Array, limit: float
 		for index: int in (layer["deltas"] as Dictionary):
 			if index < 0 or index >= base_heights.size():
 				continue
-			var before := float(values.get(index, base_heights[index]))
+			var before: float = values.get(index, float(committed.get(index, base_heights[index])))
 			var after := clampf(before + float((layer["deltas"] as Dictionary)[index]) * opacity, -limit, limit)
 			values[index] = after
 	return values

@@ -76,9 +76,16 @@ var sculpt_layers: Array = []
 var next_sculpt_uid := 1
 var active_sculpt_uid := -1
 var sculpt_revision := 0
+var sculpt_stroke_active := false
+var _sculpt_stroke_before: Array = []
+var _sculpt_stroke_uid := -1
+var _sculpt_stroke_touched := false
 signal sculpt_layers_changed(selected_uid: int)
 var preview_before := {}
 var preview_after := {}
+var preview_owner := ""
+var preview_source_revision := ""
+var preview_sculpt_revision := -1
 var edit_revision := 0
 var error := ""
 
@@ -131,6 +138,13 @@ func open(path: String) -> bool:
 	next_sculpt_uid = 1
 	active_sculpt_uid = -1
 	sculpt_revision = 0
+	preview_owner = ""
+	preview_source_revision = ""
+	preview_sculpt_revision = -1
+	sculpt_stroke_active = false
+	_sculpt_stroke_before = []
+	_sculpt_stroke_uid = -1
+	_sculpt_stroke_touched = false
 	package = Package.new()
 	if not package.open(source):
 		return fail(package.error)
@@ -689,7 +703,7 @@ func _apply_sculpt_layers(state: Array, active_uid: int) -> void:
 
 
 func _commit_sculpt_layers(state: Array, active_uid: int) -> bool:
-	if package == null or stroke_active or water_stroke_active:
+	if package == null or stroke_active or water_stroke_active or sculpt_stroke_active:
 		return fail("Finish the current stroke before editing sculpt layers.")
 	if not Sculpt.validate_stack(state, package.terrain.heights.size()):
 		return fail("Invalid sculpt layer stack.")
@@ -766,11 +780,23 @@ func sculpt_index_by_uid(uid: int) -> int:
 	return -1
 
 
-## Paint one brush dab into the active sculpt layer. Deltas are relative to the
-## committed terrain, so enable/disable and opacity remain reversible.
-func sculpt_dab(point: Vector2, radius_m: float, amount: float, shape := BrushShape.BELL) -> bool:
-	if package == null or stroke_active or has_preview():
+## A sculpt stroke groups any number of dabs (including interpolated segments
+## and mirrored dabs) into one Undo entry. Dabs accumulate directly in the live
+## layer state; only end_sculpt_stroke() records history. Cancel restores the
+## snapshot taken at BEGIN and records nothing.
+func begin_sculpt_stroke() -> bool:
+	if package == null or stroke_active or water_stroke_active or has_preview() or sculpt_stroke_active:
 		return fail("Finish the current stroke and cancel previews before sculpting.")
+	if sculpt_index_by_uid(active_sculpt_uid) < 0:
+		return fail("Create or activate a sculpt layer first.")
+	sculpt_stroke_active = true
+	_sculpt_stroke_before = _sculpt_snapshot()
+	_sculpt_stroke_uid = active_sculpt_uid
+	_sculpt_stroke_touched = false
+	return true
+
+
+func _stage_sculpt_dab(point: Vector2, radius_m: float, amount: float, shape: int) -> bool:
 	var index_active := sculpt_index_by_uid(active_sculpt_uid)
 	if index_active < 0:
 		return fail("Create or activate a sculpt layer first.")
@@ -803,22 +829,90 @@ func sculpt_dab(point: Vector2, radius_m: float, amount: float, shape := BrushSh
 		return true
 	if not Sculpt.validate_stack(state, terrain.heights.size()):
 		return fail("Sculpt delta exceeded the editable range.")
-	return _commit_sculpt_layers(state, active_sculpt_uid)
+	_apply_sculpt_layers(state, active_sculpt_uid)
+	_sculpt_stroke_touched = true
+	return true
+
+
+func end_sculpt_stroke() -> bool:
+	if not sculpt_stroke_active:
+		return false
+	var before := _sculpt_stroke_before
+	var uid := _sculpt_stroke_uid
+	var after := _sculpt_snapshot()
+	var changed := _sculpt_stroke_touched and after != before
+	sculpt_stroke_active = false
+	_sculpt_stroke_before = []
+	_sculpt_stroke_uid = -1
+	_sculpt_stroke_touched = false
+	if not changed:
+		return true
+	push_history({"sculpt": true, "before": before, "after": after,
+		"active_before": uid, "active_after": active_sculpt_uid})
+	return true
+
+
+func cancel_sculpt_stroke() -> void:
+	if not sculpt_stroke_active:
+		return
+	var before := _sculpt_stroke_before
+	var uid := _sculpt_stroke_uid
+	sculpt_stroke_active = false
+	_sculpt_stroke_before = []
+	_sculpt_stroke_uid = -1
+	_sculpt_stroke_touched = false
+	_apply_sculpt_layers(before, uid)
+
+
+## Paint one brush dab into the active sculpt layer. Deltas are relative to the
+## committed terrain, so enable/disable and opacity remain reversible. Within
+## an active stroke, dabs accumulate without creating Undo entries.
+func sculpt_dab(point: Vector2, radius_m: float, amount: float, shape := BrushShape.BELL) -> bool:
+	if package == null or stroke_active or has_preview():
+		return fail("Finish the current stroke and cancel previews before sculpting.")
+	if sculpt_stroke_active:
+		return _stage_sculpt_dab(point, radius_m, amount, shape)
+	if not begin_sculpt_stroke():
+		return false
+	if not _stage_sculpt_dab(point, radius_m, amount, shape):
+		cancel_sculpt_stroke()
+		return false
+	return end_sculpt_stroke()
 
 
 func sculpt_preview() -> bool:
 	if package == null or stroke_active or sculpt_layers.is_empty():
 		return fail("Create a sculpt layer before previewing.")
 	var limit := minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0)
-	var values := Sculpt.compose(base_heights, sculpt_layers, limit)
+	var values := Sculpt.compose(base_heights, sculpt_layers, limit, edits)
 	if values.is_empty():
 		return fail("The sculpt layer has no deltas to preview.")
-	return show_preview(values, {})
+	return show_preview(values, {}, "sculpt")
+
+
+## Final terrain heights for a lossless native export: committed edits plus
+## every enabled sculpt layer, evaluated through the same deterministic
+## composer as the preview. The document and its Undo history are untouched.
+func export_heights() -> Dictionary:
+	var result := edits.duplicate()
+	if sculpt_layers.is_empty():
+		return result
+	var limit := minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0)
+	var values := Sculpt.compose(base_heights, sculpt_layers, limit, edits)
+	for index: int in values:
+		result[index] = values[index]
+	return result
 
 
 func bake_sculpt_layers() -> bool:
 	if package == null or not has_preview() or sculpt_layers.is_empty():
 		return fail("Preview an active sculpt layer before baking.")
+	if preview_owner != "sculpt":
+		return fail("This preview belongs to another tool. Compose a Sculpt Preview before Sculpt Bake.")
+	if preview_source_revision != document_id_source_revision():
+		return fail("The project changed since the Sculpt Preview. Recompose before Sculpt Bake.")
+	if preview_sculpt_revision != sculpt_revision:
+		return fail("Sculpt layers changed since the preview. Recompose before Sculpt Bake.")
 	var heights := preview_after.duplicate()
 	var history := {"before": preview_before.duplicate(), "after": heights, "materials": {}}
 	for layer: int in package.terrain.material_previews:
@@ -2763,11 +2857,24 @@ func valid_preview(values: Dictionary, materials: Dictionary) -> bool:
 	return true
 
 
-func show_preview(values: Dictionary, materials := {}) -> bool:
+func document_id_source_revision() -> String:
+	if package == null:
+		return ""
+	var context := HashingContext.new()
+	if context.start(HashingContext.HASH_SHA256) != OK:
+		return ""
+	context.update(JSON.stringify(package.files).to_utf8_buffer())
+	return context.finish().hex_encode()
+
+
+func show_preview(values: Dictionary, materials := {}, owner := "") -> bool:
 	if stroke_active or not valid_preview(values, materials):
 		return fail("Invalid terrain preview.")
 	clear_preview()
 	error = ""
+	preview_owner = owner
+	preview_source_revision = document_id_source_revision()
+	preview_sculpt_revision = sculpt_revision if owner == "sculpt" else -1
 	var terrain := package.terrain
 	var native_sample := PackedFloat32Array([0.0])
 	for index: int in values:
@@ -2792,6 +2899,9 @@ func clear_preview() -> void:
 	var heights := preview_before
 	preview_before = {}
 	preview_after = {}
+	preview_owner = ""
+	preview_source_revision = ""
+	preview_sculpt_revision = -1
 	var materials := package.terrain.material_previews
 	package.terrain.material_previews = {}
 	apply(heights, false)

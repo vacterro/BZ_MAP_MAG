@@ -104,7 +104,7 @@ func encode(dirty: Dictionary) -> PackedByteArray:
 				word.encode_u16(0, tile_edits[block])
 				encoded.append_array(word)
 			else:
-				var pixels := encoded_samples(block, layer)
+				var pixels := encoded_samples(block, layer, dirty)
 				if pixels.size() == SIZES[layer]:
 					encoded[0] &= ~bit
 				else:
@@ -115,7 +115,7 @@ func encode(dirty: Dictionary) -> PackedByteArray:
 	return bytes
 
 
-func encoded_samples(block: int, layer: int) -> PackedByteArray:
+func encoded_samples(block: int, layer: int, dirty: Dictionary = {}) -> PackedByteArray:
 	var start := block_origin(block)
 	var size: int = SIZES[layer]
 	var bytes := PackedByteArray()
@@ -125,7 +125,7 @@ func encoded_samples(block: int, layer: int) -> PackedByteArray:
 		for x in BLOCK:
 			var dst := (z * BLOCK + x) * size
 			if layer == Layer.HEIGHT:
-				bytes.encode_float(dst, heights[row + x])
+				bytes.encode_float(dst, float(dirty.get(row + x, heights[row + x])))
 			else:
 				var rgb := committed_material_value(Layer.COLOR, row + x)
 				bytes[dst] = (rgb >> 16) & 255

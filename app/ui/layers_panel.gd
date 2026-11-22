@@ -222,7 +222,7 @@ func refresh(select_idx: int = -1) -> void:
 	sculpt_add_btn.disabled = sculpt_count >= 8
 	sculpt_del_btn.disabled = sculpt_count == 0
 	sculpt_preview_btn.disabled = sculpt_count == 0
-	sculpt_bake_btn.disabled = not document.has_preview()
+	sculpt_bake_btn.disabled = not document.has_preview() or document.preview_owner != "sculpt"
 	var active_sculpt := document.sculpt_index_by_uid(document.active_sculpt_uid)
 	if active_sculpt >= 0:
 		var sc: Dictionary = document.sculpt_layers[active_sculpt]
