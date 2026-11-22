@@ -1296,8 +1296,11 @@ func clear_active_preview(announce_msg: String = "") -> void:
 func clear_incompatible_preview(next_owner: String) -> void:
 	if document == null:
 		return
+	var live_sculpt := document.sculpt_stroke_active and document.has_preview()
 	var active_preview := document.has_preview() or (studio.document == document and studio.worker.is_started())
 	if not active_preview:
+		return
+	if live_sculpt and next_owner == "brush":
 		return
 	if workspace_state.active_preview_owner == next_owner and not next_owner.is_empty():
 		return
@@ -1570,7 +1573,7 @@ func _shortcut_input(event: InputEvent) -> void:
 
 
 func sync_actions() -> void:
-	var locked := document == null or document.stroke_active or document.water_stroke_active or path_drag_view != null or object_tool.drag_view != null
+	var locked := document == null or document.has_active_edit_transaction() or path_drag_view != null or object_tool.drag_view != null
 	undo_button.disabled = locked or document.undo_stack.is_empty()
 	redo_button.disabled = locked or document.redo_stack.is_empty()
 	save_button.disabled = locked
@@ -1995,6 +1998,8 @@ func _on_document_sculpt_changed(_uid: int) -> void:
 	if document != null:
 		layers_panel.refresh()
 		sync_actions()
+		if document.sculpt_stroke_active and document.has_preview():
+			workspace_state.set_preview_owner("sculpt")
 
 
 func on_document_environment_changed() -> void:
@@ -2761,6 +2766,9 @@ func playtest_route_plan() -> Dictionary:
 func playtest() -> void:
 	if launcher_pid > 0 or game_pid > 0 or document == null:
 		return
+	if document.has_active_edit_transaction():
+		report("Finish the active brush or drag transaction before Playtest.")
+		return
 	if not find_steam_game():
 		show_playtest_setup()
 		return
@@ -2916,7 +2924,10 @@ func step_hold_paint(delta: float, fly_moved: bool = false) -> bool:
 			water_paint(anchor)
 			return true
 		return false
-	if not document.stroke_active or anchor.x < 0.0:
+	# Sculpt strokes use their own transaction state; hold painting must work
+	# for either terrain or sculpt brushing, never both at once.
+	var brushing := document.stroke_active or document.sculpt_stroke_active
+	if not brushing or anchor.x < 0.0:
 		return false
 	paint_hold_elapsed += minf(delta, 0.25)
 	var ticks := 0
@@ -2952,6 +2963,9 @@ func autosave_root(custom := "") -> String:
 
 func autosave_now(custom_root := "") -> bool:
 	if document == null:
+		return false
+	if document.has_active_edit_transaction():
+		# Defer without resetting the timer so the next tick retries after commit.
 		return false
 	autosave_seconds = 0.0
 	if not has_unsaved_changes():
@@ -3297,6 +3311,9 @@ func objects_topology_changed() -> void:
 		elif object_tool.selected >= 0:
 			refresh_views.append(object_tool.selected)
 		object_attributes.refresh_selection(document, refresh_views)
+	var selected_key := scene_tree.selected_stable_key()
+	if selected_key.begins_with("obj:") and document != null and document.view_for_object_stable_key(selected_key) < 0:
+		scene_tree.clear_selection()
 	scene_tree.request_rebuild()
 	sync_actions()
 
@@ -3308,6 +3325,10 @@ func finish_stroke() -> void:
 	paint_hold_elapsed = 0.0
 	if document.sculpt_stroke_active:
 		document.end_sculpt_stroke()
+		if not document.has_preview():
+			document.sculpt_preview()
+		if document.has_preview() and document.preview_owner == "sculpt":
+			workspace_state.active_preview_owner = "sculpt"
 		layers_panel.refresh()
 		report("Sculpt stroke recorded as sparse deltas in the active layer.")
 		sync_actions()
@@ -3370,16 +3391,17 @@ func leave_water_paint() -> void:
 
 
 func toggle_water_edit() -> void:
-	if document == null or document.package.water == null:
+	if document == null or document.package == null or document.package.water == null:
 		return
 	clear_incompatible_preview("water")
 	water_tools.begin(document)
 	if workspace_state.center_mode in [WorkspaceState.CenterMode.NODES, WorkspaceState.CenterMode.NEW_MAP, WorkspaceState.CenterMode.SETTINGS]:
 		set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
 	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.WATER, true)
-	if not water_button.button_pressed:
-		water_button.set_pressed_no_signal(true)
-		toggle_water()
+	workspace_state.set_tool(WorkspaceState.Tool.WATER_PAINT)
+	water_button.set_pressed_no_signal(true)
+	toggle_water()
+	sync_actions()
 
 
 func update_water_painting() -> void:

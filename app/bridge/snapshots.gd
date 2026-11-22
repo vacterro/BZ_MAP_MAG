@@ -356,6 +356,8 @@ static func _rewrite_trn_size(content: String, origin: Vector2i, dims: Vector2i,
 
 
 func save_project(document: Document, target: String) -> bool:
+	if document.has_active_edit_transaction():
+		return fail("Finish the active brush or drag transaction before saving.")
 	if not target.is_absolute_path() or target.get_extension().to_lower() != "bzmag" or exists(target):
 		return fail("Choose a new .bzmag file in an existing folder.")
 	if not document.package.check_sources():
@@ -415,7 +417,7 @@ func save_project(document: Document, target: String) -> bool:
 			water_records[str(layer)] = {"cover": cover}
 	document.ensure_layer_uids()
 	var record := {"schema": 1, "source": document.package.source_path, "files": document.package.files, "edits": edits,
-		"layers": document.layers, "layerUids": document.layer_uids.duplicate(), "sculptLayers": document.sculpt_layers.duplicate(true), "pathEdits": path_edits, "objectEdits": object_edits, "objectLabelEdits": object_label_edits,
+		"layers": document.layers, "layerUids": document.layer_uids.duplicate(), "sculptLayers": document.sculpt_layers.duplicate(true), "activeSculptUid": document.active_sculpt_uid, "pathEdits": path_edits, "objectEdits": object_edits, "objectLabelEdits": object_label_edits,
 		"objectOdfEdits": object_odf_edits, "objectRemovals": object_removals, "objectInserts": object_inserts, "waterEdits": water_records,
 		"target": {
 			"engineProfile": document.engine_profile,
@@ -468,6 +470,8 @@ static func basis_array(basis: Basis) -> Array:
 
 
 func export_native(document: Document, target: String) -> bool:
+	if document.has_active_edit_transaction():
+		return fail("Finish the active brush or drag transaction before exporting.")
 	if document.has_preview():
 		return fail("Apply or clear the terrain preview before exporting.")
 	target = target.simplify_path()

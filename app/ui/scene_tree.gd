@@ -282,7 +282,10 @@ func rebuild() -> void:
 		var team_item := tree.create_item(objects_item)
 		team_item.set_text(0, "Team %d (%d)" % [tid, matched.size()])
 		_register_item(team_item, "objects_group", tid, team_key)
-		var limit := mini(matched.size(), 200)
+		# A native BZN can hold more objects than one team's display cap. Added
+		# objects must stay selectable from the Scene Tree even past the cap, or
+		# a freshly duplicated object cannot be selected or deleted by the user.
+		var limit := mini(matched.size(), 1024)
 		for i in limit:
 			var v := matched[i]
 			var entry: Dictionary = entries[v]
@@ -393,6 +396,17 @@ func select_entry(kind: String, index: int) -> void:
 		target = _items_by_key.get(lkey, null)
 	if target == null:
 		target = _find_item(tree.get_root(), kind, index)
+	if target == null and kind == "object":
+		# Added objects may live in a collapsed team branch; walk every
+		# registered object item by index when the stable key did not resolve.
+		for key in _items_by_key:
+			var item: TreeItem = _items_by_key[key]
+			if item == null or not item.is_valid():
+				continue
+			var meta: Variant = item.get_metadata(0)
+			if meta is Dictionary and String((meta as Dictionary).get("kind", "")) == kind and int((meta as Dictionary).get("index", -1)) == index:
+				target = item
+				break
 	if target != null:
 		_rebuilding = true
 		tree.deselect_all()
@@ -413,6 +427,15 @@ func select_entry(kind: String, index: int) -> void:
 				_selected_keys.append(tkey)
 		tree.ensure_cursor_is_visible()
 		_rebuilding = false
+
+
+func clear_selection() -> void:
+	if tree.get_root() != null:
+		_rebuilding = true
+		tree.deselect_all()
+		_rebuilding = false
+	_selected_keys.clear()
+	_selected_meta = {}
 
 
 func select_objects(views: Array[int]) -> void:

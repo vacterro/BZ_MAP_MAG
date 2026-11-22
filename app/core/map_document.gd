@@ -80,6 +80,11 @@ var sculpt_stroke_active := false
 var _sculpt_stroke_before: Array = []
 var _sculpt_stroke_uid := -1
 var _sculpt_stroke_touched := false
+var _sculpt_live_preview := false
+var _sculpt_live_base := {}
+var _sculpt_opacity_preview_uid := -1
+var _sculpt_opacity_preview_value := NAN
+var _sculpt_opacity_restore_preview := false
 signal sculpt_layers_changed(selected_uid: int)
 var preview_before := {}
 var preview_after := {}
@@ -93,6 +98,15 @@ var error := ""
 func _init() -> void:
 	_next_document_id += 1
 	document_id = _next_document_id
+
+
+## Single admission check for operations that must never serialize a partial
+## user gesture. Covers terrain, water and sculpt brush transactions as well as
+## object/path drags tracked by the editor through `external_transaction`.
+var external_transaction := false
+
+func has_active_edit_transaction() -> bool:
+	return stroke_active or water_stroke_active or sculpt_stroke_active or external_transaction
 
 
 func open(path: String) -> bool:
@@ -145,6 +159,11 @@ func open(path: String) -> bool:
 	_sculpt_stroke_before = []
 	_sculpt_stroke_uid = -1
 	_sculpt_stroke_touched = false
+	_sculpt_live_preview = false
+	_sculpt_live_base = {}
+	_sculpt_opacity_preview_uid = -1
+	_sculpt_opacity_preview_value = NAN
+	_sculpt_opacity_restore_preview = false
 	package = Package.new()
 	if not package.open(source):
 		return fail(package.error)
@@ -193,6 +212,8 @@ func open(path: String) -> bool:
 			var raw_sculpt: Variant = saved["sculptLayers"]
 			if not raw_sculpt is Array:
 				return fail("Invalid sculpt layer metadata.")
+			if not Sculpt.validate_stack_raw(raw_sculpt as Array, base_heights.size()):
+				return fail("Malformed sculpt layer payload rejected before normalization.")
 			for item in (raw_sculpt as Array):
 				if not item is Dictionary:
 					return fail("Invalid sculpt layer record.")
@@ -204,6 +225,23 @@ func open(path: String) -> bool:
 				return fail("Invalid sculpt layer deltas.")
 			if not sculpt_layers.is_empty():
 				active_sculpt_uid = int((sculpt_layers[0] as Dictionary)["uid"])
+			if saved.has("activeSculptUid"):
+				var saved_active: Variant = saved["activeSculptUid"]
+				if saved_active == null:
+					active_sculpt_uid = -1
+				elif not (saved_active is int or saved_active is float):
+					return fail("Invalid saved active sculpt selection.")
+				else:
+					var active_number := float(saved_active)
+					if not is_finite(active_number) or active_number != floorf(active_number) or absf(active_number) > 9007199254740992.0:
+						return fail("Invalid saved active sculpt selection.")
+					var saved_active_uid := int(active_number)
+					if saved_active_uid == -1:
+						active_sculpt_uid = -1
+					elif saved_active_uid <= 0 or sculpt_index_by_uid(saved_active_uid) < 0:
+						return fail("Invalid saved active sculpt selection.")
+					else:
+						active_sculpt_uid = saved_active_uid
 		for key: String in saved["edits"]:
 			var value: Variant = saved["edits"][key]
 			var index := key.to_int()
@@ -713,10 +751,17 @@ func _commit_sculpt_layers(state: Array, active_uid: int) -> bool:
 		after.append(Sculpt.normalize(item as Dictionary))
 	if before == after and active_sculpt_uid == active_uid:
 		return true
-	clear_preview()
+	# A validated layer mutation invalidates the old composite. Clear only a
+	# sculpt-owned preview, then recompose from the new stack; a foreign tool's
+	# preview must stay untouched and must not be silently replaced.
+	var sculpt_preview_active := has_preview() and preview_owner == "sculpt"
+	if sculpt_preview_active:
+		clear_preview()
 	push_history({"sculpt": true, "before": before, "after": after,
 		"active_before": active_sculpt_uid, "active_after": active_uid})
 	_apply_sculpt_layers(after, active_uid)
+	if sculpt_preview_active:
+		sculpt_preview()
 	return true
 
 
@@ -754,6 +799,81 @@ func set_sculpt_layer_enabled(index: int, enabled: bool) -> bool:
 	return _commit_sculpt_layers(state, active_sculpt_uid)
 
 
+## Opacity gestures stage the displayed value only. The committed layer, its
+## Undo history and the composed preview are untouched until commit; each
+## preview recomputes from the same composer Native Export uses.
+func begin_sculpt_opacity_preview(index: int) -> bool:
+	if package == null or index < 0 or index >= sculpt_layers.size():
+		return fail("Invalid sculpt layer opacity gesture.")
+	if stroke_active or water_stroke_active or sculpt_stroke_active:
+		return fail("Finish the current stroke before editing sculpt opacity.")
+	_sculpt_opacity_preview_uid = int((sculpt_layers[index] as Dictionary)["uid"])
+	_sculpt_opacity_preview_value = float((sculpt_layers[index] as Dictionary)["opacity"])
+	_sculpt_opacity_restore_preview = has_preview() and preview_owner == "sculpt"
+	return true
+
+
+func preview_sculpt_layer_opacity(uid: int, value: float) -> bool:
+	if package == null or _sculpt_opacity_preview_uid < 0 or uid != _sculpt_opacity_preview_uid:
+		return false
+	if stroke_active or water_stroke_active or sculpt_stroke_active:
+		return false
+	if not is_finite(value) or value < 0.0 or value > 1.0:
+		return false
+	var index := sculpt_index_by_uid(uid)
+	if index < 0:
+		return false
+	if has_preview() and preview_owner != "sculpt":
+		return false
+	_sculpt_opacity_preview_value = clampf(value, 0.0, 1.0)
+	var staged := _sculpt_snapshot()
+	(staged[index] as Dictionary)["opacity"] = _sculpt_opacity_preview_value
+	var limit := minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0)
+	var values := Sculpt.compose(base_heights, staged, limit, edits)
+	if values.is_empty():
+		if has_preview():
+			clear_preview()
+		return true
+	return show_preview(values, {}, "sculpt")
+
+
+func cancel_sculpt_opacity_preview(uid: int = -1) -> void:
+	if _sculpt_opacity_preview_uid < 0:
+		return
+	if uid >= 0 and uid != _sculpt_opacity_preview_uid:
+		return
+	_sculpt_opacity_preview_uid = -1
+	_sculpt_opacity_preview_value = NAN
+	var restore := _sculpt_opacity_restore_preview
+	_sculpt_opacity_restore_preview = false
+	if preview_owner == "sculpt" and has_preview():
+		clear_preview()
+	if restore:
+		sculpt_preview()
+
+
+func commit_sculpt_opacity_preview(uid: int, value: float) -> bool:
+	if _sculpt_opacity_preview_uid < 0 or uid != _sculpt_opacity_preview_uid:
+		return false
+	var index := sculpt_index_by_uid(uid)
+	var final_value := _sculpt_opacity_preview_value if not is_finite(value) else clampf(value, 0.0, 1.0)
+	var had_preview := has_preview() and preview_owner == "sculpt"
+	_sculpt_opacity_preview_uid = -1
+	_sculpt_opacity_preview_value = NAN
+	_sculpt_opacity_restore_preview = false
+	if had_preview:
+		clear_preview()
+	if index < 0 or not is_finite(final_value) or final_value < 0.0 or final_value > 1.0:
+		return false
+	var changed := not is_equal_approx(float((sculpt_layers[index] as Dictionary)["opacity"]), final_value)
+	var ok := true
+	if changed:
+		ok = set_sculpt_layer_opacity(index, final_value)
+	if ok and had_preview:
+		sculpt_preview()
+	return ok
+
+
 func set_sculpt_layer_opacity(index: int, value: float) -> bool:
 	if index < 0 or index >= sculpt_layers.size() or not is_finite(value) or value < 0.0 or value > 1.0:
 		return fail("Invalid sculpt layer opacity.")
@@ -764,13 +884,38 @@ func set_sculpt_layer_opacity(index: int, value: float) -> bool:
 	return _commit_sculpt_layers(state, active_sculpt_uid)
 
 
+func rename_sculpt_layer(index: int, name: String) -> bool:
+	if index < 0 or index >= sculpt_layers.size():
+		return fail("Invalid sculpt layer index.")
+	var state := _sculpt_snapshot()
+	var clean := name.strip_edges().substr(0, 64)
+	if String((state[index] as Dictionary).get("name", "")) == clean:
+		return true
+	(state[index] as Dictionary)["name"] = clean
+	return _commit_sculpt_layers(state, active_sculpt_uid)
+
+
+func move_sculpt_layer(from: int, to: int) -> bool:
+	if from < 0 or to < 0 or from >= sculpt_layers.size() or to >= sculpt_layers.size() or from == to:
+		return false
+	var state := _sculpt_snapshot()
+	var moved: Dictionary = state[from]
+	state.remove_at(from)
+	state.insert(clampi(to, 0, state.size()), moved)
+	return _commit_sculpt_layers(state, active_sculpt_uid)
+
+
+## Active sculpt layer is editor selection, not a terrain edit: no history
+## entry, no dirty revision, no preview invalidation, no layer-content change.
 func set_active_sculpt_layer(index: int) -> bool:
 	if index < 0 or index >= sculpt_layers.size():
 		return fail("Invalid sculpt layer index.")
 	var uid := int((sculpt_layers[index] as Dictionary)["uid"])
 	if uid == active_sculpt_uid:
 		return true
-	return _commit_sculpt_layers(_sculpt_snapshot(), uid)
+	active_sculpt_uid = uid
+	sculpt_layers_changed.emit(active_sculpt_uid)
+	return true
 
 
 func sculpt_index_by_uid(uid: int) -> int:
@@ -785,7 +930,7 @@ func sculpt_index_by_uid(uid: int) -> int:
 ## layer state; only end_sculpt_stroke() records history. Cancel restores the
 ## snapshot taken at BEGIN and records nothing.
 func begin_sculpt_stroke() -> bool:
-	if package == null or stroke_active or water_stroke_active or has_preview() or sculpt_stroke_active:
+	if package == null or stroke_active or water_stroke_active or (has_preview() and preview_owner != "sculpt") or sculpt_stroke_active:
 		return fail("Finish the current stroke and cancel previews before sculpting.")
 	if sculpt_index_by_uid(active_sculpt_uid) < 0:
 		return fail("Create or activate a sculpt layer first.")
@@ -807,8 +952,21 @@ func _stage_sculpt_dab(point: Vector2, radius_m: float, amount: float, shape: in
 		return true
 	var terrain := package.terrain
 	var radius := radius_m / terrain.SPACING
-	var state := _sculpt_snapshot()
-	var deltas: Dictionary = (state[index_active] as Dictionary)["deltas"]
+	# Inside a stroke the layer snapshot was already taken at BEGIN, so mutate
+	# the canonical live deltas directly. Deep-copying and revalidating the whole
+	# stack per dab grows linearly with all layers and is unnecessary here.
+	var state: Array = []
+	var deltas: Dictionary
+	# Rollback covers only samples this dab touches. Copying every prior sample
+	# made a small brush grow with the size of a large sparse layer.
+	var journal: Dictionary = {}
+	var journal_present: Dictionary = {}
+	if sculpt_stroke_active:
+		deltas = (sculpt_layers[index_active] as Dictionary)["deltas"]
+	else:
+		state = _sculpt_snapshot()
+		deltas = (state[index_active] as Dictionary)["deltas"]
+	var changed_indices: Array[int] = []
 	var touched := false
 	for z in range(region.position.y, region.end.y):
 		for x in range(region.position.x, region.end.x):
@@ -818,20 +976,89 @@ func _stage_sculpt_dab(point: Vector2, radius_m: float, amount: float, shape: in
 			var index := z * terrain.dimensions.x + x
 			if index < 0 or index >= terrain.heights.size():
 				continue
+			if sculpt_stroke_active and not journal.has(index):
+				journal[index] = float(deltas.get(index, 0.0))
+				journal_present[index] = deltas.has(index)
 			var next := float(deltas.get(index, 0.0)) + amount * weight
 			next = snappedf(next, package.granularity)
 			if absf(next) <= package.granularity * 0.5:
 				deltas.erase(index)
 			else:
 				deltas[index] = next
+			changed_indices.append(index)
 			touched = true
 	if not touched:
 		return true
-	if not Sculpt.validate_stack(state, terrain.heights.size()):
-		return fail("Sculpt delta exceeded the editable range.")
-	_apply_sculpt_layers(state, active_sculpt_uid)
+	if sculpt_stroke_active:
+		var touched_before := 0
+		for index: int in changed_indices:
+			var next_value: float = float(deltas.get(index, 0.0))
+			if not is_finite(next_value) or absf(next_value) > Sculpt.MAX_ABS_DELTA:
+				for restore_index: int in journal:
+					if bool(journal_present[restore_index]):
+						deltas[restore_index] = float(journal[restore_index])
+					else:
+						deltas.erase(restore_index)
+				return fail("Sculpt delta exceeded the editable range.")
+			if float(journal[index]) != next_value or bool(journal_present[index]) != deltas.has(index):
+				touched_before += 1
+		if touched_before == 0:
+			return true
+		sculpt_revision += 1
+	else:
+		if not Sculpt.validate_stack(state, terrain.heights.size()):
+			return fail("Sculpt delta exceeded the editable range.")
+		_apply_sculpt_layers(state, active_sculpt_uid)
 	_sculpt_stroke_touched = true
+	_update_sculpt_live_preview(changed_indices)
 	return true
+
+
+## During a stroke the visible surface must track the mouse without creating a
+## second Undo entry or changing preview ownership. Compose every active layer
+## only over samples this dab touched, then apply just the changed heights.
+## preview_before keeps the original committed height for cancel/finish.
+func _update_sculpt_live_preview(changed_indices: Array[int]) -> void:
+	if package == null or not sculpt_stroke_active or changed_indices.is_empty():
+		return
+	if not _sculpt_live_preview:
+		_sculpt_live_preview = true
+		preview_owner = "sculpt"
+		preview_source_revision = document_id_source_revision()
+		preview_sculpt_revision = sculpt_revision
+	var limit := minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0)
+	var values := Sculpt.compose_canonical(base_heights, sculpt_layers, limit, edits, changed_indices)
+	var frame := {}
+	for index: int in values:
+		var target: float = values[index]
+		if not _sculpt_live_base.has(index):
+			_sculpt_live_base[index] = float(edits.get(index, base_heights[index]))
+		var base := float(_sculpt_live_base[index])
+		if is_equal_approx(target, base):
+			preview_after.erase(index)
+			preview_before.erase(index)
+			if package.terrain.heights[index] != base:
+				frame[index] = base
+			continue
+		preview_before[index] = base
+		preview_after[index] = target
+		if package.terrain.heights[index] != target:
+			frame[index] = target
+	apply(frame, false)
+
+
+func _clear_sculpt_live_preview() -> void:
+	if not _sculpt_live_preview:
+		return
+	var previous := preview_before.duplicate()
+	_sculpt_live_preview = false
+	_sculpt_live_base = {}
+	preview_before = {}
+	preview_after = {}
+	preview_owner = ""
+	preview_source_revision = ""
+	preview_sculpt_revision = -1
+	apply(previous, false)
 
 
 func end_sculpt_stroke() -> bool:
@@ -845,6 +1072,7 @@ func end_sculpt_stroke() -> bool:
 	_sculpt_stroke_before = []
 	_sculpt_stroke_uid = -1
 	_sculpt_stroke_touched = false
+	_clear_sculpt_live_preview()
 	if not changed:
 		return true
 	push_history({"sculpt": true, "before": before, "after": after,
@@ -861,6 +1089,7 @@ func cancel_sculpt_stroke() -> void:
 	_sculpt_stroke_before = []
 	_sculpt_stroke_uid = -1
 	_sculpt_stroke_touched = false
+	_clear_sculpt_live_preview()
 	_apply_sculpt_layers(before, uid)
 
 
@@ -868,7 +1097,7 @@ func cancel_sculpt_stroke() -> void:
 ## committed terrain, so enable/disable and opacity remain reversible. Within
 ## an active stroke, dabs accumulate without creating Undo entries.
 func sculpt_dab(point: Vector2, radius_m: float, amount: float, shape := BrushShape.BELL) -> bool:
-	if package == null or stroke_active or has_preview():
+	if package == null or stroke_active or (has_preview() and not _sculpt_live_preview):
 		return fail("Finish the current stroke and cancel previews before sculpting.")
 	if sculpt_stroke_active:
 		return _stage_sculpt_dab(point, radius_m, amount, shape)
@@ -883,6 +1112,8 @@ func sculpt_dab(point: Vector2, radius_m: float, amount: float, shape := BrushSh
 func sculpt_preview() -> bool:
 	if package == null or stroke_active or sculpt_layers.is_empty():
 		return fail("Create a sculpt layer before previewing.")
+	if _sculpt_live_preview:
+		_clear_sculpt_live_preview()
 	var limit := minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0)
 	var values := Sculpt.compose(base_heights, sculpt_layers, limit, edits)
 	if values.is_empty():
@@ -1197,20 +1428,51 @@ func end_stroke() -> void:
 	stroke = {}
 
 
+## History navigation cannot happen under a foreign preview. Sculpt-owned
+## previews are recomputed from the restored stack afterwards so the visible
+## surface keeps matching export after undo/redo.
+## History navigation cannot happen under a foreign preview. A sculpt-owned
+## preview is cleared for the mutation and recomposed from the restored stack,
+## so the visible surface keeps matching export after undo/redo.
+func _prepare_history_preview() -> bool:
+	if not has_preview():
+		return true
+	if preview_owner != "sculpt" and not _sculpt_live_preview:
+		return false
+	if _sculpt_live_preview:
+		_clear_sculpt_live_preview()
+	else:
+		clear_preview()
+	return true
+
+
+func _restore_history_preview(was_sculpt: bool) -> void:
+	if was_sculpt and not sculpt_layers.is_empty():
+		sculpt_preview()
+
+
 func undo() -> void:
-	if stroke_active or has_preview() or undo_stack.is_empty():
+	if has_active_edit_transaction() or undo_stack.is_empty():
+		return
+	var was_sculpt := has_preview() and (preview_owner == "sculpt" or _sculpt_live_preview)
+	if not _prepare_history_preview():
 		return
 	var change: Dictionary = undo_stack.pop_back()
 	apply_history(change, "before")
 	redo_stack.append(change)
+	_restore_history_preview(was_sculpt)
 
 
 func redo() -> void:
-	if stroke_active or has_preview() or redo_stack.is_empty():
+	if has_active_edit_transaction() or redo_stack.is_empty():
+		return
+	var was_sculpt := has_preview() and (preview_owner == "sculpt" or _sculpt_live_preview)
+	if not _prepare_history_preview():
 		return
 	var change: Dictionary = redo_stack.pop_back()
 	apply_history(change, "after")
 	undo_stack.append(change)
+	_restore_history_preview(was_sculpt)
 
 
 func record_change(before: Dictionary, after: Dictionary) -> void:

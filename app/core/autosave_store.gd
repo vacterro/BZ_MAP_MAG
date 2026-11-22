@@ -107,6 +107,11 @@ func publish(document: Document, base_root: String, keep: int, draft: Dictionary
 	if document == null:
 		error = "No open document."
 		return ""
+	if document.has_active_edit_transaction():
+		# Defer: autosave must never serialize a half-finished stroke. The
+		# caller keeps its timer so the next tick retries after commit.
+		error = "An edit transaction is active; autosave deferred."
+		return ""
 	if keep < 1:
 		error = "The autosave slot count must be at least one."
 		return ""

@@ -19,6 +19,7 @@ var document: Document
 var selected_view := -1
 var selected_views: Array[int] = []
 var _group_centroid := Vector3.ZERO
+var _group_centroid_exact := Vector3.ZERO
 var header_label := Label.new()
 var pos_x := SliderField.new()
 var pos_y := SliderField.new()
@@ -190,10 +191,15 @@ func refresh_selection(doc: Document, views: Array[int]) -> void:
 			sum += document.object_position(v)
 			teams[document.object_team(v)] = true
 			classes[document.object_odf(v)] = true
-		_group_centroid = sum / float(selected_views.size())
-		pos_x.set_value_no_signal(_group_centroid.x)
-		pos_y.set_value_no_signal(_group_centroid.y)
-		pos_z.set_value_no_signal(_group_centroid.z)
+		# The slider snaps its displayed value; keep the exact centroid so a
+		# group move applies the user's delta, not a snapped approximation.
+		_group_centroid_exact = sum / float(selected_views.size())
+		pos_x.set_value_no_signal(_group_centroid_exact.x)
+		pos_y.set_value_no_signal(_group_centroid_exact.y)
+		pos_z.set_value_no_signal(_group_centroid_exact.z)
+		# Use the snapped display value as the group's baseline so the slider's
+		# displayed delta is exactly the offset applied to every object.
+		_group_centroid = Vector3(pos_x.value, pos_y.value, pos_z.value)
 		yaw_deg.set_value_no_signal(0.0)
 		label_field.text = ""
 		sound_btn.visible = false

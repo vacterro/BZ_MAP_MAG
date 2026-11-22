@@ -145,31 +145,87 @@ function Invoke-GodotScriptStage(
     Add-StageResult $Name $StageLevel $(if ($ok) { 'PASS' } else { 'FAIL' }) $(if ($timedOut) { 124 } else { $proc.ExitCode }) $cmdDisplay $sw.Elapsed.TotalSeconds $logFile $reason
 }
 
+function Quote-PsNativeArgument([string] $Value) {
+    if ($null -eq $Value -or $Value.Length -eq 0) { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    # Windows CommandLineToArgvW rules: double backslashes before a quote and
+    # double any literal quote; trailing backslashes before the closing quote
+    # must also be doubled. Paths with spaces or non-ASCII text stay intact.
+    $quoted = '"' + ($Value -replace '(\\*)"', '$1$1\"') + '"'
+    $trailing = [regex]::Match($Value, '\\*$').Value
+    if ($trailing.Length -gt 0) {
+        $quoted = $quoted.Insert($quoted.Length - 1 - $trailing.Length, ('\' * $trailing.Length))
+    }
+    return $quoted
+}
+
 function Invoke-PsScriptStage(
     [string] $Name,
     [string] $StageLevel,
     [string] $ScriptPath,
-    [string[]] $ArgsList = @()
+    [string[]] $ArgsList = @(),
+    [int] $StageTimeoutMs = 240000
 ) {
     $stageDir = (New-Item -ItemType Directory -Path (Join-Path $runRoot $Name) -Force).FullName
     $logFile = Join-Path $stageDir 'stage.log'
     $psExe = (Get-Command powershell.exe).Source
     $allArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + $ArgsList
-    $cmdDisplay = "powershell " + (($allArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' ')
+    $cmdDisplay = "powershell " + (($allArgs | ForEach-Object { Quote-PsNativeArgument $_ }) -join ' ')
+    $outFile = Join-Path $stageDir 'stdout.log'
+    $errFile = Join-Path $stageDir 'stderr.log'
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $psExe
+    $psi.Arguments = (($allArgs | ForEach-Object { Quote-PsNativeArgument $_ }) -join ' ')
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    $out = & $psExe @allArgs 2>&1
-    $exitCode = $LASTEXITCODE
+    $proc = [Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
+    $null = $proc.Start()
+    $childPid = $proc.Id
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+    $timedOut = -not $proc.WaitForExit($StageTimeoutMs)
+    if ($timedOut) {
+        # Owned child only: never kill unrelated PowerShell/Steam/Game processes.
+        # The .NET Process handle proves identity (PID + start time are bound by
+        # the OS), so Kill here cannot touch a recycled or unrelated process.
+        try { $proc.Kill() } catch {}
+        $null = $proc.WaitForExit(10000)
+        # Any nested run this stage launched is named under its own private
+        # token inside runRoot; only those exact records may be stopped.
+        foreach ($owned in Get-ChildItem -LiteralPath $runRoot -Directory -ErrorAction SilentlyContinue) {
+            if ($owned.Name -match '^(BZMAG|bzmag-(terrain|layout|autosave|accept))-[a-f0-9]{32}$') {
+                $null = & (Join-Path $PSScriptRoot 'Stop-OwnedProcesses.ps1') -Apply -RunToken $owned.Name 2>&1
+            }
+        }
+    } else {
+        $null = $proc.WaitForExit()
+    }
+    $exitCode = if ($timedOut) { 124 } else { $proc.ExitCode }
+    [IO.File]::WriteAllText($outFile, $stdoutTask.GetAwaiter().GetResult(), [Text.Encoding]::UTF8)
+    [IO.File]::WriteAllText($errFile, $stderrTask.GetAwaiter().GetResult(), [Text.Encoding]::UTF8)
+    $proc.Dispose()
     $sw.Stop()
-    $textLines = @($out | ForEach-Object { $_.ToString() })
+    $textLines = @()
+    foreach ($file in @($outFile, $errFile)) {
+        if (Test-Path -LiteralPath $file -PathType Leaf) {
+            $textLines += @(Get-Content -LiteralPath $file)
+        }
+    }
     [IO.File]::WriteAllLines($logFile, $textLines, [Text.Encoding]::UTF8)
-    $ok = ($exitCode -eq 0)
-    $reason = if ($ok) {
+    $ok = (-not $timedOut) -and ($exitCode -eq 0)
+    $reason = if ($timedOut) {
+        "TIMEOUT after $StageTimeoutMs ms; stage command: $cmdDisplay"
+    } elseif ($ok) {
         $tail = @($textLines | Where-Object { $_ -match '^PASS:|FAILURES: 0' } | Select-Object -Last 2) -join ' | '
         if ($tail) { $tail } else { 'Exit 0' }
     } else {
         ($textLines | Select-Object -Last 4) -join ' | '
     }
-    Add-StageResult $Name $StageLevel $(if ($ok) { 'PASS' } else { 'FAIL' }) $exitCode $cmdDisplay $sw.Elapsed.TotalSeconds $logFile $reason
+    Add-StageResult $Name $StageLevel $(if ($timedOut) { 'TIMEOUT' } elseif ($ok) { 'PASS' } else { 'FAIL' }) $exitCode $cmdDisplay $sw.Elapsed.TotalSeconds $logFile $reason
 }
 
 $useGpuEffective = [bool]$WithGpu -or ($Level -in 'GUI','PERFORMANCE','RELEASE')
@@ -471,6 +527,7 @@ public static class BzAcceptWin32 {
 $counts = [ordered]@{
     pass = (@($stages | Where-Object { $_.status -eq 'PASS' })).Count
     fail = (@($stages | Where-Object { $_.status -eq 'FAIL' })).Count
+    timeout = (@($stages | Where-Object { $_.status -eq 'TIMEOUT' })).Count
     blocked = (@($stages | Where-Object { $_.status -eq 'BLOCKED' })).Count
     skipped = (@($stages | Where-Object { $_.status -eq 'SKIPPED_WITH_REASON' })).Count
 }
@@ -478,12 +535,13 @@ $counts = [ordered]@{
 $releaseReady = (
     $Level -eq 'RELEASE' -and
     $counts.fail -eq 0 -and
+    $counts.timeout -eq 0 -and
     $counts.blocked -eq 0 -and
     (-not $gitInfo.dirty) -and
     $useGpuEffective -and
     ((-not $RequireGame) -or $counts.skipped -eq 0)
 )
-$verdict = if ($counts.fail -gt 0 -or $counts.blocked -gt 0) {
+$verdict = if ($counts.fail -gt 0 -or $counts.blocked -gt 0 -or $counts.timeout -gt 0) {
     'NOT_READY'
 } elseif ($releaseReady) {
     'READY_FOR_RELEASE'
@@ -523,19 +581,19 @@ $reportJson = $report | ConvertTo-Json -Depth 6
 $logSummary = @(
     "BZ_MAP_MAG Acceptance Report ($verdict)"
     "Level=$Level GPU=$useGpuEffective Head=$($gitInfo.head) Dirty=$($gitInfo.dirty) SourceDigest=$srcDigest"
-    "Counts: PASS=$($counts.pass) FAIL=$($counts.fail) BLOCKED=$($counts.blocked) SKIPPED=$($counts.skipped)"
+    "Counts: PASS=$($counts.pass) FAIL=$($counts.fail) TIMEOUT=$($counts.timeout) BLOCKED=$($counts.blocked) SKIPPED=$($counts.skipped)"
     "Report: $finalReportPath"
 ) + @($stages | ForEach-Object { "$($_.status) $($_.name) exit=$($_.exitCode) log=$($_.logPath) sha=$($_.logSha256) $($_.reason)" }) + @(
-    "FAILURES: $($counts.fail + $counts.blocked)"
+    "FAILURES: $($counts.fail + $counts.blocked + $counts.timeout)"
 )
 [IO.File]::WriteAllLines($masterLog, $logSummary, [Text.Encoding]::UTF8)
-Complete-BzmagRunRecord $runRecord $masterLog ($counts.fail -eq 0 -and $counts.blocked -eq 0)
+Complete-BzmagRunRecord $runRecord $masterLog ($counts.fail -eq 0 -and $counts.blocked -eq 0 -and $counts.timeout -eq 0)
 
-Write-Output "VERDICT=$verdict PASS=$($counts.pass) FAIL=$($counts.fail) BLOCKED=$($counts.blocked) SKIPPED=$($counts.skipped)"
+Write-Output "VERDICT=$verdict PASS=$($counts.pass) FAIL=$($counts.fail) TIMEOUT=$($counts.timeout) BLOCKED=$($counts.blocked) SKIPPED=$($counts.skipped)"
 Write-Output "REPORT=$finalReportPath"
 Write-Output "MASTER_LOG=$masterLog SHA256=$($runRecord.log_sha256)"
 
-if ($counts.fail -gt 0 -or $counts.blocked -gt 0) {
+if ($counts.fail -gt 0 -or $counts.blocked -gt 0 -or $counts.timeout -gt 0) {
     exit 1
 }
 if ($Level -eq 'RELEASE' -and -not $releaseReady) {

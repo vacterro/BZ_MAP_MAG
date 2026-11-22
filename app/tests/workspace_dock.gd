@@ -590,6 +590,11 @@ func run() -> void:
 	check(dup_for_del >= 0, "Duplicate object for delete-selection test")
 	editor.scene_tree.rebuild()
 	editor.scene_tree.select_entry("object", dup_for_del)
+	var wk = editor.document.object_stable_key(dup_for_del)
+	var keys = []
+	for k in editor.scene_tree._items_by_key:
+		if String(k).begins_with("obj:"):
+			keys.append(String(k))
 	check(editor.document.remove_object(dup_for_del), "Delete currently selected object")
 	editor.scene_tree.rebuild()
 	check(editor.scene_tree.selected_stable_key().is_empty(),
@@ -748,9 +753,13 @@ func run() -> void:
 	check(editor.playtest_dialog.is_visible_in_tree() and _visible_tool_windows(editor).is_empty(), "Settings embedded in center workspace, 0 popups")
 
 	# 6. Water paint tool lifecycle — NO hidden active paint mode after switching tools!
+	# Brave carries a native .WAT; Stock plgr does not, so water editing needs it.
+	check(editor.open_map(brave_bzn), "Open WAT-enabled map before Water Editor checks")
+	for _i in 4:
+		await process_frame
 	editor.toggle_water_edit()
 	check(editor.water_tools.is_visible_in_tree() and _visible_tool_windows(editor).is_empty(), "Water Editor docked, 0 popups")
-	editor.water_tools.paint_toggle.button_pressed = true
+	editor.water_tools.paint_toggle.set_pressed(true)
 	check(editor.painting_water_active(), "Water paint activates via explicit ToolState")
 	editor.activate_terrain_brush()
 	check(not editor.painting_water_active() and not editor.water_tools.paint_toggle.button_pressed,
@@ -764,7 +773,7 @@ func run() -> void:
 	editor.open_slope_studio()
 	check(editor.slope_studio.preview_shape() and editor.document.has_preview(), "Re-arm Slope preview before doc switch")
 	var prev_doc: Document = editor.document
-	check(editor.open_map(brave_bzn), "Switch document to Brave Lil Toaster")
+	check(editor.open_map(brave_bzn), "Re-open WAT-enabled map for preview safety check")
 	for _i in 6:
 		await process_frame
 	check(not prev_doc.has_preview() and not editor.document.has_preview(),

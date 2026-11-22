@@ -34,12 +34,21 @@ var sculpt_del_btn := Button.new()
 var sculpt_preview_btn := Button.new()
 var sculpt_bake_btn := Button.new()
 var sculpt_status := Label.new()
+var sculpt_list := ItemList.new()
+var sculpt_rename := LineEdit.new()
+var sculpt_up_btn := Button.new()
+var sculpt_down_btn := Button.new()
+var sculpt_opacity := SliderField.new()
+var sculpt_visible := CheckBox.new()
 var status_label := Label.new()
 var _rebuilding := false
 var _opacity_gesture_active := false
 var _opacity_gesture_index := -1
 var _opacity_gesture_initial := 1.0
 var _opacity_preview_value := NAN
+var _sculpt_opacity_gesture_active := false
+var _sculpt_opacity_gesture_uid := -1
+var _sculpt_opacity_initial := 1.0
 
 
 func _ready() -> void:
@@ -76,6 +85,52 @@ func _ready() -> void:
 	layer_list.item_selected.connect(_on_select)
 	layer_list.item_activated.connect(func(idx: int): edit_graph_requested.emit(idx))
 	add_child(layer_list)
+
+	var sculpt_header := Label.new()
+	sculpt_header.text = "Sculpt Layers (non-destructive)"
+	add_child(sculpt_header)
+	sculpt_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sculpt_list.custom_minimum_size.y = 64
+	sculpt_list.item_selected.connect(_on_sculpt_selected)
+	sculpt_list.item_activated.connect(_on_sculpt_activated)
+	add_child(sculpt_list)
+	sculpt_rename.placeholder_text = "Double-click layer to rename"
+	sculpt_rename.editable = false
+	sculpt_rename.text_submitted.connect(_on_sculpt_rename_submitted)
+	sculpt_rename.focus_exited.connect(_on_sculpt_rename_focus_exit)
+	add_child(sculpt_rename)
+	var sculpt_move_row := HFlowContainer.new()
+	sculpt_move_row.add_theme_constant_override("h_separation", 4)
+	sculpt_up_btn.text = "▲ Sculpt Up"
+	sculpt_up_btn.pressed.connect(func(): _on_sculpt_move(-1))
+	sculpt_move_row.add_child(sculpt_up_btn)
+	sculpt_down_btn.text = "▼ Sculpt Dn"
+	sculpt_down_btn.pressed.connect(func(): _on_sculpt_move(1))
+	sculpt_move_row.add_child(sculpt_down_btn)
+	add_child(sculpt_move_row)
+	var sculpt_op_row := HBoxContainer.new()
+	sculpt_op_row.add_theme_constant_override("separation", 4)
+	add_child(sculpt_op_row)
+	sculpt_visible.text = "Visible"
+	sculpt_visible.toggled.connect(_on_sculpt_visible_toggled)
+	sculpt_op_row.add_child(sculpt_visible)
+	var sculpt_op_lbl := Label.new()
+	sculpt_op_lbl.text = "Opacity"
+	sculpt_op_lbl.custom_minimum_size.x = 44
+	sculpt_op_row.add_child(sculpt_op_lbl)
+	sculpt_opacity.min_value = 0.0
+	sculpt_opacity.max_value = 1.0
+	sculpt_opacity.step = 0.05
+	sculpt_opacity.set_readout_width(40.0)
+	sculpt_opacity.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sculpt_opacity.bind_direct_edit(
+		_on_sculpt_opacity_gesture_started,
+		_on_sculpt_opacity_preview_changed,
+		_on_sculpt_opacity_committed,
+		_on_sculpt_opacity_cancelled
+	)
+	sculpt_opacity.gesture_ended.connect(_on_sculpt_opacity_gesture_ended)
+	sculpt_op_row.add_child(sculpt_opacity)
 
 	enabled_check.text = "Layer Enabled (Included in Stack Evaluation)"
 	enabled_check.toggled.connect(_on_enabled_toggled)
@@ -153,6 +208,12 @@ func bind_document(doc: Document, active_index: int = 0) -> void:
 		_opacity_gesture_index = -1
 		_opacity_preview_value = NAN
 		opacity_field.cancel_gesture()
+	if _sculpt_opacity_gesture_active:
+		_sculpt_opacity_gesture_active = false
+		_sculpt_opacity_gesture_uid = -1
+		if document != null:
+			document.cancel_sculpt_opacity_preview()
+		sculpt_opacity.cancel_gesture()
 	document = doc
 	selected_index = active_index
 	set_draft_status(false, false, "")
@@ -231,6 +292,7 @@ func refresh(select_idx: int = -1) -> void:
 			int(round(float(sc["opacity"]) * 100.0)), "enabled" if bool(sc["enabled"]) else "disabled"]
 	else:
 		sculpt_status.text = "No sculpt layer. Add one, then use Raise/Lower brush; original TER stays untouched until Sculpt Bake."
+	_refresh_sculpt_list()
 	_rebuilding = false
 
 
@@ -391,3 +453,166 @@ func _commit_opacity(idx: int, val: float) -> void:
 		return
 	refresh(idx)
 	layers_mutated.emit("Layer %d opacity %.0f%%." % [idx + 1, clamped * 100.0])
+
+
+func _refresh_sculpt_list() -> void:
+	sculpt_list.clear()
+	if document == null:
+		sculpt_visible.disabled = true
+		sculpt_opacity.editable = false
+		return
+	for i in document.sculpt_layers.size():
+		var sc: Dictionary = document.sculpt_layers[i]
+		var label := "%s · %d samples · %d%%%s" % [
+			String(sc.get("name", "Sculpt %d" % (i + 1))),
+			(sc["deltas"] as Dictionary).size(),
+			int(round(float(sc["opacity"]) * 100.0)),
+			"" if bool(sc["enabled"]) else " · hidden"]
+		sculpt_list.add_item(label)
+		if int(sc["uid"]) == document.active_sculpt_uid:
+			sculpt_list.select(i)
+	var active := document.sculpt_index_by_uid(document.active_sculpt_uid)
+	sculpt_rename.editable = active >= 0
+	if active >= 0 and not sculpt_rename.has_focus():
+		sculpt_rename.text = String((document.sculpt_layers[active] as Dictionary).get("name", ""))
+	sculpt_up_btn.disabled = active <= 0
+	sculpt_down_btn.disabled = active < 0 or active >= document.sculpt_layers.size() - 1
+	sculpt_visible.disabled = active < 0
+	sculpt_opacity.editable = active >= 0
+	if active >= 0:
+		var cur: Dictionary = document.sculpt_layers[active]
+		sculpt_visible.set_pressed_no_signal(bool(cur["enabled"]))
+		if not _sculpt_opacity_gesture_active:
+			sculpt_opacity.set_value_no_signal(float(cur["opacity"]))
+
+
+func _on_sculpt_selected(index: int) -> void:
+	if _rebuilding or document == null or index < 0 or index >= document.sculpt_layers.size():
+		return
+	if document.set_active_sculpt_layer(index):
+		refresh()
+		layers_mutated.emit("Active sculpt layer selected.")
+
+
+func _on_sculpt_visible_toggled(on: bool) -> void:
+	if _rebuilding or document == null:
+		return
+	var active := document.sculpt_index_by_uid(document.active_sculpt_uid)
+	if active >= 0 and document.set_sculpt_layer_enabled(active, on):
+		refresh()
+		layers_mutated.emit("Sculpt layer visibility changed.")
+
+
+func _on_sculpt_opacity_gesture_started(_initial: float) -> void:
+	if _rebuilding or document == null:
+		return
+	var active := document.sculpt_index_by_uid(document.active_sculpt_uid)
+	if active < 0:
+		_cancel_sculpt_opacity_gesture_admission("Select a valid sculpt layer before changing opacity.")
+		return
+	if not document.begin_sculpt_opacity_preview(active):
+		_cancel_sculpt_opacity_gesture_admission(document.error)
+		return
+	_sculpt_opacity_gesture_active = true
+	_sculpt_opacity_gesture_uid = int((document.sculpt_layers[active] as Dictionary)["uid"])
+	_sculpt_opacity_initial = float((document.sculpt_layers[active] as Dictionary)["opacity"])
+
+
+func _cancel_sculpt_opacity_gesture_admission(reason: String) -> void:
+	if sculpt_opacity.is_gesture_active():
+		sculpt_opacity.cancel_gesture()
+	var detail := reason if not reason.is_empty() else "Sculpt opacity gesture refused."
+	sculpt_status.text = "[ERR] " + detail
+
+
+func _on_sculpt_opacity_preview_changed(value: float) -> void:
+	if _rebuilding or not _sculpt_opacity_gesture_active or document == null:
+		return
+	var value_clamped := clampf(value, 0.0, 1.0)
+	if not document.preview_sculpt_layer_opacity(_sculpt_opacity_gesture_uid, value_clamped):
+		_cancel_sculpt_opacity_gesture_admission("Document refused the sculpt opacity preview.")
+		return
+	var active := document.sculpt_index_by_uid(document.active_sculpt_uid)
+	if active >= 0 and active < sculpt_list.item_count:
+		var sc: Dictionary = document.sculpt_layers[active]
+		var label := "%s · %d samples · %d%% *%s" % [
+			String(sc.get("name", "Sculpt %d" % (active + 1))),
+			(sc["deltas"] as Dictionary).size(),
+			int(round(value_clamped * 100.0)),
+			"" if bool(sc["enabled"]) else " · hidden"]
+		sculpt_list.set_item_text(active, label)
+	sculpt_status.text = "Previewing sculpt opacity %d%% (release to commit, Esc to cancel)." % int(round(value_clamped * 100.0))
+
+
+func _on_sculpt_opacity_committed(_initial: float, final_val: float) -> void:
+	if not _sculpt_opacity_gesture_active or document == null:
+		return
+	var uid := _sculpt_opacity_gesture_uid
+	_sculpt_opacity_gesture_active = false
+	_sculpt_opacity_gesture_uid = -1
+	if not document.commit_sculpt_opacity_preview(uid, clampf(final_val, 0.0, 1.0)):
+		refresh()
+		return
+	refresh()
+
+
+func _on_sculpt_opacity_cancelled(_restored: float) -> void:
+	if not _sculpt_opacity_gesture_active:
+		return
+	_sculpt_opacity_gesture_active = false
+	var uid := _sculpt_opacity_gesture_uid
+	_sculpt_opacity_gesture_uid = -1
+	if document != null:
+		document.cancel_sculpt_opacity_preview(uid)
+	refresh()
+
+
+## SliderField emits gesture_ended for zero-change gestures too; commit and
+## cancel callbacks do not. Close the document-level preview here so a click
+## with no movement cannot leave opacity gesture state armed.
+func _on_sculpt_opacity_gesture_ended(_committed: bool) -> void:
+	if not _sculpt_opacity_gesture_active or document == null:
+		return
+	_sculpt_opacity_gesture_active = false
+	var uid := _sculpt_opacity_gesture_uid
+	_sculpt_opacity_gesture_uid = -1
+	document.cancel_sculpt_opacity_preview(uid)
+	refresh()
+
+
+func _on_sculpt_activated(index: int) -> void:
+	if _rebuilding or document == null or index < 0 or index >= document.sculpt_layers.size():
+		return
+	_on_sculpt_selected(index)
+	sculpt_rename.text = String((document.sculpt_layers[index] as Dictionary).get("name", ""))
+	sculpt_rename.grab_focus()
+	sculpt_rename.select_all()
+
+
+func _on_sculpt_rename_submitted(text: String) -> void:
+	if document == null:
+		return
+	var active := document.sculpt_index_by_uid(document.active_sculpt_uid)
+	if active < 0:
+		return
+	if String((document.sculpt_layers[active] as Dictionary).get("name", "")) != text.strip_edges():
+		if not document.rename_sculpt_layer(active, text):
+			sculpt_status.text = "[ERR] " + document.error
+	refresh()
+
+
+func _on_sculpt_rename_focus_exit() -> void:
+	_on_sculpt_rename_submitted(sculpt_rename.text)
+
+
+func _on_sculpt_move(delta: int) -> void:
+	if document == null:
+		return
+	var active := document.sculpt_index_by_uid(document.active_sculpt_uid)
+	var target := active + delta
+	if active < 0 or target < 0 or target >= document.sculpt_layers.size():
+		return
+	if not document.move_sculpt_layer(active, target):
+		sculpt_status.text = "[ERR] " + document.error
+		return
+	refresh()

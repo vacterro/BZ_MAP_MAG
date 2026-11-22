@@ -66,6 +66,18 @@ func run() -> void:
 	test_sculpt(args[0])
 	test_sculpt_over_committed_edit(args[0])
 	test_sculpt_stroke_transaction(args[0])
+	test_native_export_composes_unbaked_sculpt(args[0])
+	test_sculpt_bake_preview_ownership(args[0])
+	test_recovery_pair_integrity(args[0])
+	test_active_edit_transaction_guard(args[0])
+	test_sculpt_hold_painting(args[0])
+	test_strict_sculpt_payload_validation(args[0])
+	test_sculpt_opacity_gestures(args[0])
+	test_live_sculpt_stroke_composition(args[0])
+	test_sculpt_selection_is_navigation(args[0])
+	test_sculpt_visibility_and_reorder_recompose(args[0])
+	test_sculpt_opacity_cancel_restores_preview(args[0])
+	test_active_sculpt_uid_serialization(args[0])
 	print("FAILURES: %d" % failures)
 	quit(0 if failures == 0 else 1)
 
@@ -417,7 +429,9 @@ func test_sculpt_bake_preview_ownership(fixture: String) -> void:
 	check(stale.sculpt_dab(Vector2(200.0, 200.0), 16.0, 20.0), "stale test records delta")
 	check(stale.sculpt_preview(), "stale test creates sculpt preview")
 	check(stale.set_sculpt_layer_opacity(0, 0.5), "sculpt layer modified after preview")
-	check(not stale.bake_sculpt_layers(), "stale sculpt preview refused after layer change")
+	check(stale.preview_sculpt_revision == stale.sculpt_revision,
+		"layer mutation recomposes the sculpt-owned preview revision")
+	check(stale.bake_sculpt_layers(), "recomposed sculpt preview bakes after layer change")
 
 
 ## Recovery sidecars are bound to the exact committed slot by SHA256, and a
@@ -457,3 +471,362 @@ func test_recovery_pair_integrity(fixture: String) -> void:
 	write.close()
 	check(Store.read_draft(slot).is_empty(), "mismatched sidecar binding is rejected")
 	studio.queue_free()
+
+
+## Every operation that serializes a document must refuse while a brush or
+## drag transaction is unfinished, and work normally after commit.
+func test_active_edit_transaction_guard(fixture: String) -> void:
+	var doc := fresh_document(fixture, "txn-guard")
+	check(doc.add_sculpt_layer() == 0, "guard test creates sculpt layer")
+	check(doc.begin_sculpt_stroke(), "begin stroke for guard test")
+	check(doc.sculpt_dab(Vector2(240.0, 240.0), 12.0, 20.0), "staged dab for guard test")
+	check(doc.has_active_edit_transaction(), "stroke is an active edit transaction")
+	var writer := Snapshots.new()
+	check(not writer.save_project(doc, scratch.path_join("txn-guard.bzmag")),
+		"save refuses during active stroke")
+	check(not writer.export_native(doc, scratch.path_join("txn-guard-export")),
+		"export refuses during active stroke")
+	var store := Store.new()
+	check(store.publish(doc, scratch.path_join("txn-autosave"), 2).is_empty(),
+		"autosave defers during active stroke")
+	var undo_len := doc.undo_stack.size()
+	doc.undo()
+	check(doc.undo_stack.size() == undo_len, "undo refuses during active stroke")
+	check(doc.end_sculpt_stroke(), "commit stroke")
+	check(not doc.has_active_edit_transaction(), "transaction cleared after commit")
+	check(writer.save_project(doc, scratch.path_join("txn-guard.bzmag")),
+		"save succeeds after commit")
+	check(writer.export_native(doc, scratch.path_join("txn-guard-export")),
+		"export succeeds after commit")
+
+
+## Hold painting feeds the same sculpt stroke transaction, so repeated ticks
+## stay one Undo and use the hold pressure scale without touching native TER.
+func test_sculpt_hold_painting(fixture: String) -> void:
+	var doc := fresh_document(fixture, "sculpt-hold")
+	check(doc.add_sculpt_layer() == 0, "hold test creates sculpt layer")
+	var start := doc.undo_stack.size()
+	check(doc.begin_sculpt_stroke(), "begin hold stroke")
+	var original_ter := doc.package.terrain.encode(doc.edits)
+	for _i in range(20):
+		check(doc.sculpt_dab(Vector2(300.0, 300.0), 16.0, 40.0 * 0.15), "hold dab")
+	check(doc.end_sculpt_stroke(), "commit hold stroke")
+	check(doc.undo_stack.size() == start + 1, "hold ticks create one Undo entry")
+	check(not doc.sculpt_layers.is_empty() and (doc.sculpt_layers[0] as Dictionary)["deltas"].size() > 0,
+		"hold ticks accumulate sculpt deltas")
+	check(doc.package.terrain.encode(doc.edits) == original_ter, "hold painting leaves native TER untouched")
+	doc.undo()
+	check((doc.sculpt_layers[0] as Dictionary)["deltas"].is_empty(), "hold undo clears deltas")
+
+
+## Corrupt saved sculpt records are refused at raw validation; they must never
+## be normalized into a different valid sample or layer.
+func test_strict_sculpt_payload_validation(fixture: String) -> void:
+	var valid := Sculpt.layer(1)
+	valid["deltas"] = {12: 5.0}
+	check(Sculpt.validate_raw_record(valid, 1024), "valid raw sculpt record accepted")
+	for bad_key in ["oops", "-1", "1.5", "01"]:
+		var rec := Sculpt.layer(1)
+		rec["deltas"] = {bad_key: 5.0}
+		check(not Sculpt.validate_raw_record(rec, 1024), "reject non-canonical key: " + String(bad_key))
+	var out_of_range := Sculpt.layer(1)
+	out_of_range["deltas"] = {2000: 5.0}
+	check(not Sculpt.validate_raw_record(out_of_range, 1024), "reject out-of-range sample")
+	var nan_delta := Sculpt.layer(1)
+	nan_delta["deltas"] = {12: NAN}
+	check(not Sculpt.validate_raw_record(nan_delta, 1024), "reject NaN delta")
+	var inf_delta := Sculpt.layer(1)
+	inf_delta["deltas"] = {12: INF}
+	check(not Sculpt.validate_raw_record(inf_delta, 1024), "reject infinite delta")
+	var huge := Sculpt.layer(1)
+	huge["deltas"] = {12: Sculpt.MAX_ABS_DELTA + 1.0}
+	check(not Sculpt.validate_raw_record(huge, 1024), "reject excessive delta")
+	var bad_opacity := Sculpt.layer(1)
+	bad_opacity["opacity"] = 2.5
+	check(not Sculpt.validate_raw_record(bad_opacity, 1024), "reject out-of-range opacity")
+	var string_uid := Sculpt.layer(1)
+	string_uid["uid"] = "1"
+	check(not Sculpt.validate_raw_record(string_uid, 1024), "reject string UID")
+	var duplicate_uids := [Sculpt.layer(1), Sculpt.layer(1)]
+	check(not Sculpt.validate_stack_raw(duplicate_uids, 1024), "reject duplicate layer UID")
+	var integral_uid := Sculpt.layer(1)
+	integral_uid["uid"] = 1.0
+	check(Sculpt.validate_raw_record(integral_uid, 1024), "accept integral float UID representation")
+	for bad_uid in [1.5, 0.0, -1.0, NAN, INF, -INF, 9007199254740993.0, 1e30]:
+		var rec := Sculpt.layer(1)
+		rec["uid"] = bad_uid
+		check(not Sculpt.validate_raw_record(rec, 1024), "reject invalid UID: " + str(bad_uid))
+	var canonical_duplicates := [Sculpt.layer(1), integral_uid]
+	check(not Sculpt.validate_stack_raw(canonical_duplicates, 1024), "reject duplicate UID after canonicalization")
+
+
+## T-46: opacity gestures stage preview and commit exactly one Undo entry.
+func test_sculpt_opacity_gestures(fixture: String) -> void:
+	var doc := fresh_document(fixture, "opacity-gesture")
+	check(doc.add_sculpt_layer() == 0, "opacity gesture creates sculpt layer")
+	check(doc.sculpt_dab(Vector2(220.0, 220.0), 16.0, 20.0), "opacity gesture paints a delta")
+	var deltas: Dictionary = (doc.sculpt_layers[0] as Dictionary)["deltas"]
+	var index := -1
+	for key: int in deltas:
+		index = key
+		break
+	check(index >= 0, "opacity gesture found composed sample")
+	var uid := int((doc.sculpt_layers[0] as Dictionary)["uid"])
+	var base := doc.base_heights[index]
+	var start_undo := doc.undo_stack.size()
+	check(doc.begin_sculpt_opacity_preview(0), "begin opacity gesture")
+	for i in range(20):
+		var v := 0.05 * float(i + 1)
+		check(doc.preview_sculpt_layer_opacity(uid, v), "preview opacity %.2f" % v)
+	check(doc.undo_stack.size() == start_undo, "opacity preview creates no Undo entries")
+	check(doc.has_preview() and doc.preview_owner == "sculpt", "opacity preview owns sculpt surface")
+	var previewed := float(doc.preview_after.get(index, -1.0))
+	check(absf(previewed - (base + float(deltas[index]) * 0.95)) <= doc.package.granularity * 2.0,
+		"opacity preview changes visible surface")
+	check(is_equal_approx(float((doc.sculpt_layers[0] as Dictionary)["opacity"]), 1.0),
+		"opacity preview does not mutate committed layer")
+	check(doc.commit_sculpt_opacity_preview(uid, 0.35), "commit opacity gesture")
+	check(doc.undo_stack.size() == start_undo + 1, "commit creates exactly one Undo entry")
+	check(is_equal_approx(float((doc.sculpt_layers[0] as Dictionary)["opacity"]), 0.35), "committed opacity stored")
+	doc.undo()
+	check(is_equal_approx(float((doc.sculpt_layers[0] as Dictionary)["opacity"]), 1.0), "undo restores opacity")
+	doc.redo()
+	check(is_equal_approx(float((doc.sculpt_layers[0] as Dictionary)["opacity"]), 0.35), "redo restores opacity")
+
+	var cancelled := fresh_document(fixture, "opacity-cancel")
+	cancelled.add_sculpt_layer()
+	cancelled.sculpt_dab(Vector2(220.0, 220.0), 16.0, 20.0)
+	var cancel_uid := int((cancelled.sculpt_layers[0] as Dictionary)["uid"])
+	var cancel_undo := cancelled.undo_stack.size()
+	check(cancelled.begin_sculpt_opacity_preview(0), "begin cancelled opacity gesture")
+	check(cancelled.preview_sculpt_layer_opacity(cancel_uid, 0.25), "preview cancelled opacity")
+	cancelled.cancel_sculpt_opacity_preview()
+	check(cancelled.undo_stack.size() == cancel_undo, "cancelled opacity creates no Undo")
+	check(is_equal_approx(float((cancelled.sculpt_layers[0] as Dictionary)["opacity"]), 1.0), "cancelled opacity restores committed value")
+	check(not cancelled.has_preview(), "cancelled opacity clears preview")
+
+
+## T-46: dabs compose visible heights during the stroke with one Undo at end.
+func test_live_sculpt_stroke_composition(fixture: String) -> void:
+	var doc := fresh_document(fixture, "live-stroke")
+	check(doc.add_sculpt_layer() == 0, "live stroke creates sculpt layer")
+	var start_undo := doc.undo_stack.size()
+	check(doc.begin_sculpt_stroke(), "begin live stroke")
+	check(doc.sculpt_dab(Vector2(256.0, 256.0), 20.0, 30.0), "live stroke first dab")
+	check(doc.has_preview() and doc.preview_owner == "sculpt", "first dab composes sculpt-owned preview")
+	var deltas: Dictionary = (doc.sculpt_layers[0] as Dictionary)["deltas"]
+	var index := -1
+	for key: int in deltas:
+		index = key
+		break
+	check(index >= 0 and absf(float(doc.preview_after.get(index, 0.0)) - (doc.base_heights[index] + float(deltas[index]))) <= doc.package.granularity,
+		"first dab visible height matches export composition")
+	check(doc.edits.is_empty(), "live preview leaves committed terrain untouched")
+	check(doc.undo_stack.size() == start_undo, "live dabs add no Undo entries")
+	check(doc.sculpt_dab(Vector2(260.0, 256.0), 20.0, 30.0), "live stroke second dab")
+	check(doc.preview_after.size() > deltas.size() / 2, "second dab extends composed region")
+	var last_visible := float(doc.preview_after.get(index, 0.0))
+	var expected := doc.export_heights()
+	check(absf(last_visible - float(expected.get(index, 0.0))) <= doc.package.granularity * 2.0,
+		"live visible height matches native export composition")
+	check(doc.end_sculpt_stroke(), "commit live stroke")
+	check(doc.undo_stack.size() == start_undo + 1, "live stroke creates one Undo")
+	check(not doc.has_preview(), "document-level commit clears live preview so export is allowed")
+	check(doc.sculpt_preview() and doc.has_preview(), "editor recomposes final preview after commit")
+	check(absf(float(doc.preview_after.get(index, 0.0)) - float(expected.get(index, 0.0))) <= doc.package.granularity * 2.0,
+		"final composed preview matches native export")
+	doc.undo()
+	check(not doc.has_preview(), "undo clears stale sculpt preview")
+
+
+## T-46: selecting a sculpt layer is navigation, not a terrain edit.
+func test_sculpt_selection_is_navigation(fixture: String) -> void:
+	var doc := fresh_document(fixture, "selection-nav")
+	check(doc.add_sculpt_layer() == 0, "create layer A")
+	check(doc.sculpt_dab(Vector2(180.0, 180.0), 12.0, 15.0), "paint layer A")
+	check(doc.add_sculpt_layer() == 1, "create layer B")
+	var before_stack := doc.undo_stack.size()
+	var before_revision := doc.edit_revision
+	var before_sculpt_revision := doc.sculpt_revision
+	var before_layers := doc.sculpt_layers.duplicate(true)
+	var uid_b := int((doc.sculpt_layers[1] as Dictionary)["uid"])
+	check(doc.set_active_sculpt_layer(1), "select layer B")
+	check(doc.undo_stack.size() == before_stack, "selection adds no Undo")
+	check(doc.edit_revision == before_revision, "selection does not dirty document")
+	check(doc.sculpt_revision == before_sculpt_revision, "selection does not bump sculpt revision")
+	check(doc.sculpt_layers == before_layers, "selection leaves layer content unchanged")
+	check(doc.active_sculpt_uid == uid_b, "selection updates active UID")
+	check(doc.sculpt_dab(Vector2(220.0, 220.0), 12.0, 15.0), "paint targets selected layer B")
+	check(not (doc.sculpt_layers[1] as Dictionary)["deltas"].is_empty(), "selected layer B receives deltas")
+
+
+## T-46: any validated sculpt layer mutation must leave the viewport showing
+## the same composite Native Export would produce, with the preview still
+## owned by sculpt and no extra Undo entries.
+func test_sculpt_visibility_and_reorder_recompose(fixture: String) -> void:
+	var doc := fresh_document(fixture, "visibility-recompose")
+	check(doc.add_sculpt_layer() == 0, "visibility test creates layer A")
+	check(doc.sculpt_dab(Vector2(180.0, 180.0), 12.0, 25.0), "paint layer A")
+	check(doc.add_sculpt_layer() == 1, "visibility test creates layer B")
+	check(doc.sculpt_dab(Vector2(260.0, 260.0), 12.0, 25.0), "paint layer B")
+	check(doc.sculpt_preview(), "compose both sculpt layers")
+	var sample_a := -1
+	var sample_b := -1
+	for key: int in (doc.sculpt_layers[0] as Dictionary)["deltas"]:
+		if not (doc.sculpt_layers[1] as Dictionary)["deltas"].has(key):
+			sample_a = key
+			break
+	for key: int in (doc.sculpt_layers[1] as Dictionary)["deltas"]:
+		if not (doc.sculpt_layers[0] as Dictionary)["deltas"].has(key):
+			sample_b = key
+			break
+	check(sample_a >= 0 and sample_b >= 0 and sample_a != sample_b, "distinct dab samples found")
+	var full_a := float(doc.preview_after.get(sample_a, -1.0))
+	var full_b := float(doc.preview_after.get(sample_b, -1.0))
+	var expected_a := float(doc.export_heights().get(sample_a, -1.0))
+	var expected_b := float(doc.export_heights().get(sample_b, -1.0))
+	check(absf(full_a - expected_a) <= doc.package.granularity * 2.0 and absf(full_b - expected_b) <= doc.package.granularity * 2.0,
+		"initial sculpt preview matches native export")
+	var undo_before := doc.undo_stack.size()
+	check(doc.set_sculpt_layer_enabled(1, false), "disable layer B under preview")
+	check(doc.has_preview() and doc.preview_owner == "sculpt", "visibility keeps sculpt-owned preview")
+	check(doc.undo_stack.size() == undo_before + 1, "visibility creates one Undo")
+	check(absf(float(doc.preview_after.get(sample_a, -1.0)) - full_a) <= doc.package.granularity * 2.0,
+		"layer A stays visible after B is disabled")
+	check(not doc.preview_after.has(sample_b) and absf(doc.package.terrain.heights[sample_b] - doc.base_heights[sample_b]) <= doc.package.granularity * 2.0,
+		"hidden layer B is removed from the visible surface")
+	var export_hidden := doc.export_heights()
+	check(absf(float(doc.preview_after.get(sample_a, -1.0)) - float(export_hidden.get(sample_a, -1.0))) <= doc.package.granularity * 2.0,
+		"visibility preview agrees with native export")
+	check(doc.set_sculpt_layer_enabled(1, true), "re-enable layer B")
+	check(absf(float(doc.preview_after.get(sample_b, -1.0)) - full_b) <= doc.package.granularity * 2.0,
+		"re-enabled layer B returns to the visible surface")
+
+	var order := fresh_document(fixture, "reorder-recompose")
+	check(order.add_sculpt_layer() == 0, "reorder test creates layer A")
+	check(order.sculpt_dab(Vector2(240.0, 240.0), 14.0, 25.0), "reorder paints layer A")
+	check(order.add_sculpt_layer() == 1, "reorder test creates layer B")
+	check(order.sculpt_dab(Vector2(244.0, 244.0), 14.0, 25.0), "reorder paints layer B")
+	check(order.set_sculpt_layer_opacity(0, 0.25), "reorder sets opacity where order matters")
+	check(order.sculpt_preview(), "reorder composes both layers")
+	var overlap := -1
+	for key: int in (order.sculpt_layers[0] as Dictionary)["deltas"]:
+		if (order.sculpt_layers[1] as Dictionary)["deltas"].has(key):
+			overlap = key
+			break
+	check(overlap >= 0, "reorder test found an overlapping sample")
+	# Force a near-limit committed height so the order of clamped deltas matters.
+	var limit := mini(int(order.MAX_EDITOR_ABS_HEIGHT), int(order.package.granularity * 32000.0))
+	order.set_height(overlap, float(limit - 1))
+	(order.sculpt_layers[0] as Dictionary)["deltas"][overlap] = 10.0
+	(order.sculpt_layers[1] as Dictionary)["deltas"][overlap] = -10.0
+	check(order.sculpt_preview(), "near-limit reorder preview composes")
+	var before_reorder := float(order.preview_after.get(overlap, -1.0))
+	var active_before := order.active_sculpt_uid
+	undo_before = order.undo_stack.size()
+	check(order.move_sculpt_layer(0, 1), "reorder sculpt layers")
+	check(order.active_sculpt_uid == active_before, "reorder preserves active UID")
+	check(order.undo_stack.size() == undo_before + 1, "reorder creates one Undo")
+	check(order.has_preview() and order.preview_owner == "sculpt", "reorder keeps sculpt-owned preview")
+	check(not is_equal_approx(float(order.preview_after.get(overlap, -1.0)), before_reorder),
+		"near-limit overlapping heights change when order changes")
+	var reordered_export := order.export_heights()
+	check(absf(float(order.preview_after.get(overlap, -1.0)) - float(reordered_export.get(overlap, -1.0))) <= order.package.granularity * 2.0,
+		"reordered preview matches native export")
+
+	var foreign := fresh_document(fixture, "visibility-foreign-preview")
+	check(foreign.add_sculpt_layer() == 0, "foreign preview test creates sculpt layer")
+	check(foreign.sculpt_dab(Vector2(200.0, 200.0), 12.0, 20.0), "foreign preview test paints delta")
+	check(foreign.preview_slope_plane(Vector2i(200, 200), 32.0, 300.0, Vector2(0.02, 0.0)), "slope owns preview")
+	check(foreign.set_sculpt_layer_enabled(0, false), "visibility toggle succeeds under foreign preview")
+	check(foreign.preview_owner != "sculpt", "visibility toggle does not steal foreign preview")
+
+
+## T-46: cancelling an opacity gesture returns to the surface that was visible
+## before the gesture, not to the committed terrain.
+func test_sculpt_opacity_cancel_restores_preview(fixture: String) -> void:
+	var doc := fresh_document(fixture, "opacity-cancel-restore")
+	check(doc.add_sculpt_layer() == 0, "opacity cancel test creates layer A")
+	check(doc.sculpt_dab(Vector2(180.0, 180.0), 12.0, 25.0), "opacity cancel paints layer A")
+	check(doc.add_sculpt_layer() == 1, "opacity cancel test creates layer B")
+	check(doc.sculpt_dab(Vector2(270.0, 270.0), 12.0, 25.0), "opacity cancel paints layer B")
+	check(doc.sculpt_preview(), "compose prior sculpt preview")
+	var sample := -1
+	for key: int in (doc.sculpt_layers[1] as Dictionary)["deltas"]:
+		if not (doc.sculpt_layers[0] as Dictionary)["deltas"].has(key):
+			sample = key
+			break
+	check(sample >= 0, "opacity cancel found layer B delta")
+	var prior := float(doc.preview_after.get(sample, -1.0))
+	var uid_b := int((doc.sculpt_layers[1] as Dictionary)["uid"])
+	var undo_before := doc.undo_stack.size()
+	check(doc.begin_sculpt_opacity_preview(1), "begin opacity gesture on layer B")
+	check(doc.preview_sculpt_layer_opacity(uid_b, 0.2), "stage reduced opacity")
+	check(absf(float(doc.preview_after.get(sample, -1.0)) - prior) > doc.package.granularity * 0.5,
+		"staged opacity changes the visible surface")
+	doc.cancel_sculpt_opacity_preview(uid_b)
+	check(doc.undo_stack.size() == undo_before, "opacity cancel adds no Undo")
+	check(is_equal_approx(float((doc.sculpt_layers[1] as Dictionary)["opacity"]), 1.0), "opacity cancel preserves committed value")
+	check(doc.has_preview() and doc.preview_owner == "sculpt", "opacity cancel restores sculpt preview")
+	check(absf(float(doc.preview_after.get(sample, -1.0)) - prior) <= doc.package.granularity * 2.0,
+		"opacity cancel restores the previous visible composite")
+
+	var none := fresh_document(fixture, "opacity-cancel-none")
+	check(none.add_sculpt_layer() == 0, "no prior preview test creates layer")
+	check(none.sculpt_dab(Vector2(200.0, 200.0), 12.0, 20.0), "no prior preview paints delta")
+	check(none.begin_sculpt_opacity_preview(0), "begin opacity without prior preview")
+	check(none.preview_sculpt_layer_opacity(int((none.sculpt_layers[0] as Dictionary)["uid"]), 0.4), "stage opacity without prior preview")
+	none.cancel_sculpt_opacity_preview()
+	check(not none.has_preview(), "cancel without prior preview clears staged surface")
+
+
+## T-46: activeSculptUid is editor selection metadata, but a serialized value
+## must still be either a valid integral existing UID or an explicit sentinel.
+func test_active_sculpt_uid_serialization(fixture: String) -> void:
+	var doc := fresh_document(fixture, "active-uid-source")
+	check(doc.add_sculpt_layer() == 0, "active UID test creates sculpt layer")
+	check(doc.sculpt_dab(Vector2(220.0, 220.0), 12.0, 20.0), "active UID test paints delta")
+	var writer := Snapshots.new()
+	var source := scratch.path_join("active-uid.bzmag")
+	check(writer.save_project(doc, source), "save source project for UID validation")
+	var raw := JSON.parse_string(FileAccess.get_file_as_string(source)) as Dictionary
+	var uid := int((doc.sculpt_layers[0] as Dictionary)["uid"])
+
+	var cases := [
+		{"label": "integral int", "value": uid, "accept": true, "expected": uid},
+		{"label": "integral float", "value": float(uid), "accept": true, "expected": uid},
+		{"label": "missing field", "value": "missing", "accept": true, "expected": uid},
+		{"label": "null sentinel", "value": null, "accept": true, "expected": -1},
+		{"label": "minus one sentinel", "value": -1, "accept": true, "expected": -1},
+		{"label": "fractional", "value": 1.5, "accept": false, "expected": -1},
+		{"label": "string", "value": "oops", "accept": false, "expected": -1},
+		{"label": "unknown UID", "value": uid + 99, "accept": false, "expected": -1},
+		{"label": "zero UID", "value": 0, "accept": false, "expected": -1},
+	]
+	for item: Dictionary in cases:
+		var payload := raw.duplicate(true)
+		var value: Variant = item["value"]
+		if value is String and String(value) == "missing":
+			payload.erase("activeSculptUid")
+		else:
+			payload["activeSculptUid"] = value
+		var case_path := scratch.path_join("uid-case.bzmag")
+		var out := FileAccess.open(case_path, FileAccess.WRITE)
+		out.store_string(JSON.stringify(payload))
+		out.close()
+		var reopened := Document.new()
+		var ok := reopened.open(case_path)
+		check(ok == bool(item["accept"]), "activeSculptUid " + String(item["label"]))
+		if ok:
+			check(reopened.active_sculpt_uid == int(item["expected"]),
+				"activeSculptUid expected value for " + String(item["label"]))
+	var legacy := raw.duplicate(true)
+	legacy.erase("sculptLayers")
+	legacy.erase("activeSculptUid")
+	var legacy_path := scratch.path_join("uid-legacy.bzmag")
+	var legacy_out := FileAccess.open(legacy_path, FileAccess.WRITE)
+	legacy_out.store_string(JSON.stringify(legacy))
+	legacy_out.close()
+	var legacy_doc := Document.new()
+	check(legacy_doc.open(legacy_path) and legacy_doc.active_sculpt_uid == -1,
+		"legacy BZMAG without sculpt selection opens")
