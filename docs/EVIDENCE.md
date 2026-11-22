@@ -536,3 +536,12 @@ Both runtime checks and all refusal probes ran on clean commit `4b1b494ce3a035c8
   - **Chained FAST Runs Recorded for `Clean-TempEvidence.ps1` Audit Retention**:
     - `bzmag-layout-3c9d8b514cc84cabbeffcafbe121ab7d` `a6ee4fdfe9f42d6af90f8f2da3bcf9d9006aba02abb26fc0dee2984ec960e19b`
     - `bzmag-autosave-7a778a654422414ebf72a39b2634eb95` `dcd802c3433cbdbae0e1116f9513f854da31ee334a02354198afe62a83d9e3a9`
+
+## Draft Safety, Layer Identity, Recovery & First Sculpt Layer (SAIHANDOFF-17, 2026-11-22, uncommitted working tree)
+
+- Base source: `9daeff7c0c269f545a7d87b9e3ac0294b804327c`; implementation verified in dirty working tree before commit (no earlier release receipt reused).
+- **Focused `res://tests/draft_safety.gd`** (`FAILURES: 0`, headless, Brave fixture): identical-layer UID reorder arms draft and survives tab switch; reordered UIDs commit and round-trip through BZMAG `layerUids`; reversing reorder clears false dirty; draft deletion plus external addition keeps `[A, C]` with no resurrection; unrelated external opacity survives draft deletion; draft deletion plus external edit of the same layer raises conflict with docked diff; both sides deleting the same layer merges cleanly; autosave writes separate validated draft record and injected crash keeps last good slot; sculpt layer records sparse deltas with original TER byte-identical, preview composition and opacity honoured, native export refuses unbaked preview, bake flattens into native edits with one Undo, BZMAG save/reopen restores sparse records.
+- **Existing regressions re-run**: `res://tests/terrain_workflow.gd` `FAILURES: 0`; `res://tests/workspace_dock.gd` `FAILURES: 0` (after fixing a `String(k)` runtime error in the conflict diff to `str(k)`); `NodeStudio` and editor full-project parse checks clean.
+- **Canonical `tools/Test-Acceptance.ps1 -Level FAST/INTEGRATION`**: `bzn-layouts`, `autosave-store` and new `draft-safety` stage all `FAILURES: 0`; the pre-existing `playtest-assets` stage timed out in this environment and blocked completion of those two runner invocations. Remaining integration/GPU/BZCC stages were not run in this session.
+- **Headless perf-and-ui battery** (not GPU-equivalent to the RTX 3060 release baseline): `4096m_idle` 6.89 ms, `fly` 30.47 ms, `brush_stroke` 56.15 ms, `lod_switch` 10.93 ms, `native_export_203` 782.69 ms med; `FAILURES: 0`. No new GPU benchmark or BZCC Playtest evidence was produced for this working tree.
+- New canonical stage: `draft-safety` registered in `tools/Test-Acceptance.ps1` FAST level.
