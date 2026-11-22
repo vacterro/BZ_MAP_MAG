@@ -500,3 +500,39 @@ Both runtime checks and all refusal probes ran on clean commit `4b1b494ce3a035c8
   - `bzmag-autosave-356432a885794d05b1b90fcd31c277c2` `6587a45bd5dee5f4d1cba74ba40247108990d6d1e8b35dcf9924ed6462b95557`
   - `bzmag-layout-48202c4c901e462aa09d6ffeabba8bc4` `a6ee4fdfe9f42d6af90f8f2da3bcf9d9006aba02abb26fc0dee2984ec960e19b`
   - `bzmag-autosave-fa4cb48263ef4a2fbcb111bbaf322e56` `bee7d1fea89cbec0d14805f0f9101b9cd8e01cba5b842a8b167b8b20df042e56`
+
+## Docked Workspace Hardening, Layer Transactions, Node Draft Safety & Performance (SAIHANDOFF-16, 2026-11-22)
+
+- **Code, Test & Docs Commits (`459d954..e10c5c2`)**:
+  - `459d954`: `feat(workspace): harden docked editing with layer history, node draft safety and scene stability` — added transactional `MapDocument` procedural layer API (`add_procedural_layer`, `remove_procedural_layer`, `move_procedural_layer`, `set_procedural_layer_enabled`, `set_procedural_layer_opacity`, `replace_procedural_layers`, `commit_procedural_layers`) with shared Undo/Redo, `edit_revision` + `layer_stack_revision` + `document_id`, document-scoped stable layer UIDs, and atomic `bake_preview(staged_layers, staged_uids)`; routed `LayersPanel` through `MapDocument` with `SliderField` direct-edit opacity gesture preview/single-commit/cancel (`gesture_ended` signal); hardened `NodeStudio` with explicit `COMMITTED`/`DRAFT`/`PREVIEW`/`BAKED` states, tab-switch draft preservation, 3-way UID-based controlled merge across external layer edits, non-modal inline conflict bar (`Keep Draft` / `Discard Draft`), Save/Open draft warnings, and worker `document_id`/`layer_stack_revision`/`draft_revision`/`generation` invalidation; stabilized `SceneTree` with stable entity keys (`obj:base:*`, `obj:add:*`, `layer:<uid>`, `path:<id>`), O(N) entry lookup helpers, expansion/selection/pre-filter/focus/scroll preservation, and `SELECT_MULTI`; connected all 19 `CollapsibleSection` instances to `WorkspaceState` `[workspace]` persistence and Reset Layout; hardened preview ownership and tool-switch lifecycle (clearing previews/gestures/modes on New Map/Settings/Shape/Nodes/Path switches, hidden profile-switch `ObjectBrowser` invalidation, pinned-inspector tool switching); added multi-object selection vertical slice (`move_objects_batch` 1-Undo group move + `Select Team`/`Select Class`), responsive stacked-2D `SplitContainer` toggle + tighter narrow-screen dock minima (`center3d=461 px` at `1120×690`); removed duplicate per-frame LOD queue pump (`LOD_BUDGET_PER_FRAME=4`), reused 3D chunk vertex/normal/color buffers, cursor `ImmediateMesh`, and 2D tile `Image` buffers.
+  - `0b57ad8`: `test(ui): add workspace_dock regressions for layer undo, draft merge, scene stability and multi-select` — expanded `res://tests/workspace_dock.gd` across Waves B–G (layer add/remove/reorder/enable/opacity Value Ladder commit & cancel/no-op/invalid index/max cap/validation/autosave/BZMAG/TER-untouched, NodeStudio draft preservation/3-way merge/same-field & delete conflicts/Keep/Discard/worker invalidation/Node Preview -> Move Object, SceneTree expansion/selection/shift stability/rename/delete/path/layer/profile/filter restore/scroll, CollapsibleSection toggle/theme/restart/Reset Layout, tool lifecycle transitions, multi-object group move 1-Undo + native export/reimport, stacked 2D toggle).
+  - `e10c5c2`: `docs: update architecture and parity for SAIHANDOFF-16 workspace hardening`.
+- **Clean Final Desktop Release & Full 12-Gate Canonical `RELEASE` Acceptance on Clean `e10c5c2` (RTX 3060 GPU + Live BZCC 2.0.185)**:
+  - Clean release `e10c5c2-1d14b1236efa-clean` (`build/releases/e10c5c2-1d14b1236efa-clean`, `gitHead=e10c5c2fde8476989820124806c21a69cdacdf4c`, `gitDirty=false`, `sourceDigest=1d14b1236efa37f392ea59be104a9931c19008a9c3441b7b896386558189fb20`, `importDigest=7b37a4ebc7b61c49da7961832adc52a45eead39c68cb5f535d230b6580416648`, `helpersDigest=01100381d4226726f4be870129d0664d191c770f630a3464ccaa5ced4cf19704`, `pckSha256=f0129ab144afe76825dc11358b839c0f66260f9b24c75eb428325a0db11d41b5`, `exeSha256=d34d36f3be1a6c49c56525ae86469b92e4f417ddf0b43cf00dd80c385c4b0562`).
+  - Root launcher `BZ_MAP_MAG.cmd --dry-run` resolved `"V:\___VAC\__K\__CODE\_MISC\_BZ_MAP_MAG\BZ_MAP_MAG.exe"` and `build-integrity` verified manifest v3, release pointer, `BZ_MAP_MAG.exe --headless --quit`, and packaged `Start-Playtest.ps1 -ValidateOnly` without `-Godot`.
+  - Canonical `RELEASE` run (`VERDICT=READY_FOR_RELEASE PASS=12 FAIL=0 BLOCKED=0 SKIPPED=0`, `GPU=True`, `Head=e10c5c2`, `Dirty=False`):
+    - `bzmag-accept-b185c7dcee51409f88f49eb87ddce3d1` (`godot.log` SHA-256 `7b2c3a17e4c58f37ea954a7ef71f319fbe5a587729d380e545b2f3593f539e51`)
+    - Verification separation:
+      - **Source verified**: `459d954..e10c5c2` clean Git tree, `sourceDigest=1d14b1236efa37f392ea59be104a9931c19008a9c3441b7b896386558189fb20`.
+      - **GUI verified**: `terrain-workflow` (GUI), `workspace-dock` (GUI), `perf-and-ui-battery` (GPU) all `FAILURES: 0`; 6 real GPU PNG screenshots visually inspected (`1120×690` `left=180 center3d=461 attr=228 attr_end_x=1116`).
+      - **Native codec verified**: `bzn-layouts`, `autosave-store`, `playtest-assets`, `compatibility-truth`, `object-authoring`, `env-and-mission`, `terrain-workflow`, `workspace-dock` (including multi-object batch native export/reimport) all `FAILURES: 0`.
+      - **Engine admission verified**: Live Stock 1192 BZCC 2.0.185 Playtest (without `-VrvSource`): `Battlezone 2026-11-22 14.47.51.1968.log` (SHA-256 `0902cbd9a9084fdb73a3147723bdc7763fdf5d332ec5863faa5ed8f1b9f41c95`, `reachedRun=True`, `normalExit=True`, 0 `SAVEGAME CORRUPT`).
+      - **Gameplay verified**: Automated single-session MISSION/RUN engine admission verified; interactive human multi-player match completion remains outside automated acceptance.
+  - **Measured GPU Performance Before (`98a938d`) vs After (`e10c5c2`) (RTX 3060, Ryzen 7 5800X, 1280×720, native 2 m fidelity preserved)**:
+    - `4096m_idle`: `12.07 ms` → `5.76 ms` med (-52%)
+    - `4096m_orbit`: `11.31 ms` → `5.63 ms` med (-50%)
+    - `4096m_fly`: `48.20 ms` (`413` chunks) → `21.72 ms` (`125` chunks, `p95=27.38 ms`, `max=29.83 ms`, -55% frame time / -70% chunks)
+    - `4096m_brush_hover`: `16.46 ms` → `10.18 ms` med (-38%)
+    - `4096m_brush_stroke`: `36.25 ms` (`cpu_med=20.81 ms`) → `21.16 ms` (`cpu_med=11.25 ms`, `p95=26.11 ms`, -42% total / -46% CPU)
+    - `4096m_lod_switch`: `23.88 ms` → `7.24 ms` med (`p95=16.75 ms`, `pending=0`, -70%)
+    - `water_preview`: `15.43 ms` → `10.12 ms` (-34%); `dense_place_200`: `0.11 ms` med (`max 0.17 ms`); `browser_search`: `8.22 ms` → `4.01 ms` med (`1,479` ODFs, 0 rescans); `native_export_203`: `299.51 ms` → `177.93 ms` (-41%); peak RAM `168.2 MiB`.
+  - **Authentic GPU After Screenshots (`e10c5c2`, SHA-256)**:
+    - `after-slope-1120x690.png` (`46,374 B`, SHA-256 `6dc8904bfdca96a6017aff350da263fd9ad856f9aad0b233ac855ff63cc1e5ad`)
+    - `after-default-1280x720.png` (`231,348 B`, SHA-256 `dcb9c366e08f018b5220f024a869dba9fd8f74fac9f9f10cd2ea0b2291ca03fd`)
+    - `after-nodes-1280x720.png` (`47,422 B`, SHA-256 `c5809238f589402cefea36c9c14872508210a71767c31c577e9698975542eb38`)
+    - `after-mission-1280x720.png` (`286,326 B`, SHA-256 `0117b4b263a1edc015667732d7e7f1ca870990825062ebd20a28f68f5b6fda2b`)
+    - `after-objects-1280x720.png` (`215,947 B`, SHA-256 `62f175f18e45815890264a8721afb19b13379f81f6a05d2786e6b3938b9ff6cd`)
+    - `after-environment-1280x720.png` (`212,430 B`, SHA-256 `8073dd229f35b1579053277dc9e74ea0fbf6de4d06dc437d156565c57d8946d0`)
+  - **Chained FAST Runs Recorded for `Clean-TempEvidence.ps1` Audit Retention**:
+    - `bzmag-layout-3c9d8b514cc84cabbeffcafbe121ab7d` `a6ee4fdfe9f42d6af90f8f2da3bcf9d9006aba02abb26fc0dee2984ec960e19b`
+    - `bzmag-autosave-7a778a654422414ebf72a39b2634eb95` `dcd802c3433cbdbae0e1116f9513f854da31ee334a02354198afe62a83d9e3a9`
