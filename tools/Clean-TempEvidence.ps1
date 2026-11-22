@@ -18,7 +18,7 @@ function Normalize-BzmagDirPath([string] $Path) {
 }
 
 $root = Normalize-BzmagDirPath $parent.FullName
-$suite = '^(bzmag-terrain|bzmag-layout|bzmag-autosave)-[a-f0-9]{32}$'
+$suite = '^(bzmag-terrain|bzmag-layout|bzmag-autosave|bzmag-compat|bzmag-objects|bzmag-env|bzmag-perf|bzmag-accept)-[a-f0-9]{32}$'
 $probe = '-probe|^water-[a-f0-9-]+$|^bzm-[a-f0-9]{32}$'
 $evidence = @(Get-Content -LiteralPath (Join-Path $workspace 'docs/EVIDENCE.md') -ErrorAction SilentlyContinue)
 $state = Get-Content -LiteralPath (Join-Path $workspace '.saipen/STATE.md') -Raw -ErrorAction SilentlyContinue

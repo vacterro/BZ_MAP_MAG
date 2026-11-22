@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory)] [string] $Godot,
     [string] $WindowsReleaseTemplate,
     [switch] $ToRoot,
+    [switch] $RequireClean,
     [switch] $SimulatePublishFailure
 )
 
@@ -36,13 +37,25 @@ $gitHead = try { (& git -C $repo rev-parse HEAD 2>$null | Out-String).Trim() } c
 $gitShort = if ($gitHead.Length -ge 7) { $gitHead.Substring(0, 7) } else { 'nogit' }
 $dirtyRaw = try { @(& git -C $repo status --porcelain 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) } catch { @() }
 $gitDirty = ($dirtyRaw.Count -gt 0)
+if ($RequireClean -and $gitDirty) {
+    throw "Refusing clean release build: working tree has $($dirtyRaw.Count) uncommitted change(s). Commit or stash before building with -RequireClean."
+}
+$dirtyFingerprint = ''
+if ($gitDirty) {
+    $diffText = try { (& git -C $repo diff 2>$null | Out-String) } catch { '' }
+    $diffBlob = ($dirtyRaw -join "`n") + "`n---DIFF---`n" + $diffText
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $dirtyFingerprint = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($diffBlob))).Replace('-', '').ToLowerInvariant()
+    } finally { $sha.Dispose() }
+}
 $godotVer = try { (& $Godot --version 2>$null | Out-String).Trim() } catch { '4.7.2.stable' }
 $srcDigest = Get-BzmagAppSourceDigest $app
 $impDigest = Get-BzmagImportDigest $app
 $helperProv = Get-BzmagHelperProvenance $repo
 $pckHash = (Get-FileHash -LiteralPath $pack -Algorithm SHA256).Hash.ToLowerInvariant()
 $exeHash = (Get-FileHash -LiteralPath $stageExe -Algorithm SHA256).Hash.ToLowerInvariant()
-$stateTag = if ($gitDirty) { 'dirty' } else { 'clean' }
+$stateTag = if ($gitDirty) { 'dirty-' + $dirtyFingerprint.Substring(0, 8) } else { 'clean' }
 $buildRev = "$gitShort-$($srcDigest.Substring(0, 12))-$stateTag"
 $builtAtUtc = [DateTime]::UtcNow.ToString('o')
 $manifest = [ordered]@{
@@ -62,6 +75,7 @@ $manifest = [ordered]@{
     gitHead = $gitHead
     gitDirty = $gitDirty
     gitDirtyCount = $dirtyRaw.Count
+    dirtyFingerprint = $dirtyFingerprint
     godotVersion = $godotVer
     buildMode = 'release'
     buildTarget = if ($ToRoot) { 'root-executable' } else { 'portable-desktop' }
