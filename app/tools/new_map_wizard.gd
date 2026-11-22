@@ -430,6 +430,7 @@ func create_selected_map() -> void:
 		"mod_profile": mid,
 		"mission_profile": mis,
 		"configure_mission": mis != "blank",
+		"sync_mission_dll": true,
 		"sanitize_stock_objects": (mid == "stock" and sanitize_stock_check.button_pressed),
 		"trim_showcase_objects": (mid == "stock"),
 	}

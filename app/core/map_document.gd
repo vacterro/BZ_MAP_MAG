@@ -7,6 +7,7 @@ const BznObjects := preload("res://formats/bzn_objects.gd")
 const Layouts := preload("res://formats/bzn_layouts.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
 const Water := preload("res://formats/water_v5.gd")
+const SkyEnv := preload("res://formats/sky_env.gd")
 const SlopeShapes := preload("res://core/slope_shapes.gd")
 const VrvShapes := preload("res://core/vrv_shapes.gd")
 const ModRegistry := preload("res://core/mod_registry.gd")
@@ -24,6 +25,7 @@ signal object_moved(view_index: int)
 signal objects_changed
 signal water_changed
 signal profile_changed
+signal environment_changed
 
 const WATER_LAYERS := 8
 const WATER_BLOCK := 16
@@ -39,6 +41,9 @@ var mod_profile := "stock"
 var mission_profile := "blank"
 var profile_explicit := false
 var detected_profile_info: Dictionary = {}
+var mission_dll_override := ""
+var has_mission_dll_override := false
+var environment_edits: Dictionary = {}
 var object_edits := {}
 var object_label_edits := {}
 var object_odf_edits := {}
@@ -86,6 +91,9 @@ func open(path: String) -> bool:
 	mission_profile = "blank"
 	profile_explicit = false
 	detected_profile_info = {}
+	mission_dll_override = ""
+	has_mission_dll_override = false
+	environment_edits = {}
 	object_edits = {}
 	object_additions = []
 	object_removals = {}
@@ -119,6 +127,12 @@ func open(path: String) -> bool:
 		if saved.has("target"):
 			if not read_target_profile(saved["target"]):
 				return false
+		if saved.has("missionDllOverride"):
+			var saved_dll: Variant = saved["missionDllOverride"]
+			if not valid_mission_dll_name(saved_dll):
+				return fail("Invalid saved mission DLL override.")
+			mission_dll_override = String(saved_dll).strip_edges()
+			has_mission_dll_override = mission_dll_override != String(package.mission_dll)
 		var graph := Graph.new()
 		if not saved.get("layers", layers) is Array or not graph.validate_stack(saved.get("layers", layers)):
 			return fail("Invalid node stack. " + graph.error)
@@ -145,6 +159,11 @@ func open(path: String) -> bool:
 			return false
 		if not read_water_edits(saved.get("waterEdits", {})):
 			return false
+		if saved.has("environmentEdits"):
+			var env_err := SkyEnv.validate_edits(saved["environmentEdits"])
+			if not env_err.is_empty():
+				return fail("Invalid project environment edits: " + env_err)
+			environment_edits = (saved["environmentEdits"] as Dictionary).duplicate(true)
 	if not package.check_sources():
 		return fail(package.error)
 	edit_revision += 1
@@ -297,6 +316,101 @@ func _apply_target_profile(state: Dictionary) -> void:
 	mission_profile = String(state["mission"])
 	profile_explicit = bool(state["explicit"])
 	profile_changed.emit()
+
+
+static func valid_mission_dll_name(value: Variant) -> bool:
+	if not (value is String):
+		return false
+	var clean := String(value).strip_edges()
+	if clean.is_empty():
+		return true
+	if clean.length() > 127 or clean.get_file() != clean or ":" in clean:
+		return false
+	var re := RegEx.new()
+	re.compile("^[A-Za-z0-9_][A-Za-z0-9_. -]*\\.dll$")
+	return re.search(clean) != null
+
+
+func effective_mission_dll() -> String:
+	if has_mission_dll_override:
+		return mission_dll_override
+	return String(package.mission_dll) if package != null else ""
+
+
+func has_mission_dll_edit() -> bool:
+	return has_mission_dll_override and mission_dll_override != (String(package.mission_dll) if package != null else "")
+
+
+func set_mission_dll(next_dll: String) -> bool:
+	if stroke_active or has_preview():
+		return fail("Finish the current terrain edit before changing the mission DLL.")
+	if not valid_mission_dll_name(next_dll):
+		return fail("Invalid mission DLL filename (expected empty or *.dll).")
+	var clean := next_dll.strip_edges()
+	var before := {"has": has_mission_dll_override, "dll": mission_dll_override}
+	var base_dll := String(package.mission_dll) if package != null else ""
+	var after := {"has": clean != base_dll, "dll": clean if clean != base_dll else ""}
+	if before == after:
+		return true
+	push_history({"mission_dll": true, "before": before, "after": after})
+	_apply_mission_dll(after)
+	return true
+
+
+func _apply_mission_dll(state: Dictionary) -> void:
+	has_mission_dll_override = bool(state.get("has", false))
+	mission_dll_override = String(state.get("dll", ""))
+	profile_changed.emit()
+
+
+func has_environment_edits() -> bool:
+	return not environment_edits.is_empty()
+
+
+func effective_environment() -> Dictionary:
+	if package == null or not bool(package.sky_env.get("ok", false)):
+		return {}
+	var base: Dictionary = (package.sky_env.get("fields", {}) as Dictionary).duplicate(true)
+	for k: String in environment_edits:
+		base[k] = environment_edits[k].duplicate(true) if environment_edits[k] is Array else environment_edits[k]
+	return base
+
+
+func set_environment_edits(next_edits: Dictionary) -> bool:
+	if stroke_active or has_preview():
+		return fail("Finish the current terrain edit before changing environment settings.")
+	if package == null or not bool(package.sky_env.get("ok", false)) or package.sky_name.is_empty():
+		return fail("This map does not have a verified native .SKY file.")
+	var err := SkyEnv.validate_edits(next_edits)
+	if not err.is_empty():
+		return fail(err)
+	var base_fields: Dictionary = package.sky_env.get("fields", {})
+	var pruned := {}
+	for k: String in next_edits:
+		var val: Variant = next_edits[k]
+		var base_val: Variant = base_fields.get(k, null)
+		if val is Array and base_val is Array and (val as Array).size() == 4 and (base_val as Array).size() == 4:
+			var same := true
+			for i in 4:
+				if absf(float(val[i]) - float(base_val[i])) > 0.0005:
+					same = false
+					break
+			if not same:
+				pruned[k] = [float(val[0]), float(val[1]), float(val[2]), float(val[3])]
+		elif (val is float or val is int) and (base_val is float or base_val is int):
+			if absf(float(val) - float(base_val)) > 0.0005:
+				pruned[k] = float(val)
+	var before := environment_edits.duplicate(true)
+	if before == pruned:
+		return true
+	push_history({"environment": true, "before": before, "after": pruned.duplicate(true)})
+	_apply_environment_edits(pruned)
+	return true
+
+
+func _apply_environment_edits(state: Dictionary) -> void:
+	environment_edits = state.duplicate(true)
+	environment_changed.emit()
 
 
 func begin_stroke(layer := Terrain.Layer.HEIGHT) -> void:
@@ -639,6 +753,10 @@ func apply_history(change: Dictionary, direction: String) -> void:
 		water_changed.emit()
 	elif change.has("target_profile"):
 		_apply_target_profile(change[direction])
+	elif change.has("mission_dll"):
+		_apply_mission_dll(change[direction])
+	elif change.has("environment"):
+		_apply_environment_edits(change[direction])
 	elif change.has("profile_conversion"):
 		_apply_profile_conversion(change[direction])
 	else:
@@ -1483,6 +1601,8 @@ func convert_objects_to_profile(target_mod_id: String, target_mission_id: String
 		"explicit": profile_explicit,
 		"odf_edits": object_odf_edits.duplicate(),
 		"removals": object_removals.duplicate(),
+		"has_dll": has_mission_dll_override,
+		"dll": mission_dll_override,
 	}
 	var next_odf_edits := object_odf_edits.duplicate()
 	var plan_edits: Dictionary = plan["odfEdits"]
@@ -1496,6 +1616,13 @@ func convert_objects_to_profile(target_mod_id: String, target_mission_id: String
 	var next_removals := object_removals.duplicate()
 	for slot_idx: int in plan["removals"]:
 		next_removals[base_for_slot[slot_idx]] = true
+	var next_has_dll := has_mission_dll_override
+	var next_dll := mission_dll_override
+	if tgt_mis != "custom-dll":
+		var expected_dll := String(MissionProfiles.expected_dll(tgt_mis, tgt_mod)).strip_edges()
+		var base_dll := String(package.mission_dll) if package != null else ""
+		next_has_dll = expected_dll != base_dll
+		next_dll = expected_dll if next_has_dll else ""
 	var after_state := {
 		"engine": engine_profile,
 		"mod": tgt_mod,
@@ -1503,6 +1630,8 @@ func convert_objects_to_profile(target_mod_id: String, target_mission_id: String
 		"explicit": true,
 		"odf_edits": next_odf_edits,
 		"removals": next_removals,
+		"has_dll": next_has_dll,
+		"dll": next_dll,
 	}
 	if before_state != after_state:
 		push_history({"profile_conversion": true, "before": before_state, "after": after_state})
@@ -1517,6 +1646,8 @@ func _apply_profile_conversion(state: Dictionary) -> void:
 	profile_explicit = bool(state["explicit"])
 	object_odf_edits = (state["odf_edits"] as Dictionary).duplicate()
 	object_removals = (state["removals"] as Dictionary).duplicate()
+	has_mission_dll_override = bool(state.get("has_dll", false))
+	mission_dll_override = String(state.get("dll", ""))
 	objects_changed.emit()
 	profile_changed.emit()
 

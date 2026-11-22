@@ -275,8 +275,16 @@ static func _compute_fit_size(dialog: Window, width: int, min_height: int = 0) -
 
 static func popup_fit(dialog: Window, width: int, min_height: int = 0) -> void:
 	var target := _compute_fit_size(dialog, width, min_height)
+	var parent := dialog.get_parent()
+	var parent_size := Vector2i(1260, 684)
+	if parent is Control:
+		parent_size = Vector2i(int((parent as Control).size.x), int((parent as Control).size.y))
+	target.x = clampi(target.x, 320, maxi(320, parent_size.x - 20))
+	target.y = clampi(target.y, 180, maxi(180, parent_size.y - 36))
 	dialog.popup_centered(target)
 	target = _compute_fit_size(dialog, width, min_height)
+	target.x = clampi(target.x, 320, maxi(320, parent_size.x - 20))
+	target.y = clampi(target.y, 180, maxi(180, parent_size.y - 36))
 	dialog.size = target
 	dialog.move_to_center()
 

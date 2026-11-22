@@ -9,6 +9,7 @@ const MissionProfiles := preload("res://core/mission_profiles.gd")
 const ModRegistry := preload("res://core/mod_registry.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
 const Water := preload("res://formats/water_v5.gd")
+const SkyEnv := preload("res://formats/sky_env.gd")
 
 var error := ""
 
@@ -243,11 +244,12 @@ func _configure_mission_bzn(source_bytes: PackedByteArray, terrain: Terrain, hei
 				return PackedByteArray()
 			table_start = path_codec.table_start
 
-	if not configure_mission and not sanitize_stock:
+	var sync_dll := bool(options.get("sync_mission_dll", false))
+	if not configure_mission and not sanitize_stock and not sync_dll:
 		return current_bytes
 
-	# 2. Configure Mission DLL & Required Paths when configure_mission is enabled
-	if configure_mission or (mod_id == "stock" and mis_id == "blank" and obj_codec.mission_dll.to_lower() == "luamission.dll"):
+	# 2. Configure Mission DLL & Required Paths when configure_mission or sync_mission_dll is enabled
+	if configure_mission or sync_dll or (mod_id == "stock" and mis_id == "blank" and obj_codec.mission_dll.to_lower() == "luamission.dll"):
 		var contract := MissionProfiles.contract_for(mis_id, mod_id)
 		var target_dll := String(contract.get("dll", "")).strip_edges()
 		if not target_dll.is_empty() or mis_id == "blank":
@@ -259,6 +261,8 @@ func _configure_mission_bzn(source_bytes: PackedByteArray, terrain: Terrain, hei
 			if not path_codec.read(current_bytes, ver):
 				fail("Could not decode BZN path table after DLL update.")
 				return PackedByteArray()
+		if not configure_mission:
+			return current_bytes
 		var req_paths: Array = contract.get("required", [])
 		var rec_paths: Array = contract.get("recommended", [])
 		var wanted: Array[String] = []
@@ -424,6 +428,10 @@ func save_project(document: Document, target: String) -> bool:
 		}}
 	if not document.asset_profile.is_empty():
 		record["assetProfile"] = document.asset_profile
+	if document.has_mission_dll_edit():
+		record["missionDllOverride"] = document.effective_mission_dll()
+	if document.has_environment_edits():
+		record["environmentEdits"] = document.environment_edits.duplicate(true)
 	var terrain := document.package.terrain
 	if not terrain.color_edits.is_empty():
 		record["colorEdits"] = indexed_record(terrain.color_edits)
@@ -471,11 +479,18 @@ func export_native(document: Document, target: String) -> bool:
 	var suffix := PackedByteArray()
 	var object_shift := 0
 	var wat := PackedByteArray()
+	var sky := PackedByteArray()
 	if document.has_water_file_edits():
 		wat = Water.encode(package.water_bytes, document.water_edits, document.water_heights)
 		if wat.is_empty():
 			return fail("The native water edits could not be applied to this map.")
-	if not document.path_edits.is_empty() or document.has_object_file_edits():
+	if document.has_environment_edits():
+		if package.sky_name.is_empty() or package.sky_bytes.is_empty():
+			return fail("Cannot export environment edits: this map has no verified native .SKY file.")
+		sky = SkyEnv.encode_sky(package.sky_bytes, document.environment_edits)
+		if sky.is_empty():
+			return fail("The native .SKY environment edits could not be encoded.")
+	if not document.path_edits.is_empty() or document.has_object_file_edits() or document.has_mission_dll_edit():
 		var source_bzn := FileAccess.get_file_as_bytes(package.source_path.get_base_dir().path_join(package.bzn_name))
 		var digest := HashingContext.new()
 		digest.start(HashingContext.HASH_SHA256)
@@ -539,7 +554,23 @@ func export_native(document: Document, target: String) -> bool:
 			package.path_codec.shift(object_shift)
 		else:
 			bzn = source_bzn
-		bzn = package.path_codec.patch(bzn, document.path_edits)
+		if document.has_mission_dll_edit():
+			if package.object_insert_offset < 0 or package.object_insert_offset + object_shift >= package.path_codec.table_start - 7:
+				package.path_codec.shift(-object_shift)
+				return fail("This BZN layout does not support native mission DLL edits.")
+			var shifted_insert := package.object_insert_offset + object_shift
+			var shifted_table := package.path_codec.table_start
+			var before_dll_len := bzn.size()
+			var dll_patched := BznObjects.patch_mission_dll(bzn, shifted_insert, shifted_table, document.effective_mission_dll())
+			if dll_patched.is_empty():
+				package.path_codec.shift(-object_shift)
+				return fail("Could not patch native BZN mission DLL.")
+			var dll_shift := dll_patched.size() - before_dll_len
+			bzn = dll_patched
+			object_shift += dll_shift
+			package.path_codec.shift(dll_shift)
+		if not document.path_edits.is_empty():
+			bzn = package.path_codec.patch(bzn, document.path_edits)
 		package.path_codec.shift(-object_shift)
 	var stage := target.get_base_dir().path_join(".bzmag-" + nonce())
 	if DirAccess.make_dir_absolute(stage) != OK:
@@ -560,6 +591,10 @@ func export_native(document: Document, target: String) -> bool:
 			expected = FileAccess.get_sha256(output)
 		elif name == package.water_name and not wat.is_empty():
 			if not write_bytes(output, wat) or FileAccess.get_file_as_bytes(output) != wat:
+				return rollback(stage, names, "Could not write and verify " + name)
+			expected = FileAccess.get_sha256(output)
+		elif name == package.sky_name and not sky.is_empty():
+			if not write_bytes(output, sky) or FileAccess.get_file_as_bytes(output) != sky:
 				return rollback(stage, names, "Could not write and verify " + name)
 			expected = FileAccess.get_sha256(output)
 		else:
@@ -589,10 +624,27 @@ func export_native(document: Document, target: String) -> bool:
 				return rollback(stage, names, "Modified water did not re-import as edited.")
 		if reimported.size() != document.water_layers_effective().size():
 			return rollback(stage, names, "Modified water did not re-import as edited.")
+	if not sky.is_empty():
+		if not bool(reimport.sky_env.get("ok", false)) or reimport.sky_bytes.size() != package.sky_bytes.size():
+			return rollback(stage, names, "Modified .SKY did not re-import cleanly.")
+		var eff_env := document.effective_environment()
+		var reimp_fields: Dictionary = reimport.sky_env.get("fields", {})
+		for k: String in eff_env:
+			var want: Variant = eff_env[k]
+			var got: Variant = reimp_fields.get(k, null)
+			if want is Array and got is Array and (want as Array).size() == 4 and (got as Array).size() == 4:
+				for ci in 4:
+					if absf(float(want[ci]) - float(got[ci])) > 0.0005:
+						return rollback(stage, names, "Modified .SKY color '%s' did not re-import as edited." % k)
+			elif (want is float or want is int) and (got is float or got is int):
+				if absf(float(want) - float(got)) > 0.0005:
+					return rollback(stage, names, "Modified .SKY value '%s' did not re-import as edited." % k)
 	if not bzn.is_empty():
 		var path_indices := document.path_indices()
 		if reimport.path_codec.table_start != package.path_codec.table_start + object_shift or reimport.paths.size() != path_indices.size() or bzn.slice(reimport.path_codec.table_end) != suffix:
 			return rollback(stage, names, "Modified BZN did not retain the expected path table and original trailer.")
+		if reimport.mission_dll != document.effective_mission_dll():
+			return rollback(stage, names, "Modified BZN mission DLL did not re-import as edited.")
 		for index in reimport.paths.size():
 			if not Document.same_path_fields(reimport.paths[index], document.path_at(path_indices[index])):
 				return rollback(stage, names, "Modified BZN path did not re-import as edited.")

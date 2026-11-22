@@ -483,10 +483,12 @@ static func validate(document: Object, mission_id: String, mod_id: String = "") 
 			warnings.append("Recommended path absent for %s: %s" % [contract["label"], rec])
 
 	# DLL consistency advisory
-	var actual_dll := String(document.package.mission_dll)
+	var actual_dll := String(document.effective_mission_dll()) if document.has_method("effective_mission_dll") else String(document.package.mission_dll)
 	var expected := String(contract.get("dll", ""))
-	if not expected.is_empty() and not actual_dll.is_empty() and actual_dll.nocasecmp_to(expected) != 0:
-		warnings.append("BZN mission DLL is '%s', while %s expects '%s'." % [actual_dll, contract["label"], expected])
+	if not expected.is_empty() and (actual_dll.is_empty() or actual_dll.nocasecmp_to(expected) != 0):
+		warnings.append("BZN mission DLL is '%s', while %s expects '%s'." % [actual_dll if not actual_dll.is_empty() else "(none)", contract["label"], expected])
+	elif m == "blank" and not actual_dll.is_empty():
+		warnings.append("BZN mission DLL is '%s', while %s expects no mission DLL." % [actual_dll, contract["label"]])
 
 	# Team consistency checks scoped to mods that use Player_1 / Enemy_11 path spawns
 	if mod in ["vsr", "vrv"] and m == "strategy":

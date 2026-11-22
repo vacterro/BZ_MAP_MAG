@@ -24,6 +24,7 @@ const TargetProfileDialog := preload("res://tools/target_profile_dialog.gd")
 const WaterCommands := preload("res://tools/water_commands.gd")
 const MoveObject := preload("res://tools/move_object.gd")
 const ObjectBrowser := preload("res://tools/object_browser.gd")
+const EnvironmentStudio := preload("res://tools/environment_studio.gd")
 const SoundEditor := preload("res://tools/sound_editor.gd")
 const AutoSaveStore := preload("res://core/autosave_store.gd")
 const SETTINGS := "user://editor.cfg"
@@ -104,6 +105,8 @@ var studio := NodeStudio.new()
 var terrain_tools_button: Button
 var terrain_tools := TerrainCommands.new()
 var slope_studio := SlopeStudio.new()
+var environment_studio := EnvironmentStudio.new()
+var environment_button: Button
 var sound_editor := SoundEditor.new()
 var sound_button: Button
 var object_label_button: Button
@@ -156,6 +159,8 @@ var saved_colors := {}
 var saved_tiles := {}
 var saved_water_edits := {}
 var saved_water_heights := {}
+var saved_mission_dll := ""
+var saved_environment_edits := {}
 const HOLD_STEP_SECONDS := 0.05
 const HOLD_DAB_SCALE := 0.15
 var cursor := Vector2(-1, -1)
@@ -220,6 +225,8 @@ func _ready() -> void:
 	toolbar_buttons.append(terrain_tools_button)
 	slope_studio_button = add_button(tools, "Slope Studio", open_slope_studio, "Build exact-angle ramps, terraces, ridges, valleys, trenches and excavations with batch stamps and masks")
 	toolbar_buttons.append(slope_studio_button)
+	environment_button = add_button(tools, "Environment", open_environment_studio, "Inspect .SKY/.TRN and edit verified native .SKY fog and sun lighting")
+	toolbar_buttons.append(environment_button)
 	toolbar_buttons.append(add_button(tools, "Hotkeys", func(): Wintage.popup_fit(keys_dialog, 420), "Show editor shortcuts"))
 	tool_search.placeholder_text = "Filter tools…"
 	tool_search.custom_minimum_size.x = 110
@@ -343,6 +350,11 @@ func _ready() -> void:
 	terrain_tools.updated.connect(func(value: String): sync_actions(); report(value))
 	add_child(slope_studio)
 	slope_studio.updated.connect(func(value: String): sync_actions(); report(value))
+	add_child(environment_studio)
+	environment_studio.updated.connect(func(value: String): sync_actions(); report(value))
+	environment_studio.preview_toggled.connect(func(on: bool):
+		if document != null:
+			scene_view.apply_environment_preview(document.effective_environment(), on))
 	add_child(sound_editor)
 	sound_editor.updated.connect(func(value: String): sync_actions(); report(value))
 	sound_editor.sound_point_selected.connect(select_object_view)
@@ -649,6 +661,8 @@ func sync_actions() -> void:
 	nodes_button.disabled = locked
 	terrain_tools_button.disabled = locked
 	slope_studio_button.disabled = locked or document.has_preview()
+	if environment_button != null:
+		environment_button.disabled = locked
 	new_path_button.disabled = locked or not document.package.path_codec.can_resize
 	edit_path_button.disabled = locked or path_list.selected <= 0
 	move_path_button.disabled = locked or path_list.selected <= 0
@@ -686,7 +700,9 @@ func has_unsaved_changes() -> bool:
 		or document.object_additions != saved_object_additions
 		or document.object_removals != saved_object_removals
 		or document.package.terrain.color_edits != saved_colors or document.package.terrain.tile_edits != saved_tiles
-		or document.water_edits != saved_water_edits or document.water_heights != saved_water_heights)
+		or document.water_edits != saved_water_edits or document.water_heights != saved_water_heights
+		or document.effective_mission_dll() != saved_mission_dll
+		or document.environment_edits != saved_environment_edits)
 
 
 func remember_saved_changes() -> void:
@@ -707,6 +723,8 @@ func remember_saved_changes() -> void:
 	saved_water_edits = document.water_edits.duplicate(true)
 	autosave_seconds = 0.0
 	saved_water_heights = document.water_heights.duplicate()
+	saved_mission_dll = document.effective_mission_dll()
+	saved_environment_edits = document.environment_edits.duplicate(true)
 
 
 func request_open(path: String) -> void:
@@ -789,6 +807,8 @@ func open_map(path: String) -> bool:
 			document.water_changed.disconnect(refresh_water)
 		if document.profile_changed.is_connected(on_document_profile_changed):
 			document.profile_changed.disconnect(on_document_profile_changed)
+		if document.environment_changed.is_connected(on_document_environment_changed):
+			document.environment_changed.disconnect(on_document_environment_changed)
 	water_tools.hide()
 	painting_water = false
 	document = next
@@ -818,6 +838,7 @@ func open_map(path: String) -> bool:
 	document.objects_changed.connect(objects_topology_changed)
 	document.water_changed.connect(refresh_water)
 	document.profile_changed.connect(on_document_profile_changed)
+	document.environment_changed.connect(on_document_environment_changed)
 	top.bind(document)
 	scene_view.bind(document)
 	brush_panel.sync_height_range(document.package.terrain.min_height, document.package.terrain.max_height)
@@ -912,6 +933,22 @@ func on_document_profile_changed() -> void:
 		object_browser.refresh_catalog()
 	cancel_place_object(false)
 	sync_actions()
+
+
+func on_document_environment_changed() -> void:
+	if document == null:
+		return
+	if scene_view.env_preview_enabled:
+		scene_view.apply_environment_preview(document.effective_environment(), true)
+	if environment_studio.visible:
+		environment_studio.refresh_all()
+	sync_actions()
+
+
+func open_environment_studio() -> void:
+	if document == null:
+		return
+	environment_studio.begin(document, scene_view.env_preview_enabled)
 
 
 func request_save() -> void:
@@ -1325,7 +1362,7 @@ func all_dialogs() -> Array[Window]:
 		open_dialog, blank_dialog, flat_template_dialog, flat_output_dialog, save_dialog, export_dialog,
 		confirmation, keys_dialog, playtest_dialog, recover_dialog, game_picker, vrv_picker, autosave_picker,
 		asset_profile_picker, studio, path_inspector, mission_studio, terrain_tools, slope_studio, water_tools,
-		sound_editor, object_label_dialog, new_map_wizard, target_profile_dialog, object_browser,
+		sound_editor, object_label_dialog, new_map_wizard, target_profile_dialog, object_browser, environment_studio,
 	]
 
 

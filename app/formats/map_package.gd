@@ -4,6 +4,7 @@ const Terrain := preload("res://formats/terrain_v5.gd")
 const BznPaths := preload("res://formats/bzn_paths.gd")
 const BznObjects := preload("res://formats/bzn_objects.gd")
 const Water := preload("res://formats/water_v5.gd")
+const SkyEnv := preload("res://formats/sky_env.gd")
 const Layouts := preload("res://formats/bzn_layouts.gd")
 const MAX_MEMBER_BYTES := 128 * 1024 * 1024
 const MAP_EXTENSIONS := ["bzn", "ter", "trn", "inf", "wat", "sky", "des", "dds", "tga", "png", "lua", "dll", "odf", "aip"]
@@ -28,6 +29,9 @@ var object_count_offset := -1
 var object_insert_offset := -1
 var water_name := ""
 var water_bytes := PackedByteArray()
+var sky_name := ""
+var sky_bytes := PackedByteArray()
+var sky_env: Dictionary = {}
 var path_codec := BznPaths.new()
 
 
@@ -113,6 +117,12 @@ func open(path: String) -> bool:
 		if preview.decode(water_bytes, terrain):
 			water = preview
 			water_name = roles["wat"]
+	if roles.has("sky"):
+		var sky_path := folder.path_join(roles["sky"])
+		sky_bytes = FileAccess.get_file_as_bytes(sky_path)
+		sky_env = SkyEnv.decode_sky(sky_bytes)
+		if bool(sky_env.get("ok", false)):
+			sky_name = roles["sky"]
 	return true
 
 

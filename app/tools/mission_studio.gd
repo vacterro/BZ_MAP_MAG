@@ -47,10 +47,14 @@ var _rebuilding := false
 func _ready() -> void:
 	title = "Mission & Path Studio"
 	ok_button_text = "Close"
+	var scroller := ScrollContainer.new()
+	scroller.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroller.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	add_child(scroller)
 	var root := VBoxContainer.new()
 	root.custom_minimum_size.x = DIALOG_WIDTH - 24
 	root.add_theme_constant_override("separation", 4)
-	add_child(root)
+	scroller.add_child(root)
 
 	var mode_row := HBoxContainer.new()
 	mode_row.add_theme_constant_override("separation", 6)
@@ -208,6 +212,8 @@ func begin(doc: Document, world_anchor: Vector2) -> void:
 	anchor = world_anchor
 	_sync_profile_select()
 	refresh_all()
+	if visible:
+		hide()
 	Wintage.popup_fit(self, DIALOG_WIDTH, DIALOG_MIN_HEIGHT)
 
 
@@ -220,7 +226,7 @@ func refresh_all() -> void:
 	var mod_id := current_mod_id()
 	var validation := MissionProfiles.validate(document, profile_id, mod_id)
 	var contract := MissionProfiles.contract_for(profile_id, mod_id)
-	var dll_text := String(document.package.mission_dll)
+	var dll_text := String(document.effective_mission_dll()) if document.has_method("effective_mission_dll") else String(document.package.mission_dll)
 	if dll_text.is_empty():
 		dll_text = "(none in BZN)"
 	mod_badge.text = "Target Mod: %s  |  BZN DLL: %s  |  Rule Semantics: %s" % [

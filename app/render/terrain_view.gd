@@ -17,6 +17,9 @@ var palette: Dictionary
 var viewport := SubViewport.new()
 var world := Node3D.new()
 var camera := Camera3D.new()
+var world_env := WorldEnvironment.new()
+var sun_light := DirectionalLight3D.new()
+var env_preview_enabled := false
 var marker := MeshInstance3D.new()
 var path_mesh := MeshInstance3D.new()
 var object_models := NativeModels.new()
@@ -62,18 +65,16 @@ func _ready() -> void:
 	world.add_child(camera)
 	camera.current = true
 	camera.far = 30000
-	var sky := WorldEnvironment.new()
-	sky.environment = Environment.new()
-	sky.environment.background_mode = Environment.BG_COLOR
-	sky.environment.background_color = palette["compareBack"]
-	sky.environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	sky.environment.ambient_light_color = palette["textPrimary"]
-	sky.environment.ambient_light_energy = 0.52
-	world.add_child(sky)
-	var light := DirectionalLight3D.new()
-	light.rotation_degrees = Vector3(-57, -33, 0)
-	light.light_energy = 0.85
-	world.add_child(light)
+	world_env.environment = Environment.new()
+	world_env.environment.background_mode = Environment.BG_COLOR
+	world_env.environment.background_color = palette["compareBack"]
+	world_env.environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	world_env.environment.ambient_light_color = palette["textPrimary"]
+	world_env.environment.ambient_light_energy = 0.52
+	world.add_child(world_env)
+	sun_light.rotation_degrees = Vector3(-57, -33, 0)
+	sun_light.light_energy = 0.85
+	world.add_child(sun_light)
 	terrain_material.vertex_color_use_as_albedo = true
 	terrain_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	terrain_material.roughness = 1
@@ -109,6 +110,39 @@ func _process(_delta: float) -> void:
 	step_lod_queue(LOD_BUDGET_PER_FRAME)
 
 
+func apply_environment_preview(env_fields: Dictionary, enabled: bool) -> void:
+	env_preview_enabled = enabled and not env_fields.is_empty()
+	if world_env.environment == null:
+		return
+	var env := world_env.environment
+	if not env_preview_enabled:
+		env.background_color = palette["compareBack"]
+		env.ambient_light_color = palette["textPrimary"]
+		env.ambient_light_energy = 0.52
+		env.fog_enabled = false
+		sun_light.light_color = Color.WHITE
+		sun_light.light_energy = 0.85
+		sun_light.rotation_degrees = Vector3(-57, -33, 0)
+		return
+	var fc: Array = env_fields.get("fogColor", [0.43, 0.39, 0.31, 1.0])
+	var fog_col := Color(float(fc[0]), float(fc[1]), float(fc[2]), 1.0)
+	env.background_color = fog_col
+	env.fog_enabled = true
+	env.fog_mode = Environment.FOG_MODE_DEPTH
+	env.fog_light_color = fog_col
+	env.fog_depth_begin = maxf(0.0, float(env_fields.get("fogStart", 300.0)))
+	env.fog_depth_end = maxf(env.fog_depth_begin + 1.0, float(env_fields.get("fogEnd", 600.0)))
+	var ac: Array = env_fields.get("ambientColor", [0.5, 0.5, 0.5, 1.0])
+	env.ambient_light_color = Color(float(ac[0]), float(ac[1]), float(ac[2]), 1.0)
+	env.ambient_light_energy = 0.65
+	var sc: Array = env_fields.get("sunColor", [1.0, 1.0, 1.0, 1.0])
+	sun_light.light_color = Color(float(sc[0]), float(sc[1]), float(sc[2]), 1.0)
+	sun_light.light_energy = 0.95
+	var angle_h := float(env_fields.get("sunAngle", 9.0))
+	var pitch_deg := clampf(-15.0 - sin(clampf(angle_h / 24.0, 0.0, 1.0) * PI) * 65.0, -85.0, -10.0)
+	sun_light.rotation_degrees = Vector3(pitch_deg, -33.0, 0.0)
+
+
 func bind(value: Document) -> void:
 	document = value
 	object_models.clear_models()
@@ -120,6 +154,7 @@ func bind(value: Document) -> void:
 	tile_maps.clear()
 	water_mesh.hide()
 	water_mesh.mesh = null
+	apply_environment_preview({}, false)
 	for mesh: MeshInstance3D in meshes.values():
 		mesh.hide()
 		mesh.queue_free()
