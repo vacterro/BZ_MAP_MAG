@@ -131,12 +131,16 @@ func _ready() -> void:
 	root.add_child(category_group)
 
 	var subfilter_row := HBoxContainer.new()
-	subfilter_row.add_theme_constant_override("separation", 8)
+	subfilter_row.add_theme_constant_override("separation", 10)
 	root.add_child(subfilter_row)
+	faction_group.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	faction_group.size_flags_stretch_ratio = 2.0
 	for fac: String in FACTIONS:
 		faction_group.add_item(fac)
 	faction_group.item_selected.connect(func(_i: int): _reset_paging_and_rebuild())
 	subfilter_row.add_child(faction_group)
+	availability_group.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	availability_group.size_flags_stretch_ratio = 1.0
 	for av: String in AVAILABILITY_FILTERS:
 		availability_group.add_item(av)
 	availability_group.item_selected.connect(func(_i: int): _reset_paging_and_rebuild())
@@ -351,6 +355,9 @@ func refresh_catalog() -> void:
 			"runtime": runtime_st,
 			"placement": place_st,
 			"capability": cap,
+			"binaryMatch": String(spec.get("binaryMatch", "UNVERIFIED")),
+			"engineLoad": String(spec.get("engineLoad", "UNVERIFIED")),
+			"gameplayBehavior": String(spec.get("gameplayBehavior", "UNVERIFIED")),
 			"templateView": int(in_map_templates.get(v_stem, -1)),
 			"priority": 0 if place_st == PLACE_ENABLED else 1,
 		})
@@ -646,6 +653,11 @@ func update_selection_detail() -> void:
 			dep_lines.append("Dependencies: DEPENDENCIES_RESOLVED (all inspected references present).")
 	if String(caps["serialization"]) == SER_NATIVE_WRITER:
 		var spec := BznObjects.native_class_spec(stem)
+		dep_lines.append("Verification: binary=%s | engineLoad=%s | gameplay=%s" % [
+			String(spec.get("binaryMatch", "UNVERIFIED")),
+			String(spec.get("engineLoad", "UNVERIFIED")),
+			String(spec.get("gameplayBehavior", "UNVERIFIED")),
+		])
 		dep_lines.append("Builder: %s (%s)" % [String(spec.get("builder", "")), String(spec.get("evidence", ""))])
 	if String(caps["placement"]) == PLACE_DISABLED:
 		if String(caps["assetAvailability"]) == ASSET_MISSING:

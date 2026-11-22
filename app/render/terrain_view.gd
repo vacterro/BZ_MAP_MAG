@@ -9,8 +9,8 @@ const MIN_STEP := 1
 const MAX_STEP := 4
 const LOD_NEAR_SAMPLES := 160.0
 const LOD_MID_SAMPLES := 384.0
-const LOD_BUDGET_PER_MOVE := 16
-const LOD_BUDGET_PER_FRAME := 12
+const LOD_BUDGET_PER_MOVE := 6
+const LOD_BUDGET_PER_FRAME := 8
 
 var document: Document
 var palette: Dictionary
@@ -127,19 +127,28 @@ func apply_environment_preview(env_fields: Dictionary, enabled: bool) -> void:
 	var fc: Array = env_fields.get("fogColor", [0.43, 0.39, 0.31, 1.0])
 	var fog_col := Color(float(fc[0]), float(fc[1]), float(fc[2]), 1.0)
 	env.background_color = fog_col
-	env.fog_enabled = true
-	env.fog_mode = Environment.FOG_MODE_DEPTH
-	env.fog_light_color = fog_col
-	env.fog_depth_begin = maxf(0.0, float(env_fields.get("fogStart", 300.0)))
-	env.fog_depth_end = maxf(env.fog_depth_begin + 1.0, float(env_fields.get("fogEnd", 600.0)))
+	var fog_start := float(env_fields.get("fogStart", 300.0))
+	var fog_end := float(env_fields.get("fogEnd", 600.0))
+	if is_finite(fog_start) and is_finite(fog_end) and fog_start < fog_end:
+		env.fog_enabled = true
+		env.fog_mode = Environment.FOG_MODE_DEPTH
+		env.fog_light_color = fog_col
+		env.fog_depth_begin = maxf(0.0, fog_start)
+		env.fog_depth_end = fog_end
+	else:
+		env.fog_enabled = false
 	var ac: Array = env_fields.get("ambientColor", [0.5, 0.5, 0.5, 1.0])
 	env.ambient_light_color = Color(float(ac[0]), float(ac[1]), float(ac[2]), 1.0)
 	env.ambient_light_energy = 0.65
 	var sc: Array = env_fields.get("sunColor", [1.0, 1.0, 1.0, 1.0])
 	sun_light.light_color = Color(float(sc[0]), float(sc[1]), float(sc[2]), 1.0)
 	sun_light.light_energy = 0.95
+	var period_h := maxf(0.1, float(env_fields.get("sunPeriod", 24.0)))
 	var angle_h := float(env_fields.get("sunAngle", 9.0))
-	var pitch_deg := clampf(-15.0 - sin(clampf(angle_h / 24.0, 0.0, 1.0) * PI) * 65.0, -85.0, -10.0)
+	var day_phase := fposmod(angle_h / period_h, 1.0)
+	# Verified BZCC 2.0.185 semantics: phase 0.25 = sunrise, 0.50 = noon, 0.75 = sunset.
+	var sun_elev := sin(clampf((day_phase - 0.25) * 2.0, 0.0, 1.0) * PI)
+	var pitch_deg := clampf(-10.0 - sun_elev * 75.0, -85.0, -10.0)
 	sun_light.rotation_degrees = Vector3(pitch_deg, -33.0, 0.0)
 
 
@@ -296,24 +305,29 @@ func step_lod_queue(budget: int = LOD_BUDGET_PER_FRAME) -> int:
 		lod_rebuilds_last = 0
 		set_process(false)
 		return 0
-	var limit := budget if budget > 0 else lod_queue.size()
+	var limit := budget if budget > 0 else 1000000
 	var dirty_neighbors := {}
 	var processed := 0
 	var cursor := 0
-	while cursor < lod_queue.size() and processed < limit:
+	while cursor < lod_queue.size() and (processed == 0 or dirty_neighbors.size() < limit):
 		var start: Vector2i = lod_queue[cursor]
 		cursor += 1
 		if not meshes.has(start):
 			continue
+		var old_step := int(chunk_steps.get(start, -1))
 		var wanted := desired_lod_step(start)
-		if int(chunk_steps.get(start, -1)) == wanted:
+		if old_step == wanted:
 			continue
 		chunk_steps[start] = wanted
 		dirty_neighbors[start] = true
+		var max_step := maxi(old_step if old_step > 0 else wanted, wanted)
 		for offset: Vector2i in [Vector2i(-CHUNK, 0), Vector2i(CHUNK, 0), Vector2i(0, -CHUNK), Vector2i(0, CHUNK)]:
 			var nb := start + offset
 			if meshes.has(nb):
-				dirty_neighbors[nb] = true
+				var nb_step := int(chunk_steps.get(nb, MAX_STEP))
+				# Only finer neighbors can have their seam-snapped boundary vertices affected.
+				if nb_step < max_step:
+					dirty_neighbors[nb] = true
 		processed += 1
 	if cursor >= lod_queue.size():
 		lod_queue.clear()
@@ -464,8 +478,7 @@ func update_camera() -> void:
 	var offset := Vector3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch))
 	camera.position = center + offset * distance
 	camera.look_at(center)
-	if schedule_lod() > 0:
-		step_lod_queue(LOD_BUDGET_PER_MOVE)
+	schedule_lod()
 
 
 func orbit(relative: Vector2) -> void:
@@ -679,8 +692,8 @@ func show_cursor(point: Vector2) -> void:
 	if point.x >= 0.0:
 		var moved := brush_focus.distance_to(point) >= CHUNK * 0.5 or brush_focus.x < 0.0
 		brush_focus = point
-		if moved and schedule_lod() > 0:
-			step_lod_queue(8)
+		if moved:
+			schedule_lod()
 	marker.visible = point.x >= 0
 	if not marker.visible:
 		return
