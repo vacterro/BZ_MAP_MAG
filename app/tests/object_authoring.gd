@@ -18,6 +18,8 @@ const Package := preload("res://formats/map_package.gd")
 const Snapshots := preload("res://bridge/snapshots.gd")
 const BznObjects := preload("res://formats/bzn_objects.gd")
 const ObjectBrowser := preload("res://tools/object_browser.gd")
+const ModRegistry := preload("res://core/mod_registry.gd")
+const AssetIndex := preload("res://core/asset_index.gd")
 
 var failures := 0
 
@@ -185,9 +187,131 @@ func run() -> void:
 			vrv_stems[String(entry["stem"])] = true
 		check(vrv_stems.has("ivtank_vsr") or vrv_stems.has("vrv_sndpoint"),
 			"Object Browser dynamically updates to show VRV/VSR ODFs when switching environment to VRV")
+		editor.document.set_target_profile("stock", "strategy")
+		browser.refresh_catalog()
+
+	# =========================================================================
+	# Step 10 (WAVE 3 P0): Object Browser Missing-Asset & Capability Matrix (10 cases)
+	# =========================================================================
+	# 10a) Empty asset index (no game_dir): NEVER advertise VERIFIED_NEW_CLASS or enable Place!
+	var empty_reg := ModRegistry.new()
+	var empty_browser := ObjectBrowser.new()
+	root.add_child(empty_browser)
+	empty_browser.begin(editor.document, empty_reg, "", "")
+	var empty_by_stem := {}
+	for e: Dictionary in empty_browser.catalog_entries:
+		empty_by_stem[String(e["stem"])] = e
+	for req_stem in ["uepool01", "morock03", "ibpgen", "npscrx", "iblite", "pspwn_1"]:
+		check(empty_by_stem.has(req_stem)
+			and String(empty_by_stem[req_stem]["serialization"]) == ObjectBrowser.SER_NATIVE_WRITER
+			and String(empty_by_stem[req_stem]["assetAvailability"]) == ObjectBrowser.ASSET_MISSING
+			and String(empty_by_stem[req_stem]["placement"]) == ObjectBrowser.PLACE_DISABLED
+			and String(empty_by_stem[req_stem]["capability"]) != ObjectBrowser.CAP_NEW_CLASS,
+			"W3 empty asset index refuses VERIFIED_NEW_CLASS/placement for missing '%s'" % req_stem)
+	check(empty_browser.place_mode_button.disabled and empty_browser.place_cursor_button.disabled,
+		"W3 empty asset index disables Place buttons")
+	empty_browser.hide()
+
+	# 10b) Partial Stock install: uepool01 loose + morock03 packed + ibpgen missing + missing geometry mesh
+	var synth_g := scratch.path_join("w3-synth-game")
+	DirAccess.make_dir_recursive_absolute(synth_g.path_join("bz2r_res/objects"))
+	DirAccess.make_dir_recursive_absolute(synth_g.path_join("bz2r_loc"))
+	var exe_buf := PackedByteArray(); exe_buf.resize(8192)
+	var ef := FileAccess.open(synth_g.path_join("battlezone2.exe"), FileAccess.WRITE); ef.store_buffer(exe_buf); ef.close()
+	var pf := FileAccess.open(synth_g.path_join("bz2r_res/objects/uepool01.odf"), FileAccess.WRITE)
+	pf.store_string("[GameObjectClass]\nclassLabel = \"deposit\"\ngeometryName = \"missing_pool_mesh.fbx\"\nunitName = \"Biometal Pool\"\n")
+	pf.close()
+	# Put morock03.odf inside a real DOCP v2 .pak!
+	var rock_odf := "[GameObjectClass]\nclassLabel = \"I76Building\"\ngeometryName = \"morock03.fbx\"\nunitName = \"Packed Rock\"\n".to_ascii_buffer()
+	_write_test_docp_pak(synth_g.path_join("bz2r_res/props.pak"), "morock03.odf", rock_odf)
+	# Put ibpgen.odf ONLY in a separate unsupported/disabled custom mod!
+	var synth_ws := scratch.path_join("w3-synth-ws")
+	DirAccess.make_dir_recursive_absolute(synth_ws.path_join("800001"))
+	var w1 := FileAccess.open(synth_ws.path_join("800001/800001.ini"), FileAccess.WRITE)
+	w1.store_string("[WORKSHOP]\nmodName = \"Parent Mod\"\nmodType = \"config\"\nassetDependencies = \"800002\"\n"); w1.close()
+	DirAccess.make_dir_recursive_absolute(synth_ws.path_join("800002"))
+	var w2 := FileAccess.open(synth_ws.path_join("800002/800002.ini"), FileAccess.WRITE)
+	w2.store_string("[WORKSHOP]\nmodName = \"Dep Mod\"\nmodType = \"config\"\n"); w2.close()
+	var d_odf := FileAccess.open(synth_ws.path_join("800002/ibpgen.odf"), FileAccess.WRITE)
+	d_odf.store_string("[GameObjectClass]\nclassLabel = \"powerplant\"\ngeometryName = \"ibpgen00.fbx\"\n"); d_odf.close()
+
+	# Open Object Browser BEFORE mod_registry.discover_installed() ran -> auto-discovers!
+	var lazy_reg := ModRegistry.new()
+	var synth_browser := ObjectBrowser.new()
+	root.add_child(synth_browser)
+	synth_browser.begin(editor.document, lazy_reg, synth_g, "")
+	var sb_map := {}
+	for e: Dictionary in synth_browser.catalog_entries:
+		sb_map[String(e["stem"])] = e
+	check(String(sb_map["uepool01"]["assetAvailability"]) == ObjectBrowser.ASSET_AVAILABLE
+		and String(sb_map["uepool01"]["placement"]) == ObjectBrowser.PLACE_ENABLED,
+		"W3 loose uepool01 in synth game is AVAILABLE & ENABLED (auto-discovered before manual scan)")
+	var pool_caps := synth_browser.inspect_entry_capabilities(sb_map["uepool01"])
+	check(String(pool_caps["preview"]) == ObjectBrowser.PREVIEW_MISSING_MESH,
+		"W3 missing geometry mesh surfaces as PREVIEW_MISSING_MESH separately from ODF availability")
+	check(String(sb_map["morock03"]["assetAvailability"]) == ObjectBrowser.ASSET_AVAILABLE_PACKED
+		and String(sb_map["morock03"]["placement"]) == ObjectBrowser.PLACE_ENABLED,
+		"W3 packed morock03 inside DOCP .pak is AVAILABLE_PACKED & ENABLED")
+	check(String(sb_map["ibpgen"]["assetAvailability"]) == ObjectBrowser.ASSET_MISSING
+		and String(sb_map["ibpgen"]["placement"]) == ObjectBrowser.PLACE_DISABLED,
+		"W3 ibpgen missing from Stock (present only in another mod) is MISSING & DISABLED")
+
+	# 10c) ODF present ONLY in disabled dependency -> MISSING & DISABLED!
+	lazy_reg.discover_installed(synth_g, "", synth_ws)
+	editor.document.set_target_profile("custom:ws-800001", "blank")
+	synth_browser.refresh_catalog()
+	var mod_on_map := {}
+	for e: Dictionary in synth_browser.catalog_entries:
+		mod_on_map[String(e["stem"])] = e
+	check(String(mod_on_map["ibpgen"]["assetAvailability"]) == ObjectBrowser.ASSET_AVAILABLE
+		and String(mod_on_map["ibpgen"]["placement"]) == ObjectBrowser.PLACE_ENABLED,
+		"W3 ibpgen available when dependency 800002 is enabled")
+	lazy_reg.set_mod_enabled("custom:ws-800002", false)
+	synth_browser.refresh_catalog()
+	var mod_off_map := {}
+	for e: Dictionary in synth_browser.catalog_entries:
+		mod_off_map[String(e["stem"])] = e
+	check(String(mod_off_map["ibpgen"]["assetAvailability"]) == ObjectBrowser.ASSET_MISSING
+		and String(mod_off_map["ibpgen"]["placement"]) == ObjectBrowser.PLACE_DISABLED,
+		"W3 ODF present only in disabled dependency 800002 becomes MISSING & DISABLED")
+
+	# 10d) Asset deleted while Object Browser is open -> placement automatically refuses!
+	editor.document.set_target_profile("stock", "strategy")
+	synth_browser.refresh_catalog()
+	var emit_count := [0]
+	synth_browser.place_at_cursor_requested.connect(func(_o, _t, _v, _n): emit_count[0] += 1)
+	synth_browser.search_box.text = "uepool01"
+	synth_browser.rebuild_list()
+	DirAccess.remove_absolute(synth_g.path_join("bz2r_res/objects/uepool01.odf"))
+	synth_browser.request_place_at_cursor()
+	check(emit_count[0] == 0 and synth_browser.place_cursor_button.disabled,
+		"W3 deleting uepool01.odf while Object Browser is open immediately blocks placement")
+
+	empty_browser.queue_free()
+	synth_browser.queue_free()
 
 	print("EXPORTED_PLAYTEST_BZN=" + exp_bzn)
 	editor.free()
-	print("Wave 4 Universal Object Browser & Native New-Class Authoring checks complete.")
+	print("Wave 3 & 4 Universal Object Browser & Native New-Class Authoring checks complete.")
 	print("FAILURES: %d" % failures)
 	quit(0 if failures == 0 else 1)
+
+
+func _write_test_docp_pak(path: String, entry_name: String, payload: PackedByteArray) -> void:
+	var full := PackedByteArray()
+	full.resize(56)
+	var offset := full.size()
+	full.append_array(payload)
+	var dir_offset := full.size()
+	var nb := entry_name.to_ascii_buffer()
+	var hdr := PackedByteArray(); hdr.resize(5); hdr.encode_u32(0, 0); hdr[4] = nb.size()
+	full.append_array(hdr)
+	full.append_array(nb)
+	var tail := PackedByteArray(); tail.resize(12)
+	tail.encode_u32(0, offset); tail.encode_u32(4, payload.size()); tail.encode_u32(8, payload.size())
+	full.append_array(tail)
+	var magic := "DOCP".to_ascii_buffer()
+	for i in 4:
+		full[i] = magic[i]
+	full.encode_u32(4, 2); full.encode_u32(16, 1); full.encode_u32(20, dir_offset)
+	var f := FileAccess.open(path, FileAccess.WRITE); f.store_buffer(full); f.close()
