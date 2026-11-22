@@ -185,6 +185,12 @@ Write-Output "BZ_MAP_MAG Canonical Acceptance Runner | Level=$Level | GPU=$useGp
 if ($runCore) {
     Invoke-PsScriptStage 'bzn-layouts' 'FAST' (Join-Path $PSScriptRoot 'Test-BznLayouts.ps1') @('-Godot', $Godot)
     Invoke-PsScriptStage 'autosave-store' 'FAST' (Join-Path $PSScriptRoot 'Test-AutosaveStore.ps1') @('-Godot', $Godot)
+    if (-not (Test-Path -LiteralPath $braveBzn -PathType Leaf)) {
+        Add-StageResult 'draft-safety' 'FAST' 'BLOCKED' -1 'res://tests/draft_safety.gd' 0 '' 'Missing Brave fixture.'
+    } else {
+        $dsScratch = (New-Item -ItemType Directory -Path (Join-Path $runRoot 'draft-safety-scratch') -Force).FullName
+        Invoke-GodotScriptStage 'draft-safety' 'FAST' 'res://tests/draft_safety.gd' @($braveBzn, $dsScratch) $false 240000
+    }
     if (-not (Test-Path -LiteralPath $Game -PathType Container) -or -not (Test-Path -LiteralPath $VrvSource -PathType Container)) {
         Add-StageResult 'playtest-assets' 'FAST' 'BLOCKED' -1 'tools/Test-PlaytestAssets.ps1' 0 '' 'Missing BZCC game dir or VRV checkout required by Test-PlaytestAssets.ps1.'
     } else {
@@ -192,7 +198,7 @@ if ($runCore) {
     }
     Invoke-PsScriptStage 'run-hygiene' 'FAST' (Join-Path $PSScriptRoot 'Test-RunHygiene.ps1') @()
 } else {
-    foreach ($n in 'bzn-layouts','autosave-store','playtest-assets','run-hygiene') {
+    foreach ($n in 'bzn-layouts','autosave-store','draft-safety','playtest-assets','run-hygiene') {
         Add-StageResult $n 'FAST' 'SKIPPED_WITH_REASON' 0 '' 0 '' "Not in selected level '$Level'."
     }
 }

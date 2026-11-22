@@ -17,6 +17,7 @@ signal layers_changed(selected_index: int)
 signal viewport_requested
 signal draft_state_changed(has_draft: bool, has_conflict: bool, detail: String)
 signal preview_state_changed(active: bool)
+signal conflict_diff_changed(lines: PackedStringArray)
 
 enum DraftState { COMMITTED, DRAFT, PREVIEW, BAKED }
 
@@ -46,7 +47,9 @@ var draft_badge := Label.new()
 var conflict_bar := HBoxContainer.new()
 var conflict_label := Label.new()
 var conflict_keep_button: Button
+var conflict_committed_button: Button
 var conflict_discard_button: Button
+var conflict_diff_label: Label
 var bake_button: Button
 var preview_button: Button
 var keep_button: Button
@@ -99,6 +102,7 @@ func _ready() -> void:
 	conflict_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	conflict_bar.add_child(conflict_label)
 	conflict_keep_button = button(conflict_bar, "Keep Draft", func(): resolve_conflict("keep_draft"))
+	conflict_committed_button = button(conflict_bar, "Keep Committed", func(): resolve_conflict("keep_committed"))
 	conflict_discard_button = button(conflict_bar, "Discard Draft", func(): resolve_conflict("discard_draft"))
 
 	var view_row := HBoxContainer.new()
@@ -180,6 +184,12 @@ func _ready() -> void:
 	parameter(mask_sec.body, "Slope max", "slope_high", 0, 90, 1, "°")
 	parameter(mask_sec.body, "Mask wt", "mask_weight", 0, 1, 0.05)
 
+	conflict_diff_label = Label.new()
+	conflict_diff_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	conflict_diff_label.visible = false
+	attributes_panel.add_child(conflict_diff_label)
+	conflict_diff_changed.connect(_show_conflict_diff)
+
 
 static func _normalized_stack(raw: Array) -> Array:
 	var out: Array = []
@@ -188,12 +198,19 @@ static func _normalized_stack(raw: Array) -> Array:
 	return out
 
 
+## Layer identity is part of the draft, not just layer contents. Two identical
+## layers with swapped UIDs are a real edit and must arm save/recovery warnings.
+static func _stacks_equal(layers_a: Array, uids_a: Array, layers_b: Array, uids_b: Array) -> bool:
+	return _normalized_stack(layers_a) == _normalized_stack(layers_b) and uids_a == uids_b
+
+
 func has_uncommitted_draft() -> bool:
 	if document == null or bound_document_id != document.document_id:
 		return false
 	if conflict_pending:
 		return true
-	return _normalized_stack(working) != _normalized_stack(document.layers)
+	document.ensure_layer_uids()
+	return not _stacks_equal(working, working_uids, document.layers, document.layer_uids)
 
 
 func _reset_working_from_document(initial_layer: int = -1) -> void:
@@ -263,7 +280,100 @@ func begin(value: Document, center: Vector2i, initial_layer: int = -1) -> void:
 	set_message("Connect Height, Color or Base Tile output. Preview around the terrain cursor.")
 
 
-func sync_from_document(select_idx: int = -1) -> Dictionary:
+static func _relative_order(source: Array, reference: Array) -> Array[int]:
+	var out: Array[int] = []
+	for uid_v in source:
+		var uid := int(uid_v)
+		if reference.has(uid):
+			out.append(uid)
+	return out
+
+
+func _raise_merge_conflict(reason: String, resolution: String) -> bool:
+	if resolution == "keep_draft" or resolution == "keep_committed":
+		return false
+	invalidate()
+	conflict_pending = true
+	conflict_reason = reason
+	draft_state = DraftState.DRAFT
+	_sync_draft_ui()
+	conflict_diff_changed.emit(build_conflict_diff())
+	set_message("Conflict: %s Inspect the Node Inspector diff, then choose an action." % reason)
+	return true
+
+
+## Docked, non-modal conflict summary. Lists independent changes separately from
+## values that need a decision, so the user can see what each resolution keeps.
+func _show_conflict_diff(lines: PackedStringArray) -> void:
+	if conflict_diff_label == null:
+		return
+	conflict_diff_label.text = "Conflict diff · %s" % (" | ".join(lines) if not lines.is_empty() else conflict_reason)
+	conflict_diff_label.tooltip_text = conflict_diff_label.text
+	conflict_diff_label.visible = true
+
+
+func build_conflict_diff() -> PackedStringArray:
+	var lines := PackedStringArray()
+	if document == null:
+		return lines
+	document.ensure_layer_uids()
+	var base_by_uid := {}
+	for i in mini(base_snapshot.size(), base_uids.size()):
+		base_by_uid[base_uids[i]] = base_snapshot[i]
+	var doc_by_uid := {}
+	for i in mini(document.layers.size(), document.layer_uids.size()):
+		doc_by_uid[document.layer_uids[i]] = document.layers[i]
+	var work_by_uid := {}
+	for i in mini(working.size(), working_uids.size()):
+		work_by_uid[working_uids[i]] = working[i]
+	var uids: Array[int] = []
+	for uid in base_by_uid:
+		if not uids.has(int(uid)):
+			uids.append(int(uid))
+	for uid in doc_by_uid:
+		if not uids.has(int(uid)):
+			uids.append(int(uid))
+	for uid in work_by_uid:
+		if not uids.has(int(uid)):
+			uids.append(int(uid))
+	for uid in uids:
+		var base: Variant = base_by_uid.get(uid, null)
+		var doc: Variant = doc_by_uid.get(uid, null)
+		var work: Variant = work_by_uid.get(uid, null)
+		var label := "Layer %d" % (document.layer_index_by_uid(uid) + 1)
+		if base == null and work != null:
+			lines.append("%s · draft addition (kept by Keep Draft)" % label)
+		elif doc == null and work != null:
+			lines.append("%s · removed externally, edited in draft (conflict)" % label)
+		elif work == null and doc != null:
+			lines.append("%s · draft deletion%s" % [label, " (conflict)" if base != null and doc != base else " (independent)"])
+		elif doc == null and base != null:
+			lines.append("%s · removed externally (kept removed)" % label)
+		elif base != null and doc is Dictionary and work is Dictionary:
+			var keys := {}
+			for k in (base as Dictionary).keys():
+				keys[k] = true
+			for k in (doc as Dictionary).keys():
+				keys[k] = true
+			for k in (work as Dictionary).keys():
+				keys[k] = true
+			for k in keys:
+				var bv: Variant = (base as Dictionary).get(k, null)
+				var dv: Variant = (doc as Dictionary).get(k, null)
+				var wv: Variant = (work as Dictionary).get(k, null)
+				if wv != bv and dv != bv and wv != dv:
+					lines.append("%s · %s: draft=%s, committed=%s (conflict)" % [label, str(k), str(wv), str(dv)])
+				elif wv != bv:
+					lines.append("%s · %s: draft change (independent)" % [label, str(k)])
+				elif dv != bv:
+					lines.append("%s · %s: committed change (independent)" % [label, str(k)])
+	return lines
+
+
+## Controlled three-way merge by stable layer UID. `resolution` is empty for an
+## automatic merge, or "keep_draft"/"keep_committed" when the user resolves an
+## already-raised conflict; independent changes survive either resolution.
+func sync_from_document(select_idx: int = -1, resolution: String = "") -> Dictionary:
 	if document == null:
 		return {"status": "noop", "reason": ""}
 	document.ensure_layer_uids()
@@ -276,7 +386,7 @@ func sync_from_document(select_idx: int = -1) -> Dictionary:
 	var doc_norm := _normalized_stack(document.layers)
 	var doc_uids: Array[int] = document.layer_uids.duplicate()
 	if not has_uncommitted_draft() and not conflict_pending:
-		if base_layer_revision == document.layer_stack_revision and _normalized_stack(working) == doc_norm and working_uids == doc_uids:
+		if base_layer_revision == document.layer_stack_revision and _stacks_equal(working, working_uids, document.layers, document.layer_uids):
 			if select_idx >= 0 and select_idx != selected:
 				_load_layer_ui(clampi(select_idx, 0, working.size() - 1), false)
 			return {"status": "noop", "reason": ""}
@@ -284,77 +394,98 @@ func sync_from_document(select_idx: int = -1) -> Dictionary:
 		_reset_working_from_document(select_idx)
 		return {"status": "synced", "reason": ""}
 
-	# Uncommitted draft exists: perform controlled 3-way merge by stable layer UID.
-	# Never silently discard uncommitted graph work!
 	var work_norm := _normalized_stack(working)
+	var work_uids: Array[int] = working_uids.duplicate()
 	var base_by_uid := {}
 	for i in mini(base_snapshot.size(), base_uids.size()):
 		base_by_uid[base_uids[i]] = base_snapshot[i]
 	var work_by_uid := {}
-	var draft_added_layers: Array = []
-	var draft_added_uids: Array[int] = []
-	for i in work_norm.size():
-		var uid := working_uids[i] if i < working_uids.size() else (_next_draft_uid - i)
-		if uid < 0:
-			draft_added_layers.append(work_norm[i])
-			draft_added_uids.append(uid)
-		else:
-			work_by_uid[uid] = work_norm[i]
+	for i in work_uids.size():
+		if work_uids[i] >= 0:
+			work_by_uid[work_uids[i]] = work_norm[i]
 	var doc_by_uid := {}
-	for i in doc_norm.size():
+	for i in doc_uids.size():
 		doc_by_uid[doc_uids[i]] = doc_norm[i]
+	var retained_uids: Array[int] = doc_uids.duplicate()
+	var active_uid := work_uids[selected] if selected >= 0 and selected < work_uids.size() else -1
 
-	var active_uid := working_uids[selected] if selected >= 0 and selected < working_uids.size() else -1
-
-	# 1. Detect deleted-layer conflict (committed layer edited in draft was removed)
-	for uid_v in work_by_uid:
+	# A layer deleted in the draft stays deleted unless committed also edited it.
+	for uid_v in base_by_uid:
 		var uid := int(uid_v)
-		if not doc_by_uid.has(uid):
-			var base_item: Variant = base_by_uid.get(uid, null)
-			if base_item == null or work_by_uid[uid] != base_item:
-				invalidate()
-				conflict_pending = true
-				conflict_reason = "A layer with uncommitted Node Graph edits was removed externally."
-				draft_state = DraftState.DRAFT
-				_sync_draft_ui()
-				set_message("Conflict: %s Keep Draft or Discard Draft." % conflict_reason)
-				return {"status": "conflict", "reason": conflict_reason}
+		if work_by_uid.has(uid) or not doc_by_uid.has(uid):
+			continue
+		if doc_by_uid[uid] == base_by_uid[uid]:
+			retained_uids.erase(uid)
+			continue
+		if _raise_merge_conflict("A layer deleted in the Node Graph draft was edited externally.", resolution):
+			return {"status": "conflict", "reason": conflict_reason}
+		if resolution != "keep_committed":
+			retained_uids.erase(uid)
+		else:
+			work_norm.append((doc_by_uid[uid] as Dictionary).duplicate(true))
+			work_uids.append(uid)
+			work_by_uid[uid] = doc_by_uid[uid]
+		# keep_draft: honor the draft deletion and keep the external edit out.
 
-	# 2. Merge every committed layer in document's new order
-	var merged_layers: Array = []
-	var merged_uids: Array[int] = []
-	for i in doc_norm.size():
+	# A layer removed externally is honored unless the draft actually edited it.
+	for uid_v in work_by_uid.duplicate():
+		var uid := int(uid_v)
+		if uid < 0 or doc_by_uid.has(uid):
+			continue
+		var base_item: Variant = base_by_uid.get(uid, null)
+		if base_item == null or work_by_uid[uid] == base_item or resolution == "keep_committed":
+			var at := work_uids.find(uid)
+			if at >= 0:
+				work_uids.remove_at(at)
+				work_norm.remove_at(at)
+			work_by_uid.erase(uid)
+			retained_uids.erase(uid)
+			continue
+		if _raise_merge_conflict("A layer with uncommitted Node Graph edits was removed externally.", resolution):
+			return {"status": "conflict", "reason": conflict_reason}
+		# keep_draft: retain the edited layer and recommit it with the draft.
+
+	# Ordering: honor a draft-only reorder; confront two incompatible reorders.
+	var base_order := _relative_order(base_uids, base_uids)
+	for uid_v in base_order.duplicate():
+		if not retained_uids.has(int(uid_v)) or not work_by_uid.has(int(uid_v)):
+			base_order.erase(uid_v)
+	var draft_order := _relative_order(work_uids, base_order)
+	var doc_order := _relative_order(doc_uids, base_order)
+	var order_conflict := false
+	if draft_order != doc_order and draft_order != base_order and doc_order != base_order:
+		for i in draft_order.size():
+			for j in range(i + 1, draft_order.size()):
+				var a := int(draft_order[i])
+				var b := int(draft_order[j])
+				if doc_order.has(a) and doc_order.has(b) and doc_order.find(a) > doc_order.find(b):
+					if _raise_merge_conflict("Layer order was changed in both Layers and Node Graph.", resolution):
+						return {"status": "conflict", "reason": conflict_reason}
+					order_conflict = true
+					break
+			if order_conflict:
+				break
+	var draft_reordered := draft_order != base_order and (doc_order == base_order or (order_conflict and resolution == "keep_draft"))
+
+	# Field-level merge for every layer present in both committed and draft state.
+	var merged_by_uid := {}
+	for i in doc_uids.size():
 		var uid := doc_uids[i]
 		var doc_item: Dictionary = doc_norm[i]
+		if not retained_uids.has(uid):
+			continue
 		if not work_by_uid.has(uid):
-			merged_layers.append(doc_item.duplicate(true))
-			merged_uids.append(uid)
+			merged_by_uid[uid] = doc_item.duplicate(true)
 			continue
 		var work_item: Dictionary = work_by_uid[uid]
-		var base_item_v: Variant = base_by_uid.get(uid, null)
-		if base_item_v == null:
-			if work_item == doc_item:
-				merged_layers.append(doc_item.duplicate(true))
-				merged_uids.append(uid)
-			else:
-				invalidate()
-				conflict_pending = true
-				conflict_reason = "Layer stack diverged without a common base snapshot."
-				draft_state = DraftState.DRAFT
-				_sync_draft_ui()
-				set_message("Conflict: %s Keep Draft or Discard Draft." % conflict_reason)
-				return {"status": "conflict", "reason": conflict_reason}
+		var base_v: Variant = base_by_uid.get(uid, null)
+		if base_v == null:
+			if work_item != doc_item and resolution != "keep_committed":
+				if _raise_merge_conflict("Layer stack diverged without a common base snapshot.", resolution):
+					return {"status": "conflict", "reason": conflict_reason}
+			merged_by_uid[uid] = (work_item if resolution != "keep_committed" else doc_item).duplicate(true)
 			continue
-		var base_item: Dictionary = base_item_v
-		if work_item == base_item:
-			merged_layers.append(doc_item.duplicate(true))
-			merged_uids.append(uid)
-			continue
-		if doc_item == base_item:
-			merged_layers.append(work_item.duplicate(true))
-			merged_uids.append(uid)
-			continue
-		# Field-level 3-way merge
+		var base_item: Dictionary = base_v
 		var merged_item := base_item.duplicate(true)
 		var all_keys := {}
 		for k in base_item.keys():
@@ -370,38 +501,59 @@ func sync_from_document(select_idx: int = -1) -> Dictionary:
 			var w_changed: bool = (wv != bv)
 			var d_changed: bool = (dv != bv)
 			if w_changed and d_changed and wv != dv:
-				invalidate()
-				conflict_pending = true
-				conflict_reason = "Both Layers and Node Graph edited '%s' on Layer %d." % [String(k), i + 1]
-				draft_state = DraftState.DRAFT
-				_sync_draft_ui()
-				set_message("Conflict: %s Keep Draft or Discard Draft." % conflict_reason)
-				return {"status": "conflict", "reason": conflict_reason}
+				if _raise_merge_conflict("Both Layers and Node Graph edited '%s' on Layer %d." % [str(k), i + 1], resolution):
+					return {"status": "conflict", "reason": conflict_reason}
+				var chosen: Variant = dv if resolution == "keep_committed" else wv
+				merged_item[k] = chosen.duplicate(true) if (chosen is Dictionary or chosen is Array) else chosen
 			elif w_changed:
 				merged_item[k] = wv.duplicate(true) if (wv is Dictionary or wv is Array) else wv
 			elif d_changed:
 				merged_item[k] = dv.duplicate(true) if (dv is Dictionary or dv is Array) else dv
 			else:
 				merged_item[k] = bv.duplicate(true) if (bv is Dictionary or bv is Array) else bv
-		merged_layers.append(Graph.normalize_layer(merged_item))
-		merged_uids.append(uid)
+		merged_by_uid[uid] = Graph.normalize_layer(merged_item)
+	# Layers added only in the draft survive; draft deletions are not in work_by_uid.
+	for i in work_uids.size():
+		if work_uids[i] < 0:
+			merged_by_uid[work_uids[i]] = work_norm[i].duplicate(true)
 
-	# 3. Append uncommitted draft-added layers if within MAX_LAYERS
-	if merged_layers.size() + draft_added_layers.size() > Graph.MAX_LAYERS:
-		invalidate()
-		conflict_pending = true
-		conflict_reason = "Merging external layers with uncommitted draft layers exceeds %d layers." % Graph.MAX_LAYERS
-		draft_state = DraftState.DRAFT
-		_sync_draft_ui()
-		set_message("Conflict: %s Keep Draft or Discard Draft." % conflict_reason)
-		return {"status": "conflict", "reason": conflict_reason}
-	for i in draft_added_layers.size():
-		merged_layers.append((draft_added_layers[i] as Dictionary).duplicate(true))
-		merged_uids.append(draft_added_uids[i])
+	var final_uids: Array[int] = []
+	if draft_reordered:
+		for uid_v in work_uids:
+			var uid := int(uid_v)
+			if merged_by_uid.has(uid) and not final_uids.has(uid):
+				final_uids.append(uid)
+		for uid_v in doc_uids:
+			var uid := int(uid_v)
+			if not merged_by_uid.has(uid) or final_uids.has(uid):
+				continue
+			var insert_at := 0
+			for back in range(doc_uids.find(uid) - 1, -1, -1):
+				var anchor := int(doc_uids[back])
+				if final_uids.has(anchor):
+					insert_at = final_uids.find(anchor) + 1
+					break
+			final_uids.insert(insert_at, uid)
+	else:
+		for uid_v in doc_uids:
+			if merged_by_uid.has(int(uid_v)):
+				final_uids.append(int(uid_v))
+		for uid_v in work_uids:
+			if int(uid_v) < 0 and merged_by_uid.has(int(uid_v)):
+				final_uids.append(int(uid_v))
+	if final_uids.size() > Graph.MAX_LAYERS:
+		if _raise_merge_conflict("Merging external layers with uncommitted draft layers exceeds %d layers." % Graph.MAX_LAYERS, resolution):
+			return {"status": "conflict", "reason": conflict_reason}
+		while final_uids.size() > Graph.MAX_LAYERS:
+			var dropped: int = final_uids.pop_back()
+			merged_by_uid.erase(dropped)
 
+	var merged_layers: Array = []
+	for uid in final_uids:
+		merged_layers.append(merged_by_uid[uid])
 	invalidate()
 	working = merged_layers
-	working_uids = merged_uids
+	working_uids = final_uids
 	base_snapshot = doc_norm.duplicate(true)
 	base_uids = doc_uids.duplicate()
 	base_layer_revision = document.layer_stack_revision
@@ -419,9 +571,15 @@ func sync_from_document(select_idx: int = -1) -> Dictionary:
 	return {"status": "merged", "reason": ""}
 
 
+## Conflict resolution merges independent changes before choosing sides. Keep
+## Draft commits the merged working stack; Keep Committed restores the document
+## stack. Neither choice throws away edits that never conflicted.
 func resolve_conflict(action: String) -> bool:
 	match action:
-		"keep_draft":
+		"keep_draft", "keep_committed":
+			var result := sync_from_document(selected, action)
+			if result.get("status") == "conflict":
+				return false
 			return keep_layers()
 		"discard_draft":
 			discard_draft()

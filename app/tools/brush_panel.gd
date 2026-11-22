@@ -238,6 +238,10 @@ func mirrored(document: Document, point: Vector2, across_x: bool) -> Vector2:
 func dab_at(document: Document, point: Vector2, hold_scale: float = 1.0, accumulate: bool = false) -> void:
 	if point.x < 0 or point.y < 0:
 		return
+	if document.active_sculpt_uid >= 0 and paint_layer() == Terrain.Layer.HEIGHT and mode in [Mode.RAISE, Mode.LOWER]:
+		var amount := 40.0 if mode == Mode.RAISE else -40.0
+		document.sculpt_dab(point, radius_m, amount * (pressure / 100.0) * hold_scale, shape)
+		return
 	var strength := (pressure / 100.0) * hold_scale
 	match paint_layer():
 		Terrain.Layer.COLOR:

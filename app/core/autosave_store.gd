@@ -17,8 +17,10 @@ const MANIFEST := "manifest.json"
 const MANIFEST_STAGE := "manifest.json.stage"
 const SLOT_PREFIX := "slot-"
 const STAGE_PREFIX := "stage-"
+const DRAFT_SUFFIX := ".draft.json"
 const SAVE_STAGE_DIR := ".bzmag-"
 const SCHEMA := 2
+const DRAFT_SCHEMA := 1
 
 const SLOT_PATTERN := "^slot-([0-9]{10})-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{32}\\.bzmag$"
 
@@ -100,7 +102,7 @@ static func next_sequence(directory: String) -> int:
 ## Publishes one autosave. Returns the published slot path, or "" with a
 ## reason in error. The previous newest good slot is never removed before the
 ## new one is fully written, verified and renamed into place.
-func publish(document: Document, base_root: String, keep: int) -> String:
+func publish(document: Document, base_root: String, keep: int, draft: Dictionary = {}) -> String:
 	error = ""
 	if document == null:
 		error = "No open document."
@@ -141,7 +143,14 @@ func publish(document: Document, base_root: String, keep: int) -> String:
 		error = "Injected crash before publication."
 		return ""
 	var target := directory.path_join("%s%010d-%s-%s.bzmag" % [SLOT_PREFIX, next_sequence(directory), timestamp_name(), writer.nonce()])
+	var draft_target := target + DRAFT_SUFFIX
+	if not draft.is_empty():
+		if not publish_draft(draft, document, draft_target):
+			DirAccess.remove_absolute(stage)
+			DirAccess.remove_absolute(draft_target)
+			return ""
 	if failure == "publish" or DirAccess.rename_absolute(stage, target) != OK:
+		DirAccess.remove_absolute(draft_target)
 		error = "The autosave could not be published to " + target
 		return ""
 	write_manifest(document, directory, keep)
@@ -151,6 +160,64 @@ func publish(document: Document, base_root: String, keep: int) -> String:
 
 ## Advisory recovery manifest. A manifest failure is recorded but never
 ## invalidates the published slot.
+## Draft payload is written beside its committed slot and cross-links the base
+## stack by UID and revision. A mismatch or corrupt payload is never applied.
+func publish_draft(draft: Dictionary, document: Document, target: String) -> bool:
+	document.ensure_layer_uids()
+	var payload := {
+		"schema": DRAFT_SCHEMA,
+		"source": document.package.source_path,
+		"sourceRevision": digest(JSON.stringify(document.package.files).to_utf8_buffer()),
+		"documentId": document.document_id,
+		"baseLayerRevision": studio_base_revision(draft),
+		"baseUids": studio_base_uids(draft),
+		"draft": draft,
+		"savedUtc": timestamp_name(),
+	}
+	# JSON round-trips integers as floats; the editor casts UIDs on restore.
+
+	var stage := target + ".stage"
+	var handle := FileAccess.open(stage, FileAccess.WRITE)
+	if handle == null:
+		error = "The recovery draft could not be staged."
+		return false
+	var bytes := JSON.stringify(payload, "", true, true).to_utf8_buffer()
+	handle.store_buffer(bytes)
+	handle.close()
+	var probe: Variant = JSON.parse_string(FileAccess.get_file_as_string(stage))
+	if not probe is Dictionary or (probe as Dictionary).get("schema") != DRAFT_SCHEMA:
+		DirAccess.remove_absolute(stage)
+		error = "The recovery draft failed verification."
+		return false
+	if DirAccess.rename_absolute(stage, target) != OK:
+		DirAccess.remove_absolute(stage)
+		error = "The recovery draft could not be published."
+		return false
+	return true
+
+
+func studio_base_revision(draft: Dictionary) -> int:
+	return int(draft.get("baseLayerRevision", -1))
+
+
+func studio_base_uids(draft: Dictionary) -> Array:
+	var raw: Variant = draft.get("baseUids", [])
+	return raw if raw is Array else []
+
+
+static func read_draft(slot: String) -> Dictionary:
+	var path := slot + DRAFT_SUFFIX
+	if not FileAccess.file_exists(path):
+		return {}
+	var handle := FileAccess.open(path, FileAccess.READ)
+	if handle == null or handle.get_length() > 64 * 1024 * 1024:
+		return {}
+	var parsed: Variant = JSON.parse_string(handle.get_as_text())
+	if not parsed is Dictionary:
+		return {}
+	return parsed as Dictionary
+
+
 func write_manifest(document: Document, directory: String, keep: int) -> void:
 	var source_revision := digest(JSON.stringify(document.package.files).to_utf8_buffer())
 	var record := {
@@ -188,6 +255,7 @@ func prune(directory: String, keep: int) -> void:
 		if failure == "prune" and index == 0:
 			error = "Injected prune failure: an old slot could not be removed."
 			continue
+		DirAccess.remove_absolute(found[index] + DRAFT_SUFFIX)
 		if DirAccess.remove_absolute(found[index]) != OK:
 			error = "An old autosave slot could not be removed: " + found[index]
 
@@ -199,7 +267,7 @@ func sweep_abandoned_stages(directory: String) -> void:
 	if handle == null:
 		return
 	for name in handle.get_files():
-		if name.begins_with(STAGE_PREFIX) or name == MANIFEST_STAGE:
+		if name.begins_with(STAGE_PREFIX) or name == MANIFEST_STAGE or name.ends_with(DRAFT_SUFFIX + ".stage"):
 			handle.remove(name)
 	for name in handle.get_directories():
 		if name.begins_with(SAVE_STAGE_DIR):

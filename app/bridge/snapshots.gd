@@ -413,8 +413,9 @@ func save_project(document: Document, target: String) -> bool:
 			water_records[str(layer)]["cover"] = cover
 		else:
 			water_records[str(layer)] = {"cover": cover}
+	document.ensure_layer_uids()
 	var record := {"schema": 1, "source": document.package.source_path, "files": document.package.files, "edits": edits,
-		"layers": document.layers, "pathEdits": path_edits, "objectEdits": object_edits, "objectLabelEdits": object_label_edits,
+		"layers": document.layers, "layerUids": document.layer_uids.duplicate(), "sculptLayers": document.sculpt_layers.duplicate(true), "pathEdits": path_edits, "objectEdits": object_edits, "objectLabelEdits": object_label_edits,
 		"objectOdfEdits": object_odf_edits, "objectRemovals": object_removals, "objectInserts": object_inserts, "waterEdits": water_records,
 		"target": {
 			"engineProfile": document.engine_profile,

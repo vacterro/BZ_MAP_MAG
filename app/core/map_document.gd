@@ -8,6 +8,7 @@ const Layouts := preload("res://formats/bzn_layouts.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
 const Water := preload("res://formats/water_v5.gd")
 const SkyEnv := preload("res://formats/sky_env.gd")
+const Sculpt := preload("res://core/sculpt_layers.gd")
 const SlopeShapes := preload("res://core/slope_shapes.gd")
 const VrvShapes := preload("res://core/vrv_shapes.gd")
 const ModRegistry := preload("res://core/mod_registry.gd")
@@ -71,6 +72,11 @@ var layers: Array = [Graph.layer()]
 var layer_uids: Array[int] = [1]
 var next_layer_id := 2
 var layer_stack_revision := 0
+var sculpt_layers: Array = []
+var next_sculpt_uid := 1
+var active_sculpt_uid := -1
+var sculpt_revision := 0
+signal sculpt_layers_changed(selected_uid: int)
 var preview_before := {}
 var preview_after := {}
 var edit_revision := 0
@@ -121,6 +127,10 @@ func open(path: String) -> bool:
 	layer_uids.clear()
 	next_layer_id = 1
 	layer_stack_revision = 0
+	sculpt_layers.clear()
+	next_sculpt_uid = 1
+	active_sculpt_uid = -1
+	sculpt_revision = 0
 	package = Package.new()
 	if not package.open(source):
 		return fail(package.error)
@@ -153,6 +163,33 @@ func open(path: String) -> bool:
 		if not saved.get("layers", layers) is Array or not graph.validate_stack(saved.get("layers", layers)):
 			return fail("Invalid node stack. " + graph.error)
 		layers = saved.get("layers", layers).map(Graph.normalize_layer)
+		if saved.has("layerUids"):
+			var raw_uids: Variant = saved["layerUids"]
+			if not raw_uids is Array or (raw_uids as Array).size() != layers.size():
+				return fail("Invalid saved layer identity metadata.")
+			var seen_uids := {}
+			for raw_uid in (raw_uids as Array):
+				if not (raw_uid is int or raw_uid is float) or int(raw_uid) <= 0 or seen_uids.has(int(raw_uid)):
+					return fail("Invalid saved layer identity metadata.")
+				var uid := int(raw_uid)
+				seen_uids[uid] = true
+				layer_uids.append(uid)
+				next_layer_id = maxi(next_layer_id, uid + 1)
+		if saved.has("sculptLayers"):
+			var raw_sculpt: Variant = saved["sculptLayers"]
+			if not raw_sculpt is Array:
+				return fail("Invalid sculpt layer metadata.")
+			for item in (raw_sculpt as Array):
+				if not item is Dictionary:
+					return fail("Invalid sculpt layer record.")
+				var clean := Sculpt.normalize(item as Dictionary)
+				if int(clean["uid"]) <= 0 or next_sculpt_uid <= int(clean["uid"]):
+					next_sculpt_uid = int(clean["uid"]) + 1
+				sculpt_layers.append(clean)
+			if not Sculpt.validate_stack(sculpt_layers, base_heights.size()):
+				return fail("Invalid sculpt layer deltas.")
+			if not sculpt_layers.is_empty():
+				active_sculpt_uid = int((sculpt_layers[0] as Dictionary)["uid"])
 		for key: String in saved["edits"]:
 			var value: Variant = saved["edits"][key]
 			var index := key.to_int()
@@ -631,6 +668,176 @@ func _apply_procedural_layers(state_layers: Array, state_uids: Array[int], focus
 	layers_changed.emit(sel)
 
 
+# --- Non-destructive sculpt layers -------------------------------------------
+
+func _sculpt_snapshot() -> Array:
+	var out: Array = []
+	for item in sculpt_layers:
+		out.append(Sculpt.normalize(item as Dictionary))
+	return out
+
+
+func _apply_sculpt_layers(state: Array, active_uid: int) -> void:
+	sculpt_layers = []
+	for item in state:
+		sculpt_layers.append(Sculpt.normalize(item as Dictionary))
+	active_sculpt_uid = active_uid
+	if active_sculpt_uid < 0 and not sculpt_layers.is_empty():
+		active_sculpt_uid = int((sculpt_layers[0] as Dictionary)["uid"])
+	sculpt_revision += 1
+	sculpt_layers_changed.emit(active_sculpt_uid)
+
+
+func _commit_sculpt_layers(state: Array, active_uid: int) -> bool:
+	if package == null or stroke_active or water_stroke_active:
+		return fail("Finish the current stroke before editing sculpt layers.")
+	if not Sculpt.validate_stack(state, package.terrain.heights.size()):
+		return fail("Invalid sculpt layer stack.")
+	var before := _sculpt_snapshot()
+	var after: Array = []
+	for item in state:
+		after.append(Sculpt.normalize(item as Dictionary))
+	if before == after and active_sculpt_uid == active_uid:
+		return true
+	clear_preview()
+	push_history({"sculpt": true, "before": before, "after": after,
+		"active_before": active_sculpt_uid, "active_after": active_uid})
+	_apply_sculpt_layers(after, active_uid)
+	return true
+
+
+func add_sculpt_layer() -> int:
+	if package == null or sculpt_layers.size() >= Sculpt.MAX_LAYERS:
+		return -1
+	var state := _sculpt_snapshot()
+	var uid := next_sculpt_uid
+	next_sculpt_uid += 1
+	state.append(Sculpt.layer(uid))
+	if not _commit_sculpt_layers(state, uid):
+		return -1
+	return sculpt_layers.size() - 1
+
+
+func remove_sculpt_layer(index: int) -> bool:
+	if index < 0 or index >= sculpt_layers.size():
+		return fail("Invalid sculpt layer index.")
+	var state := _sculpt_snapshot()
+	var removed_uid := int((state[index] as Dictionary)["uid"])
+	state.remove_at(index)
+	var next_uid := active_sculpt_uid
+	if removed_uid == next_uid:
+		next_uid = -1 if state.is_empty() else int((state[mini(index, state.size() - 1)] as Dictionary)["uid"])
+	return _commit_sculpt_layers(state, next_uid)
+
+
+func set_sculpt_layer_enabled(index: int, enabled: bool) -> bool:
+	if index < 0 or index >= sculpt_layers.size():
+		return fail("Invalid sculpt layer index.")
+	var state := _sculpt_snapshot()
+	if bool((state[index] as Dictionary)["enabled"]) == enabled:
+		return true
+	(state[index] as Dictionary)["enabled"] = enabled
+	return _commit_sculpt_layers(state, active_sculpt_uid)
+
+
+func set_sculpt_layer_opacity(index: int, value: float) -> bool:
+	if index < 0 or index >= sculpt_layers.size() or not is_finite(value) or value < 0.0 or value > 1.0:
+		return fail("Invalid sculpt layer opacity.")
+	var state := _sculpt_snapshot()
+	if is_equal_approx(float((state[index] as Dictionary)["opacity"]), value):
+		return true
+	(state[index] as Dictionary)["opacity"] = value
+	return _commit_sculpt_layers(state, active_sculpt_uid)
+
+
+func set_active_sculpt_layer(index: int) -> bool:
+	if index < 0 or index >= sculpt_layers.size():
+		return fail("Invalid sculpt layer index.")
+	var uid := int((sculpt_layers[index] as Dictionary)["uid"])
+	if uid == active_sculpt_uid:
+		return true
+	return _commit_sculpt_layers(_sculpt_snapshot(), uid)
+
+
+func sculpt_index_by_uid(uid: int) -> int:
+	for i in sculpt_layers.size():
+		if int((sculpt_layers[i] as Dictionary)["uid"]) == uid:
+			return i
+	return -1
+
+
+## Paint one brush dab into the active sculpt layer. Deltas are relative to the
+## committed terrain, so enable/disable and opacity remain reversible.
+func sculpt_dab(point: Vector2, radius_m: float, amount: float, shape := BrushShape.BELL) -> bool:
+	if package == null or stroke_active or has_preview():
+		return fail("Finish the current stroke and cancel previews before sculpting.")
+	var index_active := sculpt_index_by_uid(active_sculpt_uid)
+	if index_active < 0:
+		return fail("Create or activate a sculpt layer first.")
+	if not is_finite(amount) or amount == 0.0:
+		return true
+	var region := brush_region(point, radius_m)
+	if not region.has_area():
+		return true
+	var terrain := package.terrain
+	var radius := radius_m / terrain.SPACING
+	var state := _sculpt_snapshot()
+	var deltas: Dictionary = (state[index_active] as Dictionary)["deltas"]
+	var touched := false
+	for z in range(region.position.y, region.end.y):
+		for x in range(region.position.x, region.end.x):
+			var weight := brush_weight(point - Vector2(x, z), radius, shape)
+			if weight <= 0.0:
+				continue
+			var index := z * terrain.dimensions.x + x
+			if index < 0 or index >= terrain.heights.size():
+				continue
+			var next := float(deltas.get(index, 0.0)) + amount * weight
+			next = snappedf(next, package.granularity)
+			if absf(next) <= package.granularity * 0.5:
+				deltas.erase(index)
+			else:
+				deltas[index] = next
+			touched = true
+	if not touched:
+		return true
+	if not Sculpt.validate_stack(state, terrain.heights.size()):
+		return fail("Sculpt delta exceeded the editable range.")
+	return _commit_sculpt_layers(state, active_sculpt_uid)
+
+
+func sculpt_preview() -> bool:
+	if package == null or stroke_active or sculpt_layers.is_empty():
+		return fail("Create a sculpt layer before previewing.")
+	var limit := minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0)
+	var values := Sculpt.compose(base_heights, sculpt_layers, limit)
+	if values.is_empty():
+		return fail("The sculpt layer has no deltas to preview.")
+	return show_preview(values, {})
+
+
+func bake_sculpt_layers() -> bool:
+	if package == null or not has_preview() or sculpt_layers.is_empty():
+		return fail("Preview an active sculpt layer before baking.")
+	var heights := preview_after.duplicate()
+	var history := {"before": preview_before.duplicate(), "after": heights, "materials": {}}
+	for layer: int in package.terrain.material_previews:
+		var previous := {}
+		for index: int in package.terrain.material_previews[layer]:
+			previous[index] = package.terrain.committed_material_value(layer, index)
+		history["materials"][layer] = {"before": previous, "after": package.terrain.material_previews[layer].duplicate()}
+	var baked_layers := _sculpt_snapshot()
+	history["sculpt_before"] = baked_layers
+	history["sculpt_after"] = []
+	clear_preview()
+	apply(heights)
+	for layer: int in history["materials"]:
+		refresh_materials(layer, history["materials"][layer]["after"])
+	push_history(history)
+	_apply_sculpt_layers([], -1)
+	return true
+
+
 func begin_stroke(layer := Terrain.Layer.HEIGHT) -> void:
 	if has_preview():
 		return
@@ -990,11 +1197,17 @@ func apply_history(change: Dictionary, direction: String) -> void:
 		var uid_key := "uids_before" if direction == "before" else "uids_after"
 		var focus_key := "focus_before" if direction == "before" else "focus_after"
 		_apply_procedural_layers(change[direction] as Array, _to_int_array(change.get(uid_key, [])), int(change.get(focus_key, -1)))
+	elif change.has("sculpt"):
+		var active_key := "active_before" if direction == "before" else "active_after"
+		_apply_sculpt_layers(change[direction] as Array, int(change.get(active_key, -1)))
 	else:
 		var materials := {}
 		for layer: int in change.get("materials", {}):
 			materials[layer] = change["materials"][layer][direction]
 		apply_channels(change[direction], materials)
+		if change.has("sculpt_before") and change.has("sculpt_after"):
+			var s_key := "sculpt_before" if direction == "before" else "sculpt_after"
+			_apply_sculpt_layers(change[s_key] as Array, -1)
 		if change.has("layers_before") and change.has("layers_after"):
 			var l_key := "layers_before" if direction == "before" else "layers_after"
 			var u_key := "uids_before" if direction == "before" else "uids_after"

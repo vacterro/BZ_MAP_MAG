@@ -125,6 +125,8 @@ const AUTOSAVE_KEEP := 3
 var autosave_seconds := 0.0
 var autosave_custom_root := ""
 var last_autosave := ""
+var recovered_draft: Dictionary = {}
+var recovered_draft_slot := ""
 var autosave_picker := FileDialog.new()
 var autosave_root_field := LineEdit.new()
 var recover_dialog := ConfirmationDialog.new()
@@ -183,6 +185,7 @@ var pending_path := ""
 # Unsaved-change tracking
 var saved_edits := {}
 var saved_layers: Array = []
+var saved_sculpt_layers: Array = []
 var saved_path_edits := {}
 var saved_object_edits := {}
 var saved_object_label_edits := {}
@@ -736,7 +739,7 @@ func _build_allowed_dialogs() -> void:
 	confirmation.title = "Open another map"
 	confirmation.dialog_text = "Open another map and discard unsaved edits?"
 	add_child(confirmation)
-	confirmation.confirmed.connect(func(): open_map(pending_path))
+	confirmation.confirmed.connect(func(): open_map(pending_path, recovered_draft))
 
 	draft_save_dialog.title = "Uncommitted Node Graph Draft"
 	draft_save_dialog.dialog_text = "Procedural Node Graph has uncommitted draft edits. Commit them to the layer stack before saving the .bzmag project?"
@@ -802,6 +805,16 @@ func _wire_workspace_signals() -> void:
 	layers_panel.layers_mutated.connect(func(msg: String):
 		sync_actions()
 		report(msg))
+	layers_panel.sculpt_preview_requested.connect(func():
+		if document != null and document.sculpt_preview():
+			workspace_state.active_preview_owner = "sculpt"
+			layers_panel.refresh()
+			report("Sculpt preview composed from %d layer(s). Native TER untouched until Bake." % document.sculpt_layers.size()))
+	layers_panel.sculpt_bake_requested.connect(func():
+		if document != null and document.bake_sculpt_layers():
+			workspace_state.active_preview_owner = ""
+			layers_panel.refresh()
+			report("Baked sculpt layers into native terrain (one undo step)."))
 
 	brush_panel.brush_changed.connect(update_brush_cursor)
 	new_map_wizard.map_created.connect(_on_wizard_map_created)
@@ -1587,6 +1600,7 @@ func sync_actions() -> void:
 
 func has_unsaved_changes() -> bool:
 	return document != null and (document.edits != saved_edits or document.layers != saved_layers
+		or document.sculpt_layers != saved_sculpt_layers
 		or (studio.document == document and studio.has_uncommitted_draft())
 		or document.path_edits != saved_path_edits or document.asset_profile != saved_asset_profile
 		or document.engine_profile != saved_engine_profile or document.mod_profile != saved_mod_profile
@@ -1604,6 +1618,7 @@ func has_unsaved_changes() -> bool:
 func remember_saved_changes() -> void:
 	saved_edits = document.edits.duplicate()
 	saved_layers = document.layers.duplicate(true)
+	saved_sculpt_layers = document.sculpt_layers.duplicate(true)
 	saved_path_edits = document.path_edits.duplicate(true)
 	saved_object_edits = document.object_edits.duplicate(true)
 	saved_object_label_edits = document.object_label_edits.duplicate()
@@ -1682,7 +1697,7 @@ func cancel_all_slider_gestures(root_node: Node = self) -> void:
 		cancel_all_slider_gestures(child)
 
 
-func open_map(path: String) -> bool:
+func open_map(path: String, draft_payload: Dictionary = {}) -> bool:
 	cancel_all_slider_gestures()
 	if not path.is_absolute_path():
 		path = OS.get_executable_path().get_base_dir().path_join(path) if not OS.has_feature("editor") else ProjectSettings.globalize_path("res://").path_join(path)
@@ -1712,6 +1727,8 @@ func open_map(path: String) -> bool:
 			document.environment_changed.disconnect(on_document_environment_changed)
 		if document.layers_changed.is_connected(on_document_layers_changed):
 			document.layers_changed.disconnect(on_document_layers_changed)
+		if document.sculpt_layers_changed.is_connected(_on_document_sculpt_changed):
+			document.sculpt_layers_changed.disconnect(_on_document_sculpt_changed)
 
 	leave_water_paint()
 	cancel_place_object(false)
@@ -1744,6 +1761,7 @@ func open_map(path: String) -> bool:
 	document.profile_changed.connect(on_document_profile_changed)
 	document.environment_changed.connect(on_document_environment_changed)
 	document.layers_changed.connect(on_document_layers_changed)
+	document.sculpt_layers_changed.connect(_on_document_sculpt_changed)
 	workspace_state.select_objects()
 	top.bind(document)
 	scene_view.bind(document)
@@ -1771,6 +1789,7 @@ func open_map(path: String) -> bool:
 	scene_tree.bind_document(document)
 	scene_tree.sync_visibility_buttons(false, true, false)
 	layers_panel.bind_document(document, 0)
+	_offer_recovered_draft(draft_payload)
 	if workspace_state.center_mode in [WorkspaceState.CenterMode.NODES, WorkspaceState.CenterMode.NEW_MAP, WorkspaceState.CenterMode.SETTINGS]:
 		set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
 	if workspace_state.left_tab == WorkspaceState.LeftTab.ASSETS:
@@ -1791,6 +1810,73 @@ func open_map(path: String) -> bool:
 			open_note = " [%s: %s]" % [String(open_compat["validationStatus"]), String(reasons[0])]
 	report("Opened %s [%s / %s]%s" % [document.package.source_path.get_file(), document.mod_profile, document.mission_profile, open_note])
 	return true
+
+
+## Crash recovery never silently commits a graph draft. The committed document
+## opens first; a matching draft is offered as a separate, inspectable restore.
+func _offer_recovered_draft(payload: Dictionary) -> void:
+	recovered_draft = {}
+	recovered_draft_slot = ""
+	if payload.is_empty() or document == null:
+		return
+	if int(payload.get("schema", 0)) != AutoSaveStore.DRAFT_SCHEMA:
+		report("Recovery draft ignored: unsupported schema.")
+		return
+	if String(payload.get("source", "")) != document.package.source_path:
+		report("Recovery draft ignored: source project differs.")
+		return
+	if String(payload.get("sourceRevision", "")) != AutoSaveStore.digest(JSON.stringify(document.package.files).to_utf8_buffer()):
+		report("Recovery draft ignored: source revision drift.")
+		return
+	var draft: Variant = payload.get("draft", null)
+	if not draft is Dictionary or (draft as Dictionary).is_empty():
+		report("Recovery draft ignored: invalid payload.")
+		return
+	var inner: Dictionary = (draft as Dictionary).duplicate(true)
+	var raw_base: Variant = inner.get("baseUids", [])
+	var raw_layers: Variant = inner.get("baseLayers", [])
+	if not raw_base is Array or not raw_layers is Array:
+		report("Recovery draft ignored: invalid base stack.")
+		return
+	document.ensure_layer_uids()
+	var recovered_base_uids: Array[int] = []
+	for uid in (raw_base as Array):
+		recovered_base_uids.append(int(uid))
+	var base_match: bool = int(inner.get("baseLayerRevision", -1)) == document.layer_stack_revision and recovered_base_uids == document.layer_uids
+	var raw_working: Variant = inner.get("working", [])
+	var raw_work_uids: Variant = inner.get("workingUids", [])
+	var graph := NodeStudio.Graph.new()
+	if not raw_working is Array or not raw_work_uids is Array or (raw_work_uids as Array).size() != (raw_working as Array).size() or not graph.validate_stack(raw_working):
+		report("Recovery draft ignored: invalid graph payload.")
+		return
+	var diff := PackedStringArray()
+	if not base_match:
+		diff.append("Base layer stack changed since the draft was captured · three-way merge required")
+	else:
+		diff.append("Base layer stack matches the recovered project")
+	diff.append("Draft layers: %d · Committed layers: %d" % [(raw_working as Array).size(), document.layers.size()])
+	recovered_draft = inner
+	recovered_draft_slot = payload.get("source", "")
+	_prepare_node_studio(clampi(int(inner.get("selected", 0)), 0, (raw_working as Array).size() - 1))
+	studio.working = (raw_working as Array).duplicate(true)
+	studio.working_uids = []
+	for uid in (raw_work_uids as Array):
+		studio.working_uids.append(int(uid))
+	studio.draft_revision = maxi(int(inner.get("revision", 1)), 1)
+	studio.conflict_pending = not base_match
+	studio.conflict_reason = "Recovered draft base revision differs from the project." if not base_match else ""
+	studio.draft_state = NodeStudio.DraftState.DRAFT
+	studio.base_snapshot = (raw_layers as Array).duplicate(true)
+	studio.base_uids = []
+	for uid in (raw_base as Array):
+		studio.base_uids.append(int(uid))
+	studio.base_layer_revision = int(inner.get("baseLayerRevision", -1))
+	studio.draft_state_changed.emit(true, not base_match, studio.conflict_reason)
+	studio.conflict_diff_changed.emit(diff)
+	studio.set_message("Recovered project + uncommitted Node Graph draft. Keep Layers to commit or Discard Draft to reject.")
+	report("Recovered project + uncommitted Node Graph draft from " + recovered_draft_slot)
+	if not base_match:
+		studio.sync_from_document(studio.selected)
 
 
 func open_new_map_wizard() -> void:
@@ -1883,6 +1969,12 @@ func on_document_layers_changed(select_idx: int = -1) -> void:
 			report("Node Graph conflict: %s Open Nodes to Keep Draft or Discard Draft." % String(res.get("reason", "")))
 	scene_tree.request_rebuild()
 	sync_actions()
+
+
+func _on_document_sculpt_changed(_uid: int) -> void:
+	if document != null:
+		layers_panel.refresh()
+		sync_actions()
 
 
 func on_document_environment_changed() -> void:
@@ -2845,12 +2937,24 @@ func autosave_now(custom_root := "") -> bool:
 	if not has_unsaved_changes():
 		return false
 	var store := AutoSaveStore.new()
-	var published: String = store.publish(document, autosave_root(custom_root), AUTOSAVE_KEEP)
+	var draft: Dictionary = {}
+	if studio.document == document and studio.has_uncommitted_draft():
+		draft = {
+			"revision": studio.draft_revision,
+			"working": studio.working.duplicate(true),
+			"workingUids": studio.working_uids.duplicate(),
+			"baseLayers": studio.base_snapshot.duplicate(true),
+			"baseUids": studio.base_uids.duplicate(),
+			"baseLayerRevision": studio.base_layer_revision,
+			"selected": studio.selected,
+		}
+	var published: String = store.publish(document, autosave_root(custom_root), AUTOSAVE_KEEP, draft)
 	if published.is_empty():
 		report("Autosave failed. " + store.error)
 		return false
 	last_autosave = published
-	report("Autosaved " + published + " | Source map folder untouched.")
+	var suffix := " | Uncommitted Node Graph draft preserved" if not draft.is_empty() else ""
+	report("Autosaved " + published + suffix + " | Source map folder untouched.")
 	return true
 
 
@@ -2874,7 +2978,7 @@ func recover_autosaves() -> void:
 	if found == 0:
 		report("No autosaves found under " + root + ".")
 		return
-	recover_dialog.dialog_text = "Open an autosave project file. Unsaved changes are confirmed first."
+	recover_dialog.dialog_text = "Open an autosave project file. A matching Node Graph draft is recovered separately. Unsaved changes are confirmed first."
 	recover_list.select(found - 1)
 	Wintage.popup_fit(recover_dialog, 520, 260)
 
@@ -2884,6 +2988,8 @@ func open_recovered_autosave() -> void:
 	if selected.is_empty():
 		return
 	var slot: String = recover_list.get_item_metadata(selected[0])
+	recovered_draft = AutoSaveStore.read_draft(slot)
+	recovered_draft_slot = slot if not recovered_draft.is_empty() else ""
 	request_open(slot)
 
 
@@ -3058,7 +3164,8 @@ func view_input(event: InputEvent, panel: Control) -> void:
 					paint_view = panel
 					anchor = Vector2(-1, -1)
 					paint_hold_elapsed = 0.0
-					document.begin_stroke(layer)
+					if document.active_sculpt_uid < 0 or layer != Terrain.Layer.HEIGHT or not brush_panel.mode in [BrushPanel.Mode.RAISE, BrushPanel.Mode.LOWER]:
+						document.begin_stroke(layer)
 					paint(point)
 					set_cursor(point)
 					sync_actions()
@@ -3172,6 +3279,11 @@ func finish_stroke() -> void:
 		return
 	paint_view = null
 	paint_hold_elapsed = 0.0
+	if document.active_sculpt_uid >= 0 and document.stroke_layer == Terrain.Layer.HEIGHT and brush_panel.mode in [BrushPanel.Mode.RAISE, BrushPanel.Mode.LOWER] and not document.stroke_active:
+		layers_panel.refresh()
+		report("Sculpt stroke recorded as sparse deltas in the active layer.")
+		sync_actions()
+		return
 	document.end_stroke()
 	sync_actions()
 	match document.stroke_layer:

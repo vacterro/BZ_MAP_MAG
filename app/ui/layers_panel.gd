@@ -11,6 +11,8 @@ signal edit_graph_requested(index: int)
 signal preview_requested
 signal bake_requested
 signal layers_mutated(message: String)
+signal sculpt_preview_requested
+signal sculpt_bake_requested
 
 var document: Document
 var selected_index := 0
@@ -26,6 +28,12 @@ var opacity_field := SliderField.new()
 var edit_graph_btn := Button.new()
 var preview_btn := Button.new()
 var bake_btn := Button.new()
+var sculpt_row := HFlowContainer.new()
+var sculpt_add_btn := Button.new()
+var sculpt_del_btn := Button.new()
+var sculpt_preview_btn := Button.new()
+var sculpt_bake_btn := Button.new()
+var sculpt_status := Label.new()
 var status_label := Label.new()
 var _rebuilding := false
 var _opacity_gesture_active := false
@@ -109,6 +117,31 @@ func _ready() -> void:
 	bake_btn.pressed.connect(func(): bake_requested.emit())
 	act_row.add_child(bake_btn)
 
+	sculpt_row.add_theme_constant_override("h_separation", 4)
+	add_child(sculpt_row)
+	sculpt_add_btn.text = "+ Sculpt Layer"
+	sculpt_add_btn.pressed.connect(func():
+		if document != null:
+			document.add_sculpt_layer()
+			layers_mutated.emit("Added non-destructive sculpt layer.")
+	)
+	sculpt_row.add_child(sculpt_add_btn)
+	sculpt_del_btn.text = "− Sculpt"
+	sculpt_del_btn.pressed.connect(func():
+		if document != null:
+			document.remove_sculpt_layer(document.sculpt_index_by_uid(document.active_sculpt_uid))
+			layers_mutated.emit("Removed sculpt layer.")
+	)
+	sculpt_row.add_child(sculpt_del_btn)
+	sculpt_preview_btn.text = "Sculpt Preview"
+	sculpt_preview_btn.pressed.connect(func(): sculpt_preview_requested.emit())
+	sculpt_row.add_child(sculpt_preview_btn)
+	sculpt_bake_btn.text = "Sculpt Bake"
+	sculpt_bake_btn.pressed.connect(func(): sculpt_bake_requested.emit())
+	sculpt_row.add_child(sculpt_bake_btn)
+	sculpt_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	add_child(sculpt_status)
+
 	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	status_label.text = "Open a map to manage procedural layers."
 	add_child(status_label)
@@ -185,6 +218,19 @@ func refresh(select_idx: int = -1) -> void:
 	preview_btn.disabled = false
 	bake_btn.disabled = not document.has_preview()
 	status_label.text = "%d procedural layer(s) (rev %d). Undoable stack; bakes to native TER on Bake." % [document.layers.size(), document.layer_stack_revision]
+	var sculpt_count := document.sculpt_layers.size()
+	sculpt_add_btn.disabled = sculpt_count >= 8
+	sculpt_del_btn.disabled = sculpt_count == 0
+	sculpt_preview_btn.disabled = sculpt_count == 0
+	sculpt_bake_btn.disabled = not document.has_preview()
+	var active_sculpt := document.sculpt_index_by_uid(document.active_sculpt_uid)
+	if active_sculpt >= 0:
+		var sc: Dictionary = document.sculpt_layers[active_sculpt]
+		sculpt_status.text = "Sculpt layer %d/%d: %d sparse deltas · opacity %d%% · %s · edit with Raise/Lower brush, Bake to commit." % [
+			active_sculpt + 1, sculpt_count, (sc["deltas"] as Dictionary).size(),
+			int(round(float(sc["opacity"]) * 100.0)), "enabled" if bool(sc["enabled"]) else "disabled"]
+	else:
+		sculpt_status.text = "No sculpt layer. Add one, then use Raise/Lower brush; original TER stays untouched until Sculpt Bake."
 	_rebuilding = false
 
 
