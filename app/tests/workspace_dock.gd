@@ -82,6 +82,8 @@ func run() -> void:
 
 	if is_gpu:
 		DisplayServer.window_set_size(Vector2i(1120, 690))
+	else:
+		root.size = Vector2i(1120, 690)
 
 	var editor := EditorScene.instantiate()
 	editor.settings_path = cfg_path
@@ -320,8 +322,12 @@ func run() -> void:
 	# 9. All 6 Workspace Presets + Fullscreen Restore + Persistence + Out-of-bounds Clamping
 	if is_gpu:
 		DisplayServer.window_set_size(Vector2i(1280, 720))
-		for _i in 4:
-			await process_frame
+	else:
+		root.size = Vector2i(1280, 720)
+		editor.size = Vector2(1280, 720)
+		editor._on_editor_resized()
+	for _i in 4:
+		await process_frame
 
 	editor.apply_workspace_preset(WorkspaceState.LayoutPreset.DEFAULT)
 	for _i in 3:
@@ -394,6 +400,7 @@ func run() -> void:
 		if is_gpu:
 			DisplayServer.window_set_size(res)
 		else:
+			root.size = res
 			editor.size = Vector2(res)
 			editor._on_editor_resized()
 		for _i in 2:

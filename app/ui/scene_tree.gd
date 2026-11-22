@@ -18,6 +18,7 @@ var vis_water_btn := Button.new()
 var tree := Tree.new()
 var summary_label := Label.new()
 var _rebuilding := false
+var _rebuild_pending := false
 var _selected_meta: Dictionary = {}
 
 
@@ -82,7 +83,22 @@ func sync_visibility_buttons(obj_vis: bool, path_vis: bool, wat_vis: bool) -> vo
 	_rebuilding = false
 
 
+func request_rebuild() -> void:
+	if _rebuild_pending:
+		return
+	_rebuild_pending = true
+	call_deferred("_flush_rebuild")
+
+
+func _flush_rebuild() -> void:
+	if not _rebuild_pending:
+		return
+	_rebuild_pending = false
+	rebuild()
+
+
 func rebuild() -> void:
+	_rebuild_pending = false
 	_rebuilding = true
 	tree.clear()
 	if document == null or document.package == null:

@@ -1773,13 +1773,13 @@ func on_document_profile_changed() -> void:
 	scene_view.show_textures(false)
 	texture_button.set_pressed_no_signal(false)
 	top.queue_redraw()
-	if mission_studio.document == document:
+	if mission_studio.document == document and mission_studio.is_visible_in_tree():
 		mission_studio.refresh_all()
-	if target_profile_dialog.document == document:
+	if target_profile_dialog.document == document and target_profile_dialog.is_visible_in_tree():
 		target_profile_dialog.refresh_all()
-	if object_browser.document == document:
+	if object_browser.document == document and object_browser.is_visible_in_tree():
 		object_browser.refresh_catalog()
-	scene_tree.rebuild()
+	scene_tree.request_rebuild()
 	cancel_place_object(false)
 	sync_actions()
 
@@ -2997,8 +2997,9 @@ func objects_topology_changed() -> void:
 	if object_tool.active and object_tool.selected >= document.object_count():
 		object_tool.selected = -1
 		object_tool.set_active(true)
-	object_attributes.refresh(document, object_tool.selected)
-	scene_tree.rebuild()
+	if object_attributes.is_visible_in_tree():
+		object_attributes.refresh(document, object_tool.selected)
+	scene_tree.request_rebuild()
 	sync_actions()
 
 
