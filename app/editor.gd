@@ -34,6 +34,7 @@ const SceneTreePanel := preload("res://ui/scene_tree.gd")
 const LayersPanel := preload("res://ui/layers_panel.gd")
 const ToolsPanel := preload("res://ui/tools_panel.gd")
 const ObjectAttributesPanel := preload("res://ui/object_attributes_panel.gd")
+const CollapsibleSection := preload("res://ui/collapsible_section.gd")
 
 const SETTINGS := "user://editor.cfg"
 
@@ -45,7 +46,7 @@ var scene_view := TerrainView.new()
 # Unified DCC workspace containers
 var left_split := HSplitContainer.new()
 var right_split := HSplitContainer.new()
-var views := HSplitContainer.new()
+var views := SplitContainer.new()
 var scene_dock_box := VBoxContainer.new()
 var top_dock_box := VBoxContainer.new()
 var left_dock := PanelContainer.new()
@@ -160,6 +161,7 @@ var tool_search := LineEdit.new()
 var empty_state_hint := Label.new()
 var toolbar_buttons: Array[Button] = []
 var confirmation := ConfirmationDialog.new()
+var draft_save_dialog := ConfirmationDialog.new()
 var keys_dialog := AcceptDialog.new()
 var game_path := LineEdit.new()
 var vrv_path := LineEdit.new()
@@ -289,6 +291,7 @@ func _ready() -> void:
 		window.theme = theme
 
 	workspace_state.load_from_config(settings, get_viewport_rect().size)
+	_bind_all_collapsible_sections()
 	_apply_workspace_layout()
 	resized.connect(_on_editor_resized)
 
@@ -322,6 +325,7 @@ func _build_top_bar(parent: Control) -> void:
 	])
 	_add_menu(bar, "View", [
 		["Split 3D + 2D", func(): set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)],
+		["Toggle 2D Stacked Below 3D", toggle_views_vertical],
 		["3D Viewport Only", func(): set_center_mode(WorkspaceState.CenterMode.VIEW_3D)],
 		["2D Top View Only", func(): set_center_mode(WorkspaceState.CenterMode.VIEW_2D)],
 		["Node Graph Workspace", open_studio],
@@ -734,6 +738,22 @@ func _build_allowed_dialogs() -> void:
 	add_child(confirmation)
 	confirmation.confirmed.connect(func(): open_map(pending_path))
 
+	draft_save_dialog.title = "Uncommitted Node Graph Draft"
+	draft_save_dialog.dialog_text = "Procedural Node Graph has uncommitted draft edits. Commit them to the layer stack before saving the .bzmag project?"
+	draft_save_dialog.ok_button_text = "Commit Layers & Save"
+	draft_save_dialog.add_button("Save Committed Only", false, "save_committed")
+	add_child(draft_save_dialog)
+	draft_save_dialog.confirmed.connect(func():
+		if document != null and studio.document == document and studio.has_uncommitted_draft():
+			if not studio.keep_layers():
+				report("Could not commit Node Graph draft before saving.")
+				return
+		_open_save_dialog())
+	draft_save_dialog.custom_action.connect(func(act: StringName):
+		if String(act) == "save_committed":
+			draft_save_dialog.hide()
+			_open_save_dialog())
+
 	keys_dialog.title = "Editor Hotkeys"
 	keys_dialog.dialog_text = "F  Fly camera (3D view)\nW/S/A/D  Fly forward / back / strafe\nQ/E  Fly down / up\nF11  Fullscreen Viewport toggle\n\nShift+1–6  Brush size\nShift+Q/W/E/R  Square / Circle / Cone / Bell\nShift+Z/X/C/V  Pressure 10 / 20 / 50 / 100%\nShift+A/S/D/F/G  Paint / Spray / Raise / Blend / Pick\nAlt+H  Terrain Brush\nF5  Playtest\nCtrl+O/S/Z/Y  Open / Save Project / Undo / Redo\n\nMMB over Slider  Houdini Value Ladder\nMMB over 3D View  Camera Pan\n\nMove Points tool: Drag point · Shift+click append · Delete remove · Esc cancel\nMove Object tool: Drag object · Shift snap · [ / ] rotate · Ctrl+D duplicate · Delete remove"
 	add_child(keys_dialog)
@@ -756,6 +776,9 @@ func _wire_workspace_signals() -> void:
 	workspace_state.preset_changed.connect(_on_state_preset_changed)
 	workspace_state.tool_changed.connect(_on_state_tool_changed)
 	workspace_state.inspector_context_changed.connect(_on_state_inspector_changed)
+	workspace_state.section_toggled.connect(func(_sid: String, _col: bool):
+		if not _applying_layout:
+			_save_workspace_layout())
 
 	attributes_inspector.close_requested.connect(func():
 		workspace_state.set_dock_visibility(workspace_state.left_dock_visible, false, workspace_state.bottom_log_visible)
@@ -764,60 +787,73 @@ func _wire_workspace_signals() -> void:
 	tools_panel.tool_action_triggered.connect(_on_tool_panel_action)
 	scene_tree.item_selected_kind.connect(_on_scene_tree_selected)
 	scene_tree.item_activated_kind.connect(_on_scene_tree_activated)
+	scene_tree.objects_selected.connect(func(views: Array[int]): select_object_views(views))
 	scene_tree.visibility_toggled.connect(_on_scene_visibility_toggled)
 
 	layers_panel.layer_selected.connect(_on_layers_panel_selected)
 	layers_panel.edit_graph_requested.connect(_on_layers_edit_graph)
 	layers_panel.preview_requested.connect(func():
 		if document != null:
-			if studio.document != document:
-				_prepare_node_studio(layers_panel.selected_index)
+			_prepare_node_studio(layers_panel.selected_index)
 			studio.preview())
 	layers_panel.bake_requested.connect(func():
 		if document != null and document.has_preview():
 			studio.bake())
 	layers_panel.layers_mutated.connect(func(msg: String):
-		if studio.document == document:
-			studio.sync_from_document(layers_panel.selected_index)
-		scene_tree.rebuild()
 		sync_actions()
 		report(msg))
 
 	brush_panel.brush_changed.connect(update_brush_cursor)
 	new_map_wizard.map_created.connect(_on_wizard_map_created)
 	new_map_wizard.cancel_requested.connect(func(): set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D))
-	target_profile_dialog.profile_applied.connect(func(msg: String): sync_actions(); scene_tree.rebuild(); report(msg))
+	target_profile_dialog.profile_applied.connect(func(msg: String): sync_actions(); scene_tree.request_rebuild(); report(msg))
 	target_profile_dialog.mods_changed.connect(_on_mods_settings_changed)
 	path_inspector.path_created.connect(select_created_path)
-	path_inspector.path_removed.connect(func(label_str: String): scene_tree.rebuild(); report("Removed path %s." % label_str))
-	path_inspector.path_updated.connect(func(_idx: int): scene_tree.rebuild(); sync_actions())
+	path_inspector.path_removed.connect(func(label_str: String): scene_tree.request_rebuild(); report("Removed path %s." % label_str))
+	path_inspector.path_updated.connect(func(_idx: int): scene_tree.request_rebuild(); sync_actions())
 	mission_studio.paths_selection_changed.connect(set_extra_path_selection)
 	mission_studio.path_focused.connect(select_created_path)
 	mission_studio.snap_toggled.connect(func(on: bool): snap_path_drag = on)
 	mission_studio.status_message.connect(report)
-	studio.updated.connect(func(value: String): layers_panel.refresh(studio.selected); scene_tree.rebuild(); sync_actions(); report(value))
+	studio.updated.connect(func(value: String): layers_panel.refresh(studio.selected); scene_tree.request_rebuild(); sync_actions(); report(value))
 	studio.preview_display.connect(show_graph_preview)
+	studio.preview_state_changed.connect(func(on: bool):
+		if on:
+			workspace_state.set_preview_owner("node")
+		elif workspace_state.active_preview_owner == "node":
+			workspace_state.set_preview_owner("")
+		sync_actions())
+	studio.draft_state_changed.connect(func(has_draft: bool, has_conflict: bool, detail: String):
+		layers_panel.set_draft_status(has_draft, has_conflict, detail)
+		sync_actions())
 	studio.layers_changed.connect(func(sel: int):
 		layers_panel.refresh(sel)
-		scene_tree.rebuild())
+		scene_tree.request_rebuild())
 	studio.viewport_requested.connect(func(): set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D))
-	terrain_tools.updated.connect(func(value: String): sync_actions(); scene_tree.rebuild(); report(value))
+	terrain_tools.updated.connect(func(value: String): sync_actions(); scene_tree.request_rebuild(); report(value))
 	terrain_tools.preview_state_changed.connect(func(on: bool):
-		workspace_state.active_preview_owner = "shape" if on else ""
+		if on:
+			workspace_state.set_preview_owner("shape")
+		elif workspace_state.active_preview_owner == "shape":
+			workspace_state.set_preview_owner("")
 		sync_actions())
-	slope_studio.updated.connect(func(value: String): sync_actions(); scene_tree.rebuild(); report(value))
+	slope_studio.updated.connect(func(value: String): sync_actions(); scene_tree.request_rebuild(); report(value))
 	slope_studio.preview_state_changed.connect(func(on: bool):
-		workspace_state.active_preview_owner = "slope" if on else ""
+		if on:
+			workspace_state.set_preview_owner("slope")
+		elif workspace_state.active_preview_owner == "slope":
+			workspace_state.set_preview_owner("")
 		sync_actions())
 	slope_studio.canceled.connect(func():
-		workspace_state.active_preview_owner = ""
+		if workspace_state.active_preview_owner == "slope":
+			workspace_state.set_preview_owner("")
 		sync_actions()
 		report("Slope Studio preview cancelled."))
-	environment_studio.updated.connect(func(value: String): sync_actions(); scene_tree.rebuild(); report(value))
+	environment_studio.updated.connect(func(value: String): sync_actions(); scene_tree.request_rebuild(); report(value))
 	environment_studio.preview_toggled.connect(func(on: bool):
 		if document != null:
 			scene_view.apply_environment_preview(document.effective_environment(), on))
-	sound_editor.updated.connect(func(value: String): sync_actions(); scene_tree.rebuild(); report(value))
+	sound_editor.updated.connect(func(value: String): sync_actions(); scene_tree.request_rebuild(); report(value))
 	sound_editor.sound_point_selected.connect(select_object_view)
 	object_browser.place_requested.connect(start_place_object)
 	object_browser.place_at_cursor_requested.connect(place_object_at_cursor)
@@ -826,19 +862,27 @@ func _wire_workspace_signals() -> void:
 		if workspace_state.left_tab == WorkspaceState.LeftTab.ASSETS:
 			workspace_state.set_inspector_context(WorkspaceState.InspectorContext.OBJECT_BROWSER))
 	object_attributes.updated.connect(func(msg: String):
-		scene_tree.rebuild()
+		scene_tree.request_rebuild()
 		sync_actions()
 		report(msg))
 	object_attributes.focus_requested.connect(focus_object_view)
 	object_attributes.sound_edit_requested.connect(func(v: int):
 		select_object_view(v)
 		open_sound_editor())
+	object_attributes.select_team_requested.connect(func(team_id: int):
+		var matched := scene_tree.select_all_on_team(team_id)
+		select_object_views(matched)
+		report("Selected %d object(s) on Team %d." % [matched.size(), team_id]))
+	object_attributes.select_class_requested.connect(func(odf: String):
+		var matched := scene_tree.select_matching_class(odf)
+		select_object_views(matched)
+		report("Selected %d object(s) of class %s." % [matched.size(), odf]))
 	object_attributes.selection_cleared.connect(func():
-		object_tool.selected = -1
-		object_tool.refresh_marker()
-		scene_tree.rebuild()
+		object_tool.set_selection()
+		workspace_state.select_objects()
+		scene_tree.request_rebuild()
 		sync_actions())
-	water_tools.updated.connect(func(value: String): sync_actions(); scene_tree.rebuild(); report(value))
+	water_tools.updated.connect(func(value: String): sync_actions(); scene_tree.request_rebuild(); report(value))
 	water_tools.painting_changed.connect(update_water_painting)
 
 
@@ -1001,6 +1045,7 @@ func _on_center_mode_button_pressed(mode_id: int) -> void:
 
 
 func set_center_mode(mode_id: int) -> void:
+	cancel_all_slider_gestures()
 	workspace_state.set_center_mode(mode_id)
 
 
@@ -1125,7 +1170,22 @@ func toggle_fullscreen_viewport() -> void:
 	_save_workspace_layout()
 
 
+func toggle_views_vertical() -> void:
+	workspace_state.stack_2d_below = not workspace_state.stack_2d_below
+	_apply_workspace_layout()
+	_save_workspace_layout()
+	report("2D Top View stacked below 3D viewport." if workspace_state.stack_2d_below else "3D and 2D viewports side-by-side.")
+
+
+func _bind_all_collapsible_sections(root_node: Node = self) -> void:
+	if root_node is CollapsibleSection:
+		(root_node as CollapsibleSection).bind_workspace_state(workspace_state)
+	for child in root_node.get_children():
+		_bind_all_collapsible_sections(child)
+
+
 func reset_workspace_layout() -> void:
+	cancel_all_slider_gestures()
 	workspace_state.reset_layout(get_viewport_rect().size)
 	_save_workspace_layout()
 	report("Workspace layout reset to Default.")
@@ -1149,12 +1209,14 @@ func _apply_workspace_layout() -> void:
 	if left_tabs.current_tab != workspace_state.left_tab and workspace_state.left_tab < left_tabs.get_tab_count():
 		left_tabs.current_tab = workspace_state.left_tab
 	if left_dock.visible:
-		left_dock.custom_minimum_size.x = 204
-		left_split.split_offset = maxi(0, workspace_state.left_dock_width - 204)
+		left_dock.custom_minimum_size.x = 180
+		left_split.split_offset = maxi(0, workspace_state.left_dock_width - 180)
 	if attributes_inspector.visible:
-		attributes_inspector.custom_minimum_size.x = 240
-		right_split.split_offset = -maxi(0, workspace_state.right_dock_width - 240)
+		attributes_inspector.custom_minimum_size.x = 228
+		right_split.split_offset = -maxi(0, workspace_state.right_dock_width - 228)
 		right_split.dragger_visibility = SplitContainer.DRAGGER_VISIBLE
+	var est_center_w := vp_sz.x - (float(workspace_state.left_dock_width) if left_dock.visible else 0.0) - (float(workspace_state.right_dock_width) if attributes_inspector.visible else 0.0) - 24.0
+	views.vertical = workspace_state.stack_2d_below or est_center_w < 360.0
 	_on_center_mode_changed(workspace_state.center_mode)
 	_on_state_preset_changed(workspace_state.active_preset)
 	_applying_layout = false
@@ -1185,8 +1247,10 @@ func _on_right_split_dragged(_offset: int) -> void:
 func _on_views_split_dragged(_offset: int) -> void:
 	if _applying_layout or workspace_state.center_mode != WorkspaceState.CenterMode.SPLIT_3D_2D:
 		return
-	var total := maxf(1.0, scene_dock_box.size.x + top_dock_box.size.x)
-	workspace_state.viewport_split_ratio = clampf(scene_dock_box.size.x / total, 0.25, 0.85)
+	var primary_span := scene_dock_box.size.y if views.vertical else scene_dock_box.size.x
+	var secondary_span := top_dock_box.size.y if views.vertical else top_dock_box.size.x
+	var total := maxf(1.0, primary_span + secondary_span)
+	workspace_state.viewport_split_ratio = clampf(primary_span / total, 0.25, 0.85)
 	_save_workspace_layout()
 
 
@@ -1200,18 +1264,27 @@ func _save_workspace_layout() -> void:
 func clear_active_preview(announce_msg: String = "") -> void:
 	if document == null:
 		return
+	cancel_all_slider_gestures()
 	if slope_studio.is_preview_active():
 		slope_studio.clear_preview()
+	if terrain_tools.document == document and workspace_state.active_preview_owner == "shape":
+		terrain_tools.clear_preview()
+	if studio.document == document and (workspace_state.active_preview_owner == "node" or studio.draft_state == NodeStudio.DraftState.PREVIEW or studio.worker.is_started()):
+		studio.clear_preview_only()
 	if document.has_preview():
 		document.clear_preview()
-	workspace_state.active_preview_owner = ""
+	show_graph_preview(-1)
+	workspace_state.set_preview_owner("")
 	if not announce_msg.is_empty():
 		report(announce_msg)
 	sync_actions()
 
 
 func clear_incompatible_preview(next_owner: String) -> void:
-	if document == null or not document.has_preview():
+	if document == null:
+		return
+	var active_preview := document.has_preview() or (studio.document == document and studio.worker.is_started())
+	if not active_preview:
 		return
 	if workspace_state.active_preview_owner == next_owner and not next_owner.is_empty():
 		return
@@ -1323,6 +1396,7 @@ func setup_dialog(dialog: FileDialog, mode: FileDialog.FileMode, filters: Packed
 
 
 func activate_terrain_brush() -> void:
+	cancel_all_slider_gestures()
 	clear_incompatible_preview("brush")
 	leave_water_paint()
 	leave_object_tool()
@@ -1331,7 +1405,7 @@ func activate_terrain_brush() -> void:
 	if workspace_state.center_mode in [WorkspaceState.CenterMode.NODES, WorkspaceState.CenterMode.NEW_MAP, WorkspaceState.CenterMode.SETTINGS]:
 		set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
 	workspace_state.set_tool(WorkspaceState.Tool.TERRAIN_BRUSH)
-	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.TERRAIN_BRUSH, true)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.TERRAIN_BRUSH, not workspace_state.pinned_inspector)
 	set_cursor(cursor)
 	sync_actions()
 
@@ -1513,6 +1587,7 @@ func sync_actions() -> void:
 
 func has_unsaved_changes() -> bool:
 	return document != null and (document.edits != saved_edits or document.layers != saved_layers
+		or (studio.document == document and studio.has_uncommitted_draft())
 		or document.path_edits != saved_path_edits or document.asset_profile != saved_asset_profile
 		or document.engine_profile != saved_engine_profile or document.mod_profile != saved_mod_profile
 		or document.mission_profile != saved_mission_profile
@@ -1552,6 +1627,10 @@ func request_open(path: String) -> void:
 	finish_stroke()
 	if has_unsaved_changes():
 		pending_path = path
+		if studio.document == document and studio.has_uncommitted_draft():
+			confirmation.dialog_text = "Open another map and discard unsaved edits (including uncommitted Node Graph draft)?"
+		else:
+			confirmation.dialog_text = "Open another map and discard unsaved edits?"
 		confirmation.popup_centered()
 	else:
 		open_map(path)
@@ -1631,6 +1710,8 @@ func open_map(path: String) -> bool:
 			document.profile_changed.disconnect(on_document_profile_changed)
 		if document.environment_changed.is_connected(on_document_environment_changed):
 			document.environment_changed.disconnect(on_document_environment_changed)
+		if document.layers_changed.is_connected(on_document_layers_changed):
+			document.layers_changed.disconnect(on_document_layers_changed)
 
 	leave_water_paint()
 	cancel_place_object(false)
@@ -1662,6 +1743,8 @@ func open_map(path: String) -> bool:
 	document.water_changed.connect(refresh_water)
 	document.profile_changed.connect(on_document_profile_changed)
 	document.environment_changed.connect(on_document_environment_changed)
+	document.layers_changed.connect(on_document_layers_changed)
+	workspace_state.select_objects()
 	top.bind(document)
 	scene_view.bind(document)
 	brush_panel.sync_height_range(document.package.terrain.min_height, document.package.terrain.max_height)
@@ -1711,6 +1794,12 @@ func open_map(path: String) -> bool:
 
 
 func open_new_map_wizard() -> void:
+	cancel_all_slider_gestures()
+	clear_incompatible_preview("page")
+	leave_water_paint()
+	leave_object_tool()
+	cancel_place_object(false)
+	move_path_button.set_pressed_no_signal(false)
 	find_steam_game()
 	var game := game_path.text.strip_edges()
 	var vrv := vrv_path.text.strip_edges()
@@ -1784,13 +1873,25 @@ func on_document_profile_changed() -> void:
 	sync_actions()
 
 
+func on_document_layers_changed(select_idx: int = -1) -> void:
+	if document == null:
+		return
+	layers_panel.refresh(select_idx)
+	if studio.document == document:
+		var res := studio.sync_from_document(select_idx)
+		if String(res.get("status", "")) == "conflict":
+			report("Node Graph conflict: %s Open Nodes to Keep Draft or Discard Draft." % String(res.get("reason", "")))
+	scene_tree.request_rebuild()
+	sync_actions()
+
+
 func on_document_environment_changed() -> void:
 	if document == null:
 		return
 	if scene_view.env_preview_enabled:
 		scene_view.apply_environment_preview(document.effective_environment(), true)
 	environment_studio.refresh_all()
-	scene_tree.rebuild()
+	scene_tree.request_rebuild()
 	sync_actions()
 
 
@@ -1801,11 +1902,20 @@ func open_environment_studio() -> void:
 	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.ENVIRONMENT, true)
 
 
-func request_save() -> void:
+func _open_save_dialog() -> void:
 	if document == null:
 		return
 	save_dialog.current_file = document.package.source_path.get_file().get_basename() + ".bzmag"
 	save_dialog.popup_centered_ratio(0.72)
+
+
+func request_save() -> void:
+	if document == null:
+		return
+	if studio.document == document and studio.has_uncommitted_draft():
+		draft_save_dialog.popup_centered()
+		return
+	_open_save_dialog()
 
 
 func select_path(index: int) -> void:
@@ -2022,7 +2132,10 @@ func save_project(path: String) -> void:
 	if writer.save_project(document, path):
 		remember_saved_changes()
 		sync_actions()
-		report("Saved " + path)
+		if studio.document == document and studio.has_uncommitted_draft():
+			report("Saved " + path + " [NOTE: uncommitted Node Graph draft not included; click Keep Layers in Nodes to commit]")
+		else:
+			report("Saved " + path)
 	else:
 		report(writer.error)
 
@@ -2220,6 +2333,12 @@ func suggest_vrv() -> void:
 
 
 func show_playtest_setup() -> void:
+	cancel_all_slider_gestures()
+	clear_incompatible_preview("page")
+	leave_water_paint()
+	leave_object_tool()
+	cancel_place_object(false)
+	move_path_button.set_pressed_no_signal(false)
 	find_steam_game()
 	suggest_vrv()
 	set_center_mode(WorkspaceState.CenterMode.SETTINGS)
@@ -2266,7 +2385,7 @@ func store_playtest_settings() -> void:
 func all_dialogs() -> Array[Window]:
 	return [
 		open_dialog, blank_dialog, flat_template_dialog, flat_output_dialog, save_dialog, export_dialog,
-		confirmation, keys_dialog, recover_dialog, game_picker, vrv_picker, autosave_picker,
+		confirmation, draft_save_dialog, keys_dialog, recover_dialog, game_picker, vrv_picker, autosave_picker,
 		asset_profile_picker, new_map_wizard.source_picker, new_map_wizard.ter_picker,
 		new_map_wizard.output_picker, target_profile_dialog.custom_dir_picker,
 	]
@@ -2324,10 +2443,25 @@ func _on_tool_search_submitted(query: String) -> void:
 func select_object_view(view: int) -> void:
 	if document == null or not document.valid_view_object(view):
 		return
-	object_tool.selected = view
-	workspace_state.select_object(view)
-	object_attributes.refresh(document, view)
-	scene_tree.select_entry("object", view)
+	select_object_views([view], view)
+
+
+func select_object_views(views: Array[int], primary: int = -1) -> void:
+	if document == null:
+		return
+	var valid_views: Array[int] = []
+	for v in views:
+		if document.valid_view_object(v) and not valid_views.has(v):
+			valid_views.append(v)
+	var chosen := primary if (primary >= 0 and valid_views.has(primary)) else (valid_views[valid_views.size() - 1] if not valid_views.is_empty() else -1)
+	object_tool.set_selection(valid_views, chosen)
+	workspace_state.select_objects(valid_views, chosen)
+	object_attributes.refresh_selection(document, valid_views)
+	if valid_views.size() > 1:
+		scene_tree.select_objects(valid_views)
+		workspace_state.set_inspector_context(WorkspaceState.InspectorContext.OBJECT)
+	elif chosen >= 0:
+		scene_tree.select_entry("object", chosen)
 	if object_tool.active:
 		object_tool.refresh_marker()
 		report(object_tool.description())
@@ -2648,8 +2782,6 @@ func _process(time: float) -> void:
 		top.refresh(pending_refresh)
 		scene_view.refresh(pending_refresh)
 		pending_refresh = Rect2i()
-	if scene_view.lod_pending_count > 0:
-		scene_view.step_lod_queue()
 	for layer: int in pending_materials:
 		var region: Rect2i = pending_materials[layer]
 		if top.preview_layer == layer:
@@ -2771,8 +2903,12 @@ func open_studio() -> void:
 func open_terrain_tools() -> void:
 	if document == null:
 		return
+	cancel_all_slider_gestures()
 	clear_incompatible_preview("shape")
 	leave_water_paint()
+	leave_object_tool()
+	cancel_place_object(false)
+	move_path_button.set_pressed_no_signal(false)
 	var terrain := document.package.terrain
 	var sample := last_cursor if last_cursor.x >= 0 else Vector2(terrain.dimensions) * 0.5
 	var anchor_point := Vector2i(sample.round()).clamp(Vector2i.ZERO, terrain.dimensions - Vector2i.ONE)
@@ -2780,12 +2916,14 @@ func open_terrain_tools() -> void:
 	if workspace_state.center_mode in [WorkspaceState.CenterMode.NODES, WorkspaceState.CenterMode.NEW_MAP, WorkspaceState.CenterMode.SETTINGS]:
 		set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
 	workspace_state.set_tool(WorkspaceState.Tool.SHAPE)
-	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.SHAPE, true)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.SHAPE, not workspace_state.pinned_inspector)
+	sync_actions()
 
 
 func open_slope_studio() -> void:
 	if document == null:
 		return
+	cancel_all_slider_gestures()
 	clear_incompatible_preview("slope")
 	leave_water_paint()
 	leave_object_tool()
@@ -2795,7 +2933,7 @@ func open_slope_studio() -> void:
 	if workspace_state.center_mode in [WorkspaceState.CenterMode.NODES, WorkspaceState.CenterMode.NEW_MAP, WorkspaceState.CenterMode.SETTINGS]:
 		set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
 	workspace_state.set_tool(WorkspaceState.Tool.SLOPE)
-	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.SLOPE, true)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.SLOPE, not workspace_state.pinned_inspector)
 	sync_actions()
 
 
@@ -2879,8 +3017,13 @@ func view_input(event: InputEvent, panel: Control) -> void:
 				return
 			if object_tool.active:
 				if event.pressed and object_tool.drag_view == null:
-					object_tool.start(panel, event.position)
-					if object_tool.selected >= 0:
+					object_tool.start(panel, event.position, event.ctrl_pressed or event.shift_pressed)
+					if not object_tool.selected_views.is_empty():
+						workspace_state.select_objects(object_tool.selected_views, object_tool.selected)
+						object_attributes.refresh_selection(document, object_tool.selected_views)
+						workspace_state.set_inspector_context(WorkspaceState.InspectorContext.OBJECT)
+						scene_tree.select_objects(object_tool.selected_views)
+					elif object_tool.selected >= 0:
 						workspace_state.select_object(object_tool.selected)
 						object_attributes.refresh(document, object_tool.selected)
 						workspace_state.set_inspector_context(WorkspaceState.InspectorContext.OBJECT)
@@ -2943,6 +3086,7 @@ func _toggle_move_objects(enable: bool) -> void:
 
 
 func object_tool_changed() -> void:
+	cancel_all_slider_gestures()
 	if move_objects_button.button_pressed:
 		clear_incompatible_preview("object")
 		leave_water_paint()
@@ -2954,9 +3098,14 @@ func object_tool_changed() -> void:
 			set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
 		object_tool.set_active(true)
 		workspace_state.set_tool(WorkspaceState.Tool.OBJECT_MOVE)
-		object_attributes.refresh(document, object_tool.selected)
-		workspace_state.set_inspector_context(WorkspaceState.InspectorContext.OBJECT, true)
-		report("Drag an object in either view. Shift snaps to terrain grid. Esc cancels.")
+		var attr_views: Array[int] = []
+		if not object_tool.selected_views.is_empty():
+			attr_views.assign(object_tool.selected_views)
+		elif object_tool.selected >= 0:
+			attr_views.append(object_tool.selected)
+		object_attributes.refresh_selection(document, attr_views)
+		workspace_state.set_inspector_context(WorkspaceState.InspectorContext.OBJECT, not workspace_state.pinned_inspector)
+		report("Drag an object in either view. Ctrl+click multi-selects. Shift snaps to terrain grid. Esc cancels.")
 	else:
 		leave_object_tool()
 		workspace_state.set_tool(WorkspaceState.Tool.TERRAIN_BRUSH)
@@ -2975,7 +3124,9 @@ func leave_object_tool() -> void:
 
 func finish_object_drag(commit: bool) -> void:
 	var applied := object_tool.finish(commit)
-	if object_tool.selected >= 0:
+	if not object_tool.selected_views.is_empty():
+		object_attributes.refresh_selection(document, object_tool.selected_views)
+	elif object_tool.selected >= 0:
 		object_attributes.refresh(document, object_tool.selected)
 	report(object_tool.description() if applied else document.error)
 	sync_actions()
@@ -2983,7 +3134,9 @@ func finish_object_drag(commit: bool) -> void:
 
 func object_position_changed(index: int) -> void:
 	object_tool.position_changed(index)
-	if object_tool.selected == index:
+	if object_tool.selected_views.size() > 1 and object_tool.selected_views.has(index):
+		object_attributes.refresh_selection(document, object_tool.selected_views)
+	elif object_tool.selected == index:
 		object_attributes.refresh(document, index)
 	if object_tool.active and object_tool.selected == index:
 		report(object_tool.description())
@@ -2994,11 +3147,22 @@ func objects_topology_changed() -> void:
 	if loaded_objects == document:
 		scene_view.object_models.rebuild(document)
 		top.queue_redraw()
-	if object_tool.active and object_tool.selected >= document.object_count():
-		object_tool.selected = -1
-		object_tool.set_active(true)
+	var valid_sel: Array[int] = []
+	for v in object_tool.selected_views:
+		if document != null and document.valid_view_object(v):
+			valid_sel.append(v)
+	object_tool.selected_views = valid_sel
+	if object_tool.selected >= document.object_count():
+		object_tool.selected = valid_sel[valid_sel.size() - 1] if not valid_sel.is_empty() else -1
+		if object_tool.active:
+			object_tool.set_active(true)
 	if object_attributes.is_visible_in_tree():
-		object_attributes.refresh(document, object_tool.selected)
+		var refresh_views: Array[int] = []
+		if not valid_sel.is_empty():
+			refresh_views.assign(valid_sel)
+		elif object_tool.selected >= 0:
+			refresh_views.append(object_tool.selected)
+		object_attributes.refresh_selection(document, refresh_views)
 	scene_tree.request_rebuild()
 	sync_actions()
 
@@ -3056,6 +3220,8 @@ func leave_water_paint() -> void:
 	painting_water = false
 	if water_tools != null and water_tools.paint_toggle.button_pressed:
 		water_tools.paint_toggle.set_pressed_no_signal(false)
+	if workspace_state.active_tool == WorkspaceState.Tool.WATER_PAINT:
+		workspace_state.set_tool(WorkspaceState.Tool.TERRAIN_BRUSH)
 
 
 func toggle_water_edit() -> void:

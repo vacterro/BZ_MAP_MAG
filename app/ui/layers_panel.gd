@@ -15,6 +15,7 @@ signal layers_mutated(message: String)
 var document: Document
 var selected_index := 0
 var badge_label := Label.new()
+var draft_banner := Label.new()
 var layer_list := ItemList.new()
 var add_btn := Button.new()
 var remove_btn := Button.new()
@@ -27,6 +28,10 @@ var preview_btn := Button.new()
 var bake_btn := Button.new()
 var status_label := Label.new()
 var _rebuilding := false
+var _opacity_gesture_active := false
+var _opacity_gesture_index := -1
+var _opacity_gesture_initial := 1.0
+var _opacity_preview_value := NAN
 
 
 func _ready() -> void:
@@ -37,6 +42,10 @@ func _ready() -> void:
 	badge_label.text = "Non-Destructive Procedural Stack (Bakes to Native TER)"
 	badge_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(badge_label)
+
+	draft_banner.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	draft_banner.visible = false
+	add_child(draft_banner)
 
 	var op_row := HFlowContainer.new()
 	op_row.add_theme_constant_override("h_separation", 3)
@@ -76,7 +85,14 @@ func _ready() -> void:
 	opacity_field.step = 0.05
 	opacity_field.set_readout_width(40.0)
 	opacity_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	opacity_field.value_changed.connect(_on_opacity_changed)
+	opacity_field.bind_direct_edit(
+		_on_opacity_gesture_started,
+		_on_opacity_preview_changed,
+		_on_opacity_committed,
+		_on_opacity_cancelled
+	)
+	opacity_field.gesture_ended.connect(_on_opacity_gesture_ended)
+	opacity_field.value_changed.connect(_on_opacity_value_changed)
 	op_val_row.add_child(opacity_field)
 
 	var act_row := HFlowContainer.new()
@@ -99,9 +115,27 @@ func _ready() -> void:
 
 
 func bind_document(doc: Document, active_index: int = 0) -> void:
+	if _opacity_gesture_active:
+		_opacity_gesture_active = false
+		_opacity_gesture_index = -1
+		_opacity_preview_value = NAN
+		opacity_field.cancel_gesture()
 	document = doc
 	selected_index = active_index
+	set_draft_status(false, false, "")
 	refresh()
+
+
+func set_draft_status(has_draft: bool, has_conflict: bool, detail: String = "") -> void:
+	if has_conflict:
+		draft_banner.text = detail if not detail.is_empty() else "[CONFLICT] Node Graph has uncommitted draft edits. Resolve in Nodes."
+		draft_banner.visible = true
+	elif has_draft:
+		draft_banner.text = detail if not detail.is_empty() else "[DRAFT] Uncommitted Node Graph edits active. Use Keep Layers in Nodes to commit."
+		draft_banner.visible = true
+	else:
+		draft_banner.text = ""
+		draft_banner.visible = false
 
 
 func refresh(select_idx: int = -1) -> void:
@@ -121,8 +155,7 @@ func refresh(select_idx: int = -1) -> void:
 		_rebuilding = false
 		return
 
-	if document.layers.is_empty():
-		document.layers.append(Graph.layer())
+	document.ensure_layer_uids()
 	if select_idx >= 0:
 		selected_index = select_idx
 	selected_index = clampi(selected_index, 0, document.layers.size() - 1)
@@ -130,16 +163,19 @@ func refresh(select_idx: int = -1) -> void:
 	for i in document.layers.size():
 		var item: Dictionary = document.layers[i]
 		var on_str := "[ON]" if bool(item.get("enabled", true)) else "[OFF]"
-		var pct := int(round(float(item.get("opacity", 1.0)) * 100.0))
+		var op_val := _opacity_preview_value if (_opacity_gesture_active and i == _opacity_gesture_index and is_finite(_opacity_preview_value)) else float(item.get("opacity", 1.0))
+		var pct := int(round(op_val * 100.0))
 		var ch := _layer_channels(item)
-		layer_list.add_item("%s Layer %d · %d%% · %s" % [on_str, i + 1, pct, ch])
+		var prev_tag := " *" if (_opacity_gesture_active and i == _opacity_gesture_index) else ""
+		layer_list.add_item("%s Layer %d · %d%%%s · %s" % [on_str, i + 1, pct, prev_tag, ch])
 	layer_list.select(selected_index)
 
 	var cur: Dictionary = document.layers[selected_index]
 	enabled_check.disabled = false
 	enabled_check.set_pressed_no_signal(bool(cur.get("enabled", true)))
 	opacity_field.editable = true
-	opacity_field.set_value_no_signal(float(cur.get("opacity", 1.0)))
+	if not _opacity_gesture_active:
+		opacity_field.set_value_no_signal(float(cur.get("opacity", 1.0)))
 
 	add_btn.disabled = document.layers.size() >= Graph.MAX_LAYERS
 	remove_btn.disabled = document.layers.size() <= 1
@@ -148,7 +184,7 @@ func refresh(select_idx: int = -1) -> void:
 	edit_graph_btn.disabled = false
 	preview_btn.disabled = false
 	bake_btn.disabled = not document.has_preview()
-	status_label.text = "%d procedural layer(s). Changes evaluate on Preview and commit on Bake." % document.layers.size()
+	status_label.text = "%d procedural layer(s) (rev %d). Undoable stack; bakes to native TER on Bake." % [document.layers.size(), document.layer_stack_revision]
 	_rebuilding = false
 
 
@@ -170,26 +206,38 @@ static func _layer_channels(item: Dictionary) -> String:
 func _on_select(index: int) -> void:
 	if _rebuilding or document == null:
 		return
+	if _opacity_gesture_active:
+		opacity_field.cancel_gesture()
 	selected_index = clampi(index, 0, document.layers.size() - 1)
 	refresh(selected_index)
 	layer_selected.emit(selected_index)
 
 
 func _on_add() -> void:
-	if document == null or document.layers.size() >= Graph.MAX_LAYERS:
+	if document == null:
 		return
-	document.layers.append(Graph.layer())
-	selected_index = document.layers.size() - 1
+	if _opacity_gesture_active:
+		opacity_field.cancel_gesture()
+	var added_idx := document.add_procedural_layer()
+	if added_idx < 0:
+		status_label.text = "[ERR] " + document.error
+		return
+	selected_index = added_idx
 	refresh(selected_index)
 	layers_mutated.emit("Added procedural Layer %d." % (selected_index + 1))
 	layer_selected.emit(selected_index)
 
 
 func _on_remove() -> void:
-	if document == null or document.layers.size() <= 1:
+	if document == null:
 		return
-	document.layers.remove_at(selected_index)
-	selected_index = mini(selected_index, document.layers.size() - 1)
+	if _opacity_gesture_active:
+		opacity_field.cancel_gesture()
+	var target_sel := mini(selected_index, maxi(0, document.layers.size() - 2))
+	if not document.remove_procedural_layer(selected_index):
+		status_label.text = "[ERR] " + document.error
+		return
+	selected_index = clampi(target_sel, 0, document.layers.size() - 1)
 	refresh(selected_index)
 	layers_mutated.emit("Removed procedural layer (%d remaining)." % document.layers.size())
 	layer_selected.emit(selected_index)
@@ -198,11 +246,14 @@ func _on_remove() -> void:
 func _on_move(delta: int) -> void:
 	if document == null:
 		return
+	if _opacity_gesture_active:
+		opacity_field.cancel_gesture()
 	var next := selected_index + delta
 	if next < 0 or next >= document.layers.size():
 		return
-	var item: Dictionary = document.layers.pop_at(selected_index)
-	document.layers.insert(next, item)
+	if not document.move_procedural_layer(selected_index, next):
+		status_label.text = "[ERR] " + document.error
+		return
 	selected_index = next
 	refresh(selected_index)
 	layers_mutated.emit("Moved procedural layer to slot %d." % (selected_index + 1))
@@ -212,14 +263,85 @@ func _on_move(delta: int) -> void:
 func _on_enabled_toggled(on: bool) -> void:
 	if _rebuilding or document == null or selected_index >= document.layers.size():
 		return
-	document.layers[selected_index]["enabled"] = on
+	if not document.set_procedural_layer_enabled(selected_index, on):
+		refresh(selected_index)
+		status_label.text = "[ERR] " + document.error
+		return
 	refresh(selected_index)
 	layers_mutated.emit("Layer %d %s." % [selected_index + 1, "enabled" if on else "disabled"])
 
 
-func _on_opacity_changed(val: float) -> void:
-	if _rebuilding or document == null or selected_index >= document.layers.size():
+func _on_opacity_gesture_started(_initial_val: float) -> void:
+	if _rebuilding or document == null or selected_index < 0 or selected_index >= document.layers.size():
 		return
-	document.layers[selected_index]["opacity"] = clampf(val, 0.0, 1.0)
+	_opacity_gesture_active = true
+	_opacity_gesture_index = selected_index
+	_opacity_gesture_initial = float(document.layers[selected_index].get("opacity", 1.0))
+	_opacity_preview_value = _opacity_gesture_initial
+
+
+func _on_opacity_preview_changed(val: float) -> void:
+	if _rebuilding or not _opacity_gesture_active or document == null:
+		return
+	if _opacity_gesture_index < 0 or _opacity_gesture_index >= document.layers.size():
+		return
+	_opacity_preview_value = clampf(val, 0.0, 1.0)
+	var item: Dictionary = document.layers[_opacity_gesture_index]
+	var on_str := "[ON]" if bool(item.get("enabled", true)) else "[OFF]"
+	var pct := int(round(_opacity_preview_value * 100.0))
+	var ch := _layer_channels(item)
+	if _opacity_gesture_index < layer_list.item_count:
+		layer_list.set_item_text(_opacity_gesture_index, "%s Layer %d · %d%% * · %s" % [on_str, _opacity_gesture_index + 1, pct, ch])
+	status_label.text = "Previewing Layer %d opacity %d%% (release to commit, Esc to cancel)." % [_opacity_gesture_index + 1, pct]
+
+
+func _on_opacity_committed(_initial_val: float, final_val: float) -> void:
+	var idx := _opacity_gesture_index if _opacity_gesture_active else selected_index
+	_opacity_gesture_active = false
+	_opacity_gesture_index = -1
+	_opacity_preview_value = NAN
+	_commit_opacity(idx, final_val)
+
+
+func _on_opacity_cancelled(_restored_val: float) -> void:
+	var restored := _opacity_gesture_initial
+	_opacity_gesture_active = false
+	_opacity_gesture_index = -1
+	_opacity_preview_value = NAN
+	if document != null and selected_index >= 0 and selected_index < document.layers.size():
+		restored = float(document.layers[selected_index].get("opacity", restored))
+	_rebuilding = true
+	opacity_field.set_value_no_signal(restored)
+	_rebuilding = false
 	refresh(selected_index)
-	layers_mutated.emit("Layer %d opacity %.0f%%." % [selected_index + 1, val * 100.0])
+	status_label.text = "Opacity edit cancelled (restored %.0f%%)." % (restored * 100.0)
+
+
+func _on_opacity_gesture_ended(_committed: bool) -> void:
+	if _opacity_gesture_active:
+		_opacity_gesture_active = false
+		_opacity_gesture_index = -1
+		_opacity_preview_value = NAN
+		refresh(selected_index)
+
+
+func _on_opacity_value_changed(val: float) -> void:
+	if _rebuilding or _opacity_gesture_active or opacity_field.is_gesture_active():
+		return
+	_commit_opacity(selected_index, val)
+
+
+func _commit_opacity(idx: int, val: float) -> void:
+	if document == null or idx < 0 or idx >= document.layers.size():
+		return
+	var clamped := clampf(val, 0.0, 1.0)
+	var before := float(document.layers[idx].get("opacity", 1.0))
+	if is_equal_approx(before, clamped):
+		refresh(idx)
+		return
+	if not document.set_procedural_layer_opacity(idx, clamped):
+		refresh(idx)
+		status_label.text = "[ERR] " + document.error
+		return
+	refresh(idx)
+	layers_mutated.emit("Layer %d opacity %.0f%%." % [idx + 1, clamped * 100.0])

@@ -12,6 +12,7 @@ signal gesture_started(initial_value: float)
 signal preview_changed(value: float)
 signal value_committed(initial_value: float, final_value: float)
 signal gesture_cancelled(restored_value: float)
+signal gesture_ended(committed: bool)
 
 enum Role { PURE_PARAMETER, PREVIEW_PARAMETER, DIRECT_DOCUMENT_EDIT }
 
@@ -379,6 +380,7 @@ func commit_gesture() -> void:
 		_hide_ladder_overlay()
 	if not is_equal_approx(initial, final_val):
 		value_committed.emit(initial, final_val)
+	gesture_ended.emit(true)
 
 
 func cancel_gesture() -> void:
@@ -391,6 +393,7 @@ func cancel_gesture() -> void:
 		_hide_ladder_overlay()
 	_set_value_internal(restored, true, false)
 	gesture_cancelled.emit(_value)
+	gesture_ended.emit(false)
 
 
 func _input(event: InputEvent) -> void:

@@ -7,6 +7,7 @@ const STRIDE := 2
 
 var document: Document
 var tiles := {}
+var _tile_images := {}
 var cursor := Vector2(-1, -1)
 var radius_m := 32.0
 var square_brush := false
@@ -19,6 +20,7 @@ var object_marks: Array = []
 var objects_visible := false
 var move_objects := false
 var selected_object := -1
+var selected_objects: Array[int] = []
 var object_preview := Vector3.INF
 var preview_layer := Terrain.Layer.HEIGHT
 var preview_tile_lane := 0
@@ -27,6 +29,7 @@ var preview_tile_lane := 0
 func bind(value: Document) -> void:
 	document = value
 	tiles.clear()
+	_tile_images.clear()
 	var size := document.package.terrain.dimensions
 	for z in range(0, size.y, TILE):
 		for x in range(0, size.x, TILE):
@@ -53,12 +56,30 @@ func show_material(layer: int, lane: int) -> void:
 
 func update_tile(start: Vector2i) -> void:
 	var terrain := document.package.terrain
+	var heights := terrain.heights
+	var row := terrain.dimensions.x
 	var span := (terrain.dimensions - start).min(Vector2i(TILE, TILE))
 	var size := span / STRIDE
-	var image := Image.create_empty(size.x, size.y, false, Image.FORMAT_RGB8)
+	var image: Image = _tile_images.get(start, null)
+	if image == null or image.get_width() != size.x or image.get_height() != size.y:
+		image = Image.create_empty(size.x, size.y, false, Image.FORMAT_RGB8)
+		_tile_images[start] = image
 	var amplitude := maxf(0.1, terrain.max_height - terrain.min_height)
+	var inv_amp_4 := 0.25 / amplitude
+	var min_h := terrain.min_height
+	var bg_col: Color = palette["background"]
+	var surf_col: Color = palette["surface"]
+	var hi_col: Color = palette["textPrimary"]
+	var bg_r := bg_col.r
+	var bg_g := bg_col.g
+	var bg_b := bg_col.b
+	var d_bg_r := hi_col.r - bg_r
+	var d_bg_g := hi_col.g - bg_g
+	var d_bg_b := hi_col.b - bg_b
 	for j in size.y:
 		var z := start.y + j * STRIDE
+		var z0 := z * row
+		var z1 := (z + 1) * row
 		for i in size.x:
 			var x := start.x + i * STRIDE
 			if preview_layer == Terrain.Layer.COLOR:
@@ -67,14 +88,11 @@ func update_tile(start: Vector2i) -> void:
 			if preview_layer == Terrain.Layer.TILES:
 				var block := terrain.block_at(Vector2i(x, z))
 				var slot := (terrain.material_value(Terrain.Layer.TILES, block) >> (preview_tile_lane * 4)) & 15
-				image.set_pixel(i, j, palette["surface"].lerp(palette["textPrimary"], slot / 15.0))
+				image.set_pixel(i, j, surf_col.lerp(hi_col, slot / 15.0))
 				continue
-			var sum := 0.0
-			for dz in STRIDE:
-				for dx in STRIDE:
-					sum += terrain.heights[(z + dz) * terrain.dimensions.x + x + dx]
-			var normalized := (sum / (STRIDE * STRIDE) - terrain.min_height) / amplitude
-			image.set_pixel(i, j, palette["background"].lerp(palette["textPrimary"], clampf(0.10 + normalized * 0.83, 0.0, 1.0)))
+			var sum := heights[z0 + x] + heights[z0 + x + 1] + heights[z1 + x] + heights[z1 + x + 1]
+			var t := clampf(0.10 + (sum * inv_amp_4 - min_h / amplitude) * 0.83, 0.0, 1.0)
+			image.set_pixel(i, j, Color(bg_r + d_bg_r * t, bg_g + d_bg_g * t, bg_b + d_bg_b * t))
 	if tiles.has(start):
 		tiles[start].update(image)
 	else:
@@ -126,9 +144,18 @@ func _draw() -> void:
 		for marker: Dictionary in object_marks:
 			if marker["pool"]:
 				pools[marker["index"]] = true
+		var sel_set := {}
+		if move_objects:
+			if selected_object >= 0:
+				sel_set[selected_object] = true
+			for sv in selected_objects:
+				sel_set[sv] = true
+		var group_delta := Vector3.ZERO
+		if move_objects and selected_object >= 0 and object_preview.is_finite():
+			group_delta = object_preview - document.object_position(selected_object)
 		for index in document.object_count():
-			var selected := move_objects and index == selected_object
-			var world := object_preview if selected and object_preview.is_finite() else document.object_position(index)
+			var selected: bool = sel_set.has(index)
+			var world := (document.object_position(index) + group_delta) if (selected and object_preview.is_finite()) else document.object_position(index)
 			var pixel := path_point_pixel(Vector2(world.x, world.z))
 			if rect.has_point(pixel):
 				var pool := pools.has(document.object_pool_reference(index)) or ("pool" in document.object_odf(index).to_lower())

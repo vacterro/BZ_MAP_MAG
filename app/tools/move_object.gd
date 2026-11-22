@@ -9,6 +9,7 @@ var top: TopView
 var scene: TerrainView
 var drag_view: Control
 var selected := -1
+var selected_views: Array[int] = []
 var active := false
 var draft := Vector3.INF
 var grab_pixel := Vector2.ZERO
@@ -21,9 +22,28 @@ func bind(value: Document, map: TopView, view: TerrainView) -> void:
 	top = map
 	scene = view
 	selected = -1
+	selected_views.clear()
 	drag_view = null
 	draft = Vector3.INF
 	set_active(false)
+
+
+func set_selection(views: Array[int] = [], primary: int = -1) -> void:
+	selected_views.clear()
+	if document != null:
+		var seen := {}
+		for v in views:
+			if document.valid_view_object(v) and not seen.has(v):
+				seen[v] = true
+				selected_views.append(v)
+	if primary >= 0 and selected_views.has(primary):
+		selected = primary
+	elif not selected_views.is_empty():
+		selected = selected_views[selected_views.size() - 1]
+	else:
+		selected = -1
+	refresh_marker()
+	update_anchors()
 
 
 func set_active(value: bool) -> void:
@@ -33,8 +53,8 @@ func set_active(value: bool) -> void:
 	update_anchors()
 
 
-func start(panel: Control, pixel: Vector2) -> void:
-	selected = -1
+func start(panel: Control, pixel: Vector2, additive: bool = false) -> void:
+	var picked := -1
 	var distance := 14.0
 	for i in document.object_count():
 		var position := document.object_position(i)
@@ -47,11 +67,29 @@ func start(panel: Control, pixel: Vector2) -> void:
 		var current := pixel.distance_to(anchor)
 		if current < distance:
 			distance = current
-			selected = i
+			picked = i
+	if additive and picked >= 0:
+		if selected_views.has(picked):
+			selected_views.erase(picked)
+			selected = selected_views[selected_views.size() - 1] if not selected_views.is_empty() else -1
+		else:
+			selected_views.append(picked)
+			selected = picked
+		refresh_marker()
+		update_anchors()
+		return
+	if picked < 0:
+		selected = -1
+		selected_views.clear()
+		refresh_marker()
+		update_anchors()
+		return
+	if not selected_views.has(picked):
+		selected_views.clear()
+		selected_views.append(picked)
+	selected = picked
 	refresh_marker()
 	update_anchors()
-	if selected < 0:
-		return
 	var sample: Vector2 = panel.sample_at(pixel)
 	if sample.x < 0:
 		return
@@ -76,7 +114,12 @@ func preview(pixel: Vector2, sample: Vector2, snap: bool) -> void:
 	target = target.clamp(Vector2.ZERO, limit)
 	draft = scene.point_world(target)
 	draft.y += height_offset
-	if scene.object_models.instances.has(selected):
+	var delta := draft - document.object_position(selected)
+	if selected_views.size() > 1 and selected_views.has(selected):
+		for v in selected_views:
+			if scene.object_models.instances.has(v):
+				scene.object_models.move_instance(v, document.object_position(v) + delta)
+	elif scene.object_models.instances.has(selected):
 		scene.object_models.move_instance(selected, draft)
 	refresh_marker()
 
@@ -87,8 +130,16 @@ func finish(commit: bool) -> bool:
 	draft = Vector3.INF
 	var success := true
 	if commit and selected >= 0 and selected < document.object_count() and position.is_finite():
-		success = document.move_object(selected, position)
-	if selected >= 0 and selected < document.object_count():
+		if selected_views.size() > 1 and selected_views.has(selected):
+			var delta := position - document.object_position(selected)
+			success = document.move_objects_batch(selected_views, delta)
+		else:
+			success = document.move_object(selected, position)
+	if selected_views.size() > 1:
+		for v in selected_views:
+			if v >= 0 and v < document.object_count():
+				scene.object_models.set_instance_transform(v, document.object_transform(v))
+	elif selected >= 0 and selected < document.object_count():
 		scene.object_models.set_instance_transform(selected, document.object_transform(selected))
 	refresh_marker()
 	return success
@@ -122,6 +173,9 @@ func update_anchors() -> void:
 
 func refresh_marker() -> void:
 	top.selected_object = selected if active else -1
+	top.selected_objects.clear()
+	if active:
+		top.selected_objects.assign(selected_views)
 	top.object_preview = draft
 	top.queue_redraw()
 	scene.object_cursor.visible = active and selected >= 0 and selected < document.object_count()
@@ -132,6 +186,10 @@ func refresh_marker() -> void:
 func description() -> String:
 	if selected < 0 or selected >= document.object_count():
 		return "Select an object in either view."
+	if selected_views.size() > 1 and selected_views.has(selected):
+		var pos := draft if draft.is_finite() else document.object_position(selected)
+		return "Group (%d objects) · Anchor #%d %s · X %.1f · Y %.1f · Z %.1f" % [
+			selected_views.size(), selected, document.object_odf(selected), pos.x, pos.y, pos.z]
 	var position := draft if draft.is_finite() else document.object_position(selected)
 	var degrees := rad_to_deg(heading(document.object_transform(selected).basis))
 	return "%s%s · Team %d · X %.1f · Y %.1f · Z %.1f · Heading %.0f°" % [

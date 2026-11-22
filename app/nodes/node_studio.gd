@@ -15,9 +15,24 @@ signal updated(message: String)
 signal preview_display(layer: int)
 signal layers_changed(selected_index: int)
 signal viewport_requested
+signal draft_state_changed(has_draft: bool, has_conflict: bool, detail: String)
+signal preview_state_changed(active: bool)
+
+enum DraftState { COMMITTED, DRAFT, PREVIEW, BAKED }
 
 var document: Document
+var bound_document_id := -1
+var base_layer_revision := -1
+var draft_revision := 0
+var preview_generation := 0
+var draft_state: int = DraftState.COMMITTED
 var working: Array = [Graph.layer()]
+var working_uids: Array[int] = [1]
+var base_snapshot: Array = [Graph.layer()]
+var base_uids: Array[int] = [1]
+var conflict_pending := false
+var conflict_reason := ""
+var _next_draft_uid := -1
 var selected := 0
 var focus: Vector2i
 var nodes := GraphEdit.new()
@@ -27,9 +42,15 @@ var parameters := {}
 var color_parameters := {}
 var range_field := SliderField.new()
 var message := Label.new()
+var draft_badge := Label.new()
+var conflict_bar := HBoxContainer.new()
+var conflict_label := Label.new()
+var conflict_keep_button: Button
+var conflict_discard_button: Button
 var bake_button: Button
 var preview_button: Button
 var keep_button: Button
+var discard_button: Button
 var viewport_button: Button
 var preview_channel := ChoiceGroup.new(0)
 var attributes_panel := VBoxContainer.new()
@@ -39,7 +60,10 @@ var job_graph: Graph
 var generation := 0
 var job_generation := -1
 var job_document: Document
+var job_document_id := -1
 var job_revision := -1
+var job_layer_revision := -1
+var job_draft_revision := -1
 
 
 func _ready() -> void:
@@ -55,12 +79,27 @@ func _ready() -> void:
 	preview_button = button(actions, "Preview", preview)
 	bake_button = button(actions, "Bake to Terrain", bake)
 	keep_button = button(actions, "Keep Layers", keep_layers)
+	discard_button = button(actions, "Discard Draft", discard_draft)
+	discard_button.disabled = true
 	viewport_button = button(actions, "View 3D/2D", func(): viewport_requested.emit())
-	for b in [preview_button, bake_button, keep_button, viewport_button]:
+	for b in [preview_button, bake_button, keep_button, discard_button, viewport_button]:
 		b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	actions.add_child(spacer)
+	draft_badge.text = "[COMMITTED]"
+	actions.add_child(draft_badge)
+
+	# Inline non-modal conflict resolution bar (shown only on true stack conflict)
+	conflict_bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	conflict_bar.add_theme_constant_override("separation", 6)
+	conflict_bar.visible = false
+	add_child(conflict_bar)
+	conflict_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	conflict_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	conflict_bar.add_child(conflict_label)
+	conflict_keep_button = button(conflict_bar, "Keep Draft", func(): resolve_conflict("keep_draft"))
+	conflict_discard_button = button(conflict_bar, "Discard Draft", func(): resolve_conflict("discard_draft"))
 
 	var view_row := HBoxContainer.new()
 	view_row.add_theme_constant_override("separation", 6)
@@ -142,29 +181,265 @@ func _ready() -> void:
 	parameter(mask_sec.body, "Mask wt", "mask_weight", 0, 1, 0.05)
 
 
-func begin(value: Document, center: Vector2i, initial_layer: int = -1) -> void:
-	invalidate()
-	document = value
-	focus = center
+static func _normalized_stack(raw: Array) -> Array:
+	var out: Array = []
+	for item in raw:
+		out.append(Graph.normalize_layer(item as Dictionary))
+	return out
+
+
+func has_uncommitted_draft() -> bool:
+	if document == null or bound_document_id != document.document_id:
+		return false
+	if conflict_pending:
+		return true
+	return _normalized_stack(working) != _normalized_stack(document.layers)
+
+
+func _reset_working_from_document(initial_layer: int = -1) -> void:
 	if document == null:
 		return
-	working = document.layers.duplicate(true)
-	if working.is_empty():
-		working = [Graph.layer()]
+	document.ensure_layer_uids()
+	working = _normalized_stack(document.layers)
+	working_uids = document.layer_uids.duplicate()
+	base_snapshot = working.duplicate(true)
+	base_uids = working_uids.duplicate()
+	base_layer_revision = document.layer_stack_revision
+	conflict_pending = false
+	conflict_reason = ""
+	draft_state = DraftState.COMMITTED
 	var target_layer := clampi(initial_layer if initial_layer >= 0 else selected, 0, working.size() - 1)
-	load_layer(target_layer)
+	_load_layer_ui(target_layer, false)
+	_sync_draft_ui()
+
+
+func _sync_draft_ui() -> void:
+	var is_draft := has_uncommitted_draft()
+	if conflict_pending:
+		draft_badge.text = "[CONFLICT · DRAFT]"
+		conflict_label.text = "Layer stack conflict: %s" % conflict_reason
+		conflict_bar.visible = true
+	else:
+		conflict_bar.visible = false
+		match draft_state:
+			DraftState.PREVIEW:
+				draft_badge.text = "[PREVIEW · DRAFT]" if is_draft else "[PREVIEW]"
+			DraftState.BAKED:
+				draft_badge.text = "[BAKED]"
+			_:
+				draft_badge.text = "[DRAFT]" if is_draft else "[COMMITTED]"
+	if discard_button != null:
+		discard_button.disabled = not is_draft and not conflict_pending
+	if keep_button != null:
+		keep_button.text = "Keep Layers *" if is_draft else "Keep Layers"
+	draft_state_changed.emit(is_draft, conflict_pending, conflict_reason)
+
+
+func begin(value: Document, center: Vector2i, initial_layer: int = -1) -> void:
+	if value == null:
+		close_studio()
+		return
+	var same_doc := (document == value and bound_document_id == value.document_id)
+	focus = center
+	if same_doc:
+		if has_uncommitted_draft():
+			var keep_idx := clampi(initial_layer if initial_layer >= 0 else selected, 0, working.size() - 1)
+			_load_layer_ui(keep_idx, false)
+			_sync_draft_ui()
+			return
+		if document.layer_stack_revision != base_layer_revision or _normalized_stack(working) != _normalized_stack(document.layers):
+			invalidate()
+			_reset_working_from_document(initial_layer)
+		else:
+			var target_idx := clampi(initial_layer if initial_layer >= 0 else selected, 0, working.size() - 1)
+			_load_layer_ui(target_idx, false)
+			_sync_draft_ui()
+		return
+	invalidate()
+	document = value
+	bound_document_id = value.document_id
+	draft_revision = 0
+	_reset_working_from_document(initial_layer)
 	set_message("Connect Height, Color or Base Tile output. Preview around the terrain cursor.")
 
 
-func sync_from_document(select_idx: int = -1) -> void:
+func sync_from_document(select_idx: int = -1) -> Dictionary:
+	if document == null:
+		return {"status": "noop", "reason": ""}
+	document.ensure_layer_uids()
+	if bound_document_id != document.document_id:
+		invalidate()
+		bound_document_id = document.document_id
+		_reset_working_from_document(select_idx)
+		return {"status": "synced", "reason": ""}
+
+	var doc_norm := _normalized_stack(document.layers)
+	var doc_uids: Array[int] = document.layer_uids.duplicate()
+	if not has_uncommitted_draft() and not conflict_pending:
+		if base_layer_revision == document.layer_stack_revision and _normalized_stack(working) == doc_norm and working_uids == doc_uids:
+			if select_idx >= 0 and select_idx != selected:
+				_load_layer_ui(clampi(select_idx, 0, working.size() - 1), false)
+			return {"status": "noop", "reason": ""}
+		invalidate()
+		_reset_working_from_document(select_idx)
+		return {"status": "synced", "reason": ""}
+
+	# Uncommitted draft exists: perform controlled 3-way merge by stable layer UID.
+	# Never silently discard uncommitted graph work!
+	var work_norm := _normalized_stack(working)
+	var base_by_uid := {}
+	for i in mini(base_snapshot.size(), base_uids.size()):
+		base_by_uid[base_uids[i]] = base_snapshot[i]
+	var work_by_uid := {}
+	var draft_added_layers: Array = []
+	var draft_added_uids: Array[int] = []
+	for i in work_norm.size():
+		var uid := working_uids[i] if i < working_uids.size() else (_next_draft_uid - i)
+		if uid < 0:
+			draft_added_layers.append(work_norm[i])
+			draft_added_uids.append(uid)
+		else:
+			work_by_uid[uid] = work_norm[i]
+	var doc_by_uid := {}
+	for i in doc_norm.size():
+		doc_by_uid[doc_uids[i]] = doc_norm[i]
+
+	var active_uid := working_uids[selected] if selected >= 0 and selected < working_uids.size() else -1
+
+	# 1. Detect deleted-layer conflict (committed layer edited in draft was removed)
+	for uid_v in work_by_uid:
+		var uid := int(uid_v)
+		if not doc_by_uid.has(uid):
+			var base_item: Variant = base_by_uid.get(uid, null)
+			if base_item == null or work_by_uid[uid] != base_item:
+				invalidate()
+				conflict_pending = true
+				conflict_reason = "A layer with uncommitted Node Graph edits was removed externally."
+				draft_state = DraftState.DRAFT
+				_sync_draft_ui()
+				set_message("Conflict: %s Keep Draft or Discard Draft." % conflict_reason)
+				return {"status": "conflict", "reason": conflict_reason}
+
+	# 2. Merge every committed layer in document's new order
+	var merged_layers: Array = []
+	var merged_uids: Array[int] = []
+	for i in doc_norm.size():
+		var uid := doc_uids[i]
+		var doc_item: Dictionary = doc_norm[i]
+		if not work_by_uid.has(uid):
+			merged_layers.append(doc_item.duplicate(true))
+			merged_uids.append(uid)
+			continue
+		var work_item: Dictionary = work_by_uid[uid]
+		var base_item_v: Variant = base_by_uid.get(uid, null)
+		if base_item_v == null:
+			if work_item == doc_item:
+				merged_layers.append(doc_item.duplicate(true))
+				merged_uids.append(uid)
+			else:
+				invalidate()
+				conflict_pending = true
+				conflict_reason = "Layer stack diverged without a common base snapshot."
+				draft_state = DraftState.DRAFT
+				_sync_draft_ui()
+				set_message("Conflict: %s Keep Draft or Discard Draft." % conflict_reason)
+				return {"status": "conflict", "reason": conflict_reason}
+			continue
+		var base_item: Dictionary = base_item_v
+		if work_item == base_item:
+			merged_layers.append(doc_item.duplicate(true))
+			merged_uids.append(uid)
+			continue
+		if doc_item == base_item:
+			merged_layers.append(work_item.duplicate(true))
+			merged_uids.append(uid)
+			continue
+		# Field-level 3-way merge
+		var merged_item := base_item.duplicate(true)
+		var all_keys := {}
+		for k in base_item.keys():
+			all_keys[k] = true
+		for k in work_item.keys():
+			all_keys[k] = true
+		for k in doc_item.keys():
+			all_keys[k] = true
+		for k in all_keys:
+			var bv: Variant = base_item.get(k, null)
+			var wv: Variant = work_item.get(k, null)
+			var dv: Variant = doc_item.get(k, null)
+			var w_changed: bool = (wv != bv)
+			var d_changed: bool = (dv != bv)
+			if w_changed and d_changed and wv != dv:
+				invalidate()
+				conflict_pending = true
+				conflict_reason = "Both Layers and Node Graph edited '%s' on Layer %d." % [String(k), i + 1]
+				draft_state = DraftState.DRAFT
+				_sync_draft_ui()
+				set_message("Conflict: %s Keep Draft or Discard Draft." % conflict_reason)
+				return {"status": "conflict", "reason": conflict_reason}
+			elif w_changed:
+				merged_item[k] = wv.duplicate(true) if (wv is Dictionary or wv is Array) else wv
+			elif d_changed:
+				merged_item[k] = dv.duplicate(true) if (dv is Dictionary or dv is Array) else dv
+			else:
+				merged_item[k] = bv.duplicate(true) if (bv is Dictionary or bv is Array) else bv
+		merged_layers.append(Graph.normalize_layer(merged_item))
+		merged_uids.append(uid)
+
+	# 3. Append uncommitted draft-added layers if within MAX_LAYERS
+	if merged_layers.size() + draft_added_layers.size() > Graph.MAX_LAYERS:
+		invalidate()
+		conflict_pending = true
+		conflict_reason = "Merging external layers with uncommitted draft layers exceeds %d layers." % Graph.MAX_LAYERS
+		draft_state = DraftState.DRAFT
+		_sync_draft_ui()
+		set_message("Conflict: %s Keep Draft or Discard Draft." % conflict_reason)
+		return {"status": "conflict", "reason": conflict_reason}
+	for i in draft_added_layers.size():
+		merged_layers.append((draft_added_layers[i] as Dictionary).duplicate(true))
+		merged_uids.append(draft_added_uids[i])
+
+	invalidate()
+	working = merged_layers
+	working_uids = merged_uids
+	base_snapshot = doc_norm.duplicate(true)
+	base_uids = doc_uids.duplicate()
+	base_layer_revision = document.layer_stack_revision
+	draft_revision += 1
+	conflict_pending = false
+	conflict_reason = ""
+	draft_state = DraftState.DRAFT if has_uncommitted_draft() else DraftState.COMMITTED
+	var next_sel := select_idx
+	if next_sel < 0:
+		var followed := working_uids.find(active_uid)
+		next_sel = followed if followed >= 0 else selected
+	_load_layer_ui(clampi(next_sel, 0, working.size() - 1), false)
+	_sync_draft_ui()
+	set_message("Preserved uncommitted Node Graph draft across layer update. Keep Layers to commit.")
+	return {"status": "merged", "reason": ""}
+
+
+func resolve_conflict(action: String) -> bool:
+	match action:
+		"keep_draft":
+			return keep_layers()
+		"discard_draft":
+			discard_draft()
+			return true
+		"cancel":
+			return false
+	return false
+
+
+func discard_draft() -> void:
 	if document == null:
 		return
 	invalidate()
-	working = document.layers.duplicate(true)
-	if working.is_empty():
-		working = [Graph.layer()]
-	var idx := clampi(select_idx if select_idx >= 0 else selected, 0, working.size() - 1)
-	load_layer(idx)
+	draft_revision += 1
+	_reset_working_from_document(selected)
+	layers_changed.emit(selected)
+	updated.emit("Discarded uncommitted Node Graph draft and restored committed layers.")
+	set_message("Discarded draft edits. Restored committed procedural layers.")
 
 
 func button(parent: Control, caption: String, action: Callable) -> Button:
@@ -259,10 +534,18 @@ func make_graph() -> void:
 
 
 func load_layer(index: int) -> void:
-	invalidate()
+	_load_layer_ui(index, false)
+
+
+func _load_layer_ui(index: int, clear_preview_flag: bool = false) -> void:
+	if clear_preview_flag:
+		invalidate()
 	loading = true
 	if working.is_empty():
 		working = [Graph.layer()]
+		working_uids.clear()
+		working_uids.append(_next_draft_uid)
+		_next_draft_uid -= 1
 	selected = clampi(index, 0, working.size() - 1)
 	layer_select.clear()
 	for i in working.size():
@@ -271,11 +554,18 @@ func load_layer(index: int) -> void:
 	var item: Dictionary = working[selected]
 	enabled.button_pressed = item["enabled"]
 	for key: String in parameters:
-		parameters[key].value = item[key]
+		parameters[key].set_value_no_signal(item[key])
 	for key: String in color_parameters:
 		color_parameters[key].color = Terrain.word_color(int(item[key]))
 	render_connections()
 	loading = false
+
+
+func _mark_draft_mutated() -> void:
+	draft_revision += 1
+	draft_state = DraftState.DRAFT if has_uncommitted_draft() else DraftState.COMMITTED
+	invalidate()
+	_sync_draft_ui()
 
 
 func render_connections() -> void:
@@ -295,7 +585,7 @@ func connect_nodes(from: StringName, _from_port: int, to: StringName, port: int)
 	if graph.validate_links(links, true):
 		working[selected]["links"] = links
 		render_connections()
-		invalidate()
+		_mark_draft_mutated()
 	else:
 		set_message(graph.error)
 
@@ -303,21 +593,25 @@ func connect_nodes(from: StringName, _from_port: int, to: StringName, port: int)
 func disconnect_nodes(_from: StringName, _from_port: int, to: StringName, port: int) -> void:
 	working[selected]["links"][String(to)][port] = ""
 	render_connections()
-	invalidate()
+	_mark_draft_mutated()
 
 
 func add_layer() -> void:
 	if working.size() < Graph.MAX_LAYERS:
 		working.append(Graph.layer())
-		load_layer(working.size() - 1)
-		_sync_working_to_doc_non_destructive()
+		working_uids.append(_next_draft_uid)
+		_next_draft_uid -= 1
+		_load_layer_ui(working.size() - 1, false)
+		_mark_draft_mutated()
 
 
 func remove_layer() -> void:
 	if working.size() > 1:
 		working.remove_at(selected)
-		load_layer(mini(selected, working.size() - 1))
-		_sync_working_to_doc_non_destructive()
+		if selected < working_uids.size():
+			working_uids.remove_at(selected)
+		_load_layer_ui(mini(selected, working.size() - 1), false)
+		_mark_draft_mutated()
 
 
 func move_layer(direction: int) -> void:
@@ -325,24 +619,24 @@ func move_layer(direction: int) -> void:
 	if next >= 0 and next < working.size():
 		var item: Dictionary = working.pop_at(selected)
 		working.insert(next, item)
-		load_layer(next)
-		_sync_working_to_doc_non_destructive()
+		if selected < working_uids.size():
+			var uid: int = working_uids.pop_at(selected)
+			working_uids.insert(next, uid)
+		_load_layer_ui(next, false)
+		_mark_draft_mutated()
 
 
 func set_parameter(key: String, value: Variant) -> void:
 	if not loading and selected >= 0 and selected < working.size():
+		if working[selected].get(key) == value:
+			return
 		working[selected][key] = value
-		invalidate()
-
-
-func _sync_working_to_doc_non_destructive() -> void:
-	if document != null:
-		document.layers = working.map(Graph.normalize_layer)
-	layers_changed.emit(selected)
+		_mark_draft_mutated()
 
 
 func invalidate() -> void:
 	generation += 1
+	var had_prev := (draft_state == DraftState.PREVIEW) or (document != null and document.has_preview())
 	if bake_button != null:
 		bake_button.disabled = true
 	if preview_channel != null:
@@ -350,8 +644,17 @@ func invalidate() -> void:
 	if document:
 		document.clear_preview()
 		preview_display.emit(-1)
+	if draft_state == DraftState.PREVIEW:
+		draft_state = DraftState.DRAFT if has_uncommitted_draft() else DraftState.COMMITTED
+	if had_prev:
+		preview_state_changed.emit(false)
 	if worker.is_started():
 		set_message("Preview discarded. Finish the current evaluation before retrying.")
+
+
+func clear_preview_only() -> void:
+	invalidate()
+	_sync_draft_ui()
 
 
 func preview() -> void:
@@ -372,7 +675,10 @@ func preview() -> void:
 	job_generation = generation
 	job_graph = preview_graph
 	job_document = document
+	job_document_id = document.document_id
 	job_revision = document.edit_revision
+	job_layer_revision = document.layer_stack_revision
+	job_draft_revision = draft_revision
 	preview_button.disabled = true
 	set_message("Evaluating preview…")
 
@@ -388,15 +694,21 @@ func _process(_delta: float) -> void:
 
 
 func accept_preview(result: Dictionary) -> void:
-	if document == null or generation != job_generation or document != job_document or document.edit_revision != job_revision:
+	if (document == null or generation != job_generation or document != job_document
+		or document.document_id != job_document_id or document.edit_revision != job_revision
+		or document.layer_stack_revision != job_layer_revision or draft_revision != job_draft_revision):
 		return
 	var materials: Dictionary = result["materials"]
 	if not document.show_preview(result["heights"], materials):
 		set_message(document.error)
 		return
+	preview_generation += 1
+	draft_state = DraftState.PREVIEW
 	bake_button.disabled = not document.has_preview()
 	preview_channel.disabled = bake_button.disabled
 	show_preview_channel()
+	preview_state_changed.emit(document.has_preview())
+	_sync_draft_ui()
 	layers_changed.emit(selected)
 	set_message("Preview: %d heights · %d colors · %d tile blocks. Switch to 3D/2D to inspect or Bake to commit." % [
 		result["heights"].size(), materials[Terrain.Layer.COLOR].size(), materials[Terrain.Layer.TILES].size()])
@@ -417,17 +729,31 @@ func show_preview_channel() -> void:
 	preview_display.emit(layer)
 
 
-func keep_layers() -> void:
+func keep_layers() -> bool:
 	if document == null:
-		return
+		return false
 	var graph := Graph.new()
 	if not graph.validate_stack(working):
 		set_message(graph.error)
-		return
-	document.layers = working.map(Graph.normalize_layer)
+		return false
+	if not document.replace_procedural_layers(working, selected, working_uids):
+		set_message(document.error)
+		return false
+	document.ensure_layer_uids()
+	working = _normalized_stack(document.layers)
+	working_uids = document.layer_uids.duplicate()
+	base_snapshot = working.duplicate(true)
+	base_uids = working_uids.duplicate()
+	base_layer_revision = document.layer_stack_revision
+	conflict_pending = false
+	conflict_reason = ""
+	draft_state = DraftState.COMMITTED
+	_load_layer_ui(clampi(selected, 0, working.size() - 1), false)
+	_sync_draft_ui()
 	layers_changed.emit(selected)
-	updated.emit("Saved node settings in the document. Save Project to persist them.")
-	set_message("Keeping layer settings. Terrain changes only on Bake.")
+	updated.emit("Committed node stack to document history (1 undo step). Save Project to persist.")
+	set_message("Layers committed to history. Terrain changes only on Bake.")
+	return true
 
 
 func bake() -> void:
@@ -437,19 +763,37 @@ func bake() -> void:
 	var materials := document.package.terrain.material_previews
 	var colors: int = materials.get(Terrain.Layer.COLOR, {}).size()
 	var tiles: int = materials.get(Terrain.Layer.TILES, {}).size()
-	if not document.bake_preview():
+	if not document.bake_preview(working, working_uids):
 		set_message(document.error)
 		return
-	keep_layers()
+	document.ensure_layer_uids()
+	working = _normalized_stack(document.layers)
+	working_uids = document.layer_uids.duplicate()
+	base_snapshot = working.duplicate(true)
+	base_uids = working_uids.duplicate()
+	base_layer_revision = document.layer_stack_revision
+	conflict_pending = false
+	conflict_reason = ""
+	draft_state = DraftState.BAKED
 	bake_button.disabled = true
 	preview_channel.disabled = true
 	preview_display.emit(-1)
-	updated.emit("Baked %d heights · %d colors · %d tile blocks." % [heights, colors, tiles])
+	preview_state_changed.emit(false)
+	_load_layer_ui(clampi(selected, 0, working.size() - 1), false)
+	_sync_draft_ui()
+	layers_changed.emit(selected)
+	updated.emit("Baked %d heights · %d colors · %d tile blocks (1 atomic undo step)." % [heights, colors, tiles])
 
 
 func close_studio() -> void:
 	invalidate()
 	document = null
+	bound_document_id = -1
+	base_layer_revision = -1
+	conflict_pending = false
+	conflict_reason = ""
+	draft_state = DraftState.COMMITTED
+	_sync_draft_ui()
 
 
 func set_message(value: String) -> void:

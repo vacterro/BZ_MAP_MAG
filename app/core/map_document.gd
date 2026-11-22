@@ -26,10 +26,14 @@ signal objects_changed
 signal water_changed
 signal profile_changed
 signal environment_changed
+signal layers_changed(selected_index: int)
 
 const WATER_LAYERS := 8
 const WATER_BLOCK := 16
 
+static var _next_document_id := 0
+
+var document_id := 0
 var package: Package
 var base_heights := PackedFloat32Array()
 var edits := {}
@@ -64,10 +68,18 @@ var stroke_tick := 0
 var stroke_active := false
 var stroke_layer := Terrain.Layer.HEIGHT
 var layers: Array = [Graph.layer()]
+var layer_uids: Array[int] = [1]
+var next_layer_id := 2
+var layer_stack_revision := 0
 var preview_before := {}
 var preview_after := {}
 var edit_revision := 0
 var error := ""
+
+
+func _init() -> void:
+	_next_document_id += 1
+	document_id = _next_document_id
 
 
 func open(path: String) -> bool:
@@ -105,6 +117,10 @@ func open(path: String) -> bool:
 	water_stroke_active = false
 	object_label_edits = {}
 	object_odf_edits = {}
+	layers = [Graph.layer()]
+	layer_uids.clear()
+	next_layer_id = 1
+	layer_stack_revision = 0
 	package = Package.new()
 	if not package.open(source):
 		return fail(package.error)
@@ -170,6 +186,8 @@ func open(path: String) -> bool:
 			environment_edits = (raw_env as Dictionary).duplicate(true)
 	if not package.check_sources():
 		return fail(package.error)
+	ensure_layer_uids()
+	layer_stack_revision += 1
 	edit_revision += 1
 	return true
 
@@ -428,6 +446,189 @@ func set_environment_edits(next_edits: Dictionary) -> bool:
 func _apply_environment_edits(state: Dictionary) -> void:
 	environment_edits = state.duplicate(true)
 	environment_changed.emit()
+
+
+static func _to_int_array(raw: Variant) -> Array[int]:
+	var out: Array[int] = []
+	if raw is Array:
+		for item in (raw as Array):
+			out.append(int(item))
+	return out
+
+
+func ensure_layer_uids() -> void:
+	if layers.is_empty():
+		layers = [Graph.layer()]
+	while layer_uids.size() < layers.size():
+		layer_uids.append(next_layer_id)
+		next_layer_id += 1
+	if layer_uids.size() > layers.size():
+		layer_uids.resize(layers.size())
+
+
+func layer_uid(index: int) -> int:
+	ensure_layer_uids()
+	if index < 0 or index >= layer_uids.size():
+		return -1
+	return layer_uids[index]
+
+
+func layer_index_by_uid(uid: int) -> int:
+	ensure_layer_uids()
+	return layer_uids.find(uid)
+
+
+func _normalized_layer_stack(raw_layers: Array) -> Array:
+	var result: Array = []
+	for item in raw_layers:
+		result.append(Graph.normalize_layer(item as Dictionary))
+	return result
+
+
+func commit_procedural_layers(next_layers: Array, next_uids: Array[int] = [], focus_index: int = -1, clear_active_preview: bool = true) -> bool:
+	if package == null:
+		return fail("Open a map before editing procedural layers.")
+	if stroke_active or water_stroke_active:
+		return fail("Finish the current stroke before editing procedural layers.")
+	if next_layers.is_empty() or next_layers.size() > Graph.MAX_LAYERS:
+		return fail("A node stack needs one to %d layers." % Graph.MAX_LAYERS)
+	var graph := Graph.new()
+	if not graph.validate_stack(next_layers):
+		return fail(graph.error)
+	ensure_layer_uids()
+	var before_layers := _normalized_layer_stack(layers)
+	var before_uids: Array[int] = layer_uids.duplicate()
+	var after_layers := _normalized_layer_stack(next_layers)
+	var after_uids: Array[int] = []
+	if next_uids.size() == after_layers.size():
+		var seen := {}
+		for uid in next_uids:
+			var clean_uid := int(uid)
+			if clean_uid <= 0 or seen.has(clean_uid):
+				clean_uid = next_layer_id
+				next_layer_id += 1
+			seen[clean_uid] = true
+			after_uids.append(clean_uid)
+			next_layer_id = maxi(next_layer_id, clean_uid + 1)
+	else:
+		for i in after_layers.size():
+			if i < before_uids.size():
+				after_uids.append(before_uids[i])
+			else:
+				after_uids.append(next_layer_id)
+				next_layer_id += 1
+	if before_layers == after_layers and before_uids == after_uids:
+		return true
+	if clear_active_preview and has_preview():
+		clear_preview()
+	var focus_before := clampi(focus_index if focus_index >= 0 else 0, 0, maxi(0, before_layers.size() - 1))
+	var focus_after := clampi(focus_index if focus_index >= 0 else 0, 0, maxi(0, after_layers.size() - 1))
+	push_history({
+		"layers": true,
+		"before": before_layers.duplicate(true),
+		"after": after_layers.duplicate(true),
+		"uids_before": before_uids.duplicate(),
+		"uids_after": after_uids.duplicate(),
+		"focus_before": focus_before,
+		"focus_after": focus_after,
+	})
+	_apply_procedural_layers(after_layers, after_uids, focus_after)
+	return true
+
+
+func add_procedural_layer(template_layer: Dictionary = {}) -> int:
+	if package == null:
+		fail("Open a map before adding procedural layers.")
+		return -1
+	ensure_layer_uids()
+	if layers.size() >= Graph.MAX_LAYERS:
+		fail("Maximum procedural layer count (%d) reached." % Graph.MAX_LAYERS)
+		return -1
+	var item := Graph.normalize_layer(template_layer) if not template_layer.is_empty() else Graph.layer()
+	var staged := _normalized_layer_stack(layers)
+	staged.append(item)
+	var staged_uids: Array[int] = layer_uids.duplicate()
+	var new_uid := next_layer_id
+	next_layer_id += 1
+	staged_uids.append(new_uid)
+	var target_idx := staged.size() - 1
+	if not commit_procedural_layers(staged, staged_uids, target_idx):
+		return -1
+	return target_idx
+
+
+func remove_procedural_layer(index: int) -> bool:
+	if package == null:
+		return fail("Open a map before removing procedural layers.")
+	ensure_layer_uids()
+	if index < 0 or index >= layers.size():
+		return fail("Invalid procedural layer index.")
+	if layers.size() <= 1:
+		return fail("At least one procedural layer must remain.")
+	var staged := _normalized_layer_stack(layers)
+	var staged_uids: Array[int] = layer_uids.duplicate()
+	staged.remove_at(index)
+	staged_uids.remove_at(index)
+	var next_focus := mini(index, staged.size() - 1)
+	return commit_procedural_layers(staged, staged_uids, next_focus)
+
+
+func move_procedural_layer(index: int, target: int) -> bool:
+	if package == null:
+		return fail("Open a map before reordering procedural layers.")
+	ensure_layer_uids()
+	if index < 0 or index >= layers.size() or target < 0 or target >= layers.size():
+		return fail("Invalid procedural layer index.")
+	if index == target:
+		return true
+	var staged := _normalized_layer_stack(layers)
+	var staged_uids: Array[int] = layer_uids.duplicate()
+	var moved_layer: Dictionary = staged.pop_at(index)
+	var moved_uid: int = staged_uids.pop_at(index)
+	staged.insert(target, moved_layer)
+	staged_uids.insert(target, moved_uid)
+	return commit_procedural_layers(staged, staged_uids, target)
+
+
+func set_procedural_layer_enabled(index: int, enabled: bool) -> bool:
+	if package == null:
+		return fail("Open a map before editing procedural layers.")
+	ensure_layer_uids()
+	if index < 0 or index >= layers.size():
+		return fail("Invalid procedural layer index.")
+	var staged := _normalized_layer_stack(layers)
+	if bool(staged[index].get("enabled", true)) == enabled:
+		return true
+	staged[index]["enabled"] = enabled
+	return commit_procedural_layers(staged, layer_uids.duplicate(), index)
+
+
+func set_procedural_layer_opacity(index: int, value: float) -> bool:
+	if package == null:
+		return fail("Open a map before editing procedural layers.")
+	ensure_layer_uids()
+	if index < 0 or index >= layers.size():
+		return fail("Invalid procedural layer index.")
+	if not is_finite(value) or value < 0.0 or value > 1.0:
+		return fail("Layer opacity must be between 0.0 and 1.0.")
+	var staged := _normalized_layer_stack(layers)
+	if is_equal_approx(float(staged[index].get("opacity", 1.0)), value):
+		return true
+	staged[index]["opacity"] = value
+	return commit_procedural_layers(staged, layer_uids.duplicate(), index)
+
+
+func replace_procedural_layers(staged_stack: Array, focus_index: int = -1, staged_uids: Array[int] = []) -> bool:
+	return commit_procedural_layers(staged_stack, staged_uids, focus_index)
+
+
+func _apply_procedural_layers(state_layers: Array, state_uids: Array[int], focus_index: int = -1) -> void:
+	layers = _normalized_layer_stack(state_layers)
+	layer_uids = state_uids.duplicate()
+	ensure_layer_uids()
+	layer_stack_revision += 1
+	var sel := clampi(focus_index, 0, maxi(0, layers.size() - 1)) if focus_index >= 0 else -1
+	layers_changed.emit(sel)
 
 
 func begin_stroke(layer := Terrain.Layer.HEIGHT) -> void:
@@ -737,6 +938,13 @@ func apply_history(change: Dictionary, direction: String) -> void:
 		paths_changed.emit()
 	elif change.has("object"):
 		apply_object_transform(change["object"], change[direction])
+	elif change.has("object_batch"):
+		var obj_batch: Array = change["object_batch"]
+		var ordered_objs := obj_batch.duplicate()
+		if direction == "before":
+			ordered_objs.reverse()
+		for item: Dictionary in ordered_objs:
+			apply_object_transform(item["key"], item[direction])
 	elif change.has("object_label"):
 		apply_object_label(change["object_label"], String(change[direction]))
 	elif change.has("object_add") or change.has("object_add_removed"):
@@ -776,11 +984,21 @@ func apply_history(change: Dictionary, direction: String) -> void:
 		_apply_environment_edits(change[direction])
 	elif change.has("profile_conversion"):
 		_apply_profile_conversion(change[direction])
+	elif change.has("layers"):
+		if has_preview():
+			clear_preview()
+		var uid_key := "uids_before" if direction == "before" else "uids_after"
+		var focus_key := "focus_before" if direction == "before" else "focus_after"
+		_apply_procedural_layers(change[direction] as Array, _to_int_array(change.get(uid_key, [])), int(change.get(focus_key, -1)))
 	else:
 		var materials := {}
 		for layer: int in change.get("materials", {}):
 			materials[layer] = change["materials"][layer][direction]
 		apply_channels(change[direction], materials)
+		if change.has("layers_before") and change.has("layers_after"):
+			var l_key := "layers_before" if direction == "before" else "layers_after"
+			var u_key := "uids_before" if direction == "before" else "uids_after"
+			_apply_procedural_layers(change[l_key] as Array, _to_int_array(change.get(u_key, [])), -1)
 
 
 func path_at(index: int) -> Dictionary:
@@ -1499,6 +1717,86 @@ func object_entries() -> Array[Dictionary]:
 	return result
 
 
+func object_stable_key_for_entry(entry: Dictionary) -> String:
+	if entry.is_empty():
+		return ""
+	if entry.has("added"):
+		var slot := int(entry["added"])
+		if slot >= 0 and slot < object_additions.size():
+			return "obj:add:%d" % int(object_additions[slot].get("id", slot))
+		return ""
+	var base := int(entry.get("base", -1))
+	return "obj:base:%d" % base if base >= 0 else ""
+
+
+func object_stable_key(view: int) -> String:
+	return object_stable_key_for_entry(object_entry(view))
+
+
+func view_for_object_stable_key(key: String) -> int:
+	if key.is_empty():
+		return -1
+	var entries := object_entries()
+	for view in entries.size():
+		if object_stable_key_for_entry(entries[view]) == key:
+			return view
+	return -1
+
+
+func object_odf_for_entry(entry: Dictionary) -> String:
+	if entry.is_empty():
+		return ""
+	if entry.has("added"):
+		var slot := int(entry["added"])
+		if slot < 0 or slot >= object_additions.size():
+			return ""
+		var add: Dictionary = object_additions[slot]
+		if add.has("odf") and not String(add["odf"]).is_empty():
+			return String(add["odf"])
+		var tpl_idx := int(add.get("template", -1))
+		if object_odf_edits.has(tpl_idx):
+			return String(object_odf_edits[tpl_idx])
+		return String(package.objects[tpl_idx].get("odf", "")) if tpl_idx >= 0 and tpl_idx < package.objects.size() else ""
+	var base := int(entry.get("base", -1))
+	if base < 0 or base >= package.objects.size():
+		return ""
+	if object_odf_edits.has(base):
+		return String(object_odf_edits[base])
+	return String(package.objects[base].get("odf", ""))
+
+
+func object_team_for_entry(entry: Dictionary) -> int:
+	if entry.is_empty():
+		return 0
+	if entry.has("added"):
+		var slot := int(entry["added"])
+		if slot < 0 or slot >= object_additions.size():
+			return 0
+		var add: Dictionary = object_additions[slot]
+		if add.has("team"):
+			return int(add["team"])
+		var tpl_idx := int(add.get("template", -1))
+		return int(package.objects[tpl_idx].get("team", 0)) if tpl_idx >= 0 and tpl_idx < package.objects.size() else 0
+	var base := int(entry.get("base", -1))
+	return int(package.objects[base].get("team", 0)) if base >= 0 and base < package.objects.size() else 0
+
+
+func object_label_for_entry(entry: Dictionary) -> String:
+	if entry.is_empty():
+		return ""
+	if entry.has("added"):
+		var slot := int(entry["added"])
+		if slot < 0 or slot >= object_additions.size():
+			return ""
+		return String(object_additions[slot].get("label", ""))
+	var base := int(entry.get("base", -1))
+	if base < 0 or base >= package.objects.size():
+		return ""
+	if object_label_edits.has(base):
+		return String(object_label_edits[base])
+	return String(package.objects[base].get("label", ""))
+
+
 func object_count() -> int:
 	return package.objects.size() - object_removals.size() + object_additions.size()
 
@@ -1721,6 +2019,41 @@ func move_object(view: int, position: Vector3) -> bool:
 		return true
 	push_history({"object": object_history_key(view), "before": before, "after": after})
 	set_object_transform(view, after)
+	return true
+
+
+func move_objects_batch(views: Array[int], delta: Vector3) -> bool:
+	if stroke_active or has_preview():
+		return fail("Finish the current terrain edit first.")
+	if views.is_empty() or not delta.is_finite():
+		return fail("Select one or more objects and a finite offset.")
+	var unique_views: Array[int] = []
+	var seen := {}
+	for v in views:
+		if seen.has(v):
+			continue
+		if not valid_view_object(v):
+			return fail("Selection contains an invalid object index.")
+		seen[v] = true
+		unique_views.append(v)
+	if unique_views.is_empty():
+		return fail("Select one or more valid objects.")
+	if delta.length_squared() <= 1e-10:
+		return true
+	var batch: Array[Dictionary] = []
+	for v in unique_views:
+		var before := object_transform(v)
+		var next_pos := before.origin + delta
+		if not valid_object_position(next_pos):
+			return fail("Group move places object #%d outside the supported terrain bounds." % v)
+		var after := Transform3D(before.basis, next_pos)
+		if before != after:
+			batch.append({"key": object_history_key(v), "before": before, "after": after})
+	if batch.is_empty():
+		return true
+	push_history({"object_batch": batch})
+	for item: Dictionary in batch:
+		apply_object_transform(item["key"], item["after"])
 	return true
 
 
@@ -2253,15 +2586,51 @@ func clear_preview() -> void:
 		refresh_materials(layer, materials[layer])
 
 
-func bake_preview() -> bool:
+func bake_preview(staged_layers: Array = [], staged_uids: Array[int] = []) -> bool:
 	if not has_preview():
 		return fail("Create a terrain preview before baking.")
 	var terrain := package.terrain
 	var materials := terrain.material_previews
 	if not valid_preview(preview_after, materials):
 		return fail("Invalid terrain preview.")
+	var commit_layers := false
+	var before_layers: Array = []
+	var after_layers: Array = []
+	var before_uids: Array[int] = []
+	var after_uids: Array[int] = []
+	if not staged_layers.is_empty():
+		var graph := Graph.new()
+		if not graph.validate_stack(staged_layers):
+			return fail(graph.error)
+		ensure_layer_uids()
+		before_layers = _normalized_layer_stack(layers)
+		before_uids = layer_uids.duplicate()
+		after_layers = _normalized_layer_stack(staged_layers)
+		if staged_uids.size() == after_layers.size():
+			var seen := {}
+			for uid in staged_uids:
+				var clean_uid := int(uid)
+				if clean_uid <= 0 or seen.has(clean_uid):
+					clean_uid = next_layer_id
+					next_layer_id += 1
+				seen[clean_uid] = true
+				after_uids.append(clean_uid)
+				next_layer_id = maxi(next_layer_id, clean_uid + 1)
+		else:
+			for i in after_layers.size():
+				if i < before_uids.size():
+					after_uids.append(before_uids[i])
+				else:
+					after_uids.append(next_layer_id)
+					next_layer_id += 1
+		commit_layers = (before_layers != after_layers or before_uids != after_uids)
 	var after := preview_after
 	var history := {"before": preview_before, "after": after, "materials": {}}
+	if commit_layers:
+		history["layers_before"] = before_layers.duplicate(true)
+		history["layers_after"] = after_layers.duplicate(true)
+		history["uids_before"] = before_uids.duplicate()
+		history["uids_after"] = after_uids.duplicate()
 	terrain.material_previews = {}
 	for layer: int in materials:
 		var previous := {}
@@ -2272,6 +2641,8 @@ func bake_preview() -> bool:
 	preview_after = {}
 	push_history(history)
 	apply_channels(after, materials)
+	if commit_layers:
+		_apply_procedural_layers(after_layers, after_uids, -1)
 	return true
 
 

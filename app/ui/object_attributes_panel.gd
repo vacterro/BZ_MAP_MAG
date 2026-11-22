@@ -12,9 +12,13 @@ signal updated(message: String)
 signal focus_requested(view_index: int)
 signal sound_edit_requested(view_index: int)
 signal selection_cleared
+signal select_team_requested(team_id: int)
+signal select_class_requested(odf: String)
 
 var document: Document
 var selected_view := -1
+var selected_views: Array[int] = []
+var _group_centroid := Vector3.ZERO
 var header_label := Label.new()
 var pos_x := SliderField.new()
 var pos_y := SliderField.new()
@@ -27,6 +31,8 @@ var apply_label_btn := Button.new()
 var dup_btn := Button.new()
 var remove_btn := Button.new()
 var sound_btn := Button.new()
+var select_team_btn := Button.new()
+var select_class_btn := Button.new()
 var meta_label := Label.new()
 var status_label := Label.new()
 var _rebuilding := false
@@ -90,6 +96,16 @@ func _ready() -> void:
 		if selected_view >= 0:
 			sound_edit_requested.emit(selected_view))
 	act_row.add_child(sound_btn)
+	select_team_btn.text = "Select Team"
+	select_team_btn.pressed.connect(func():
+		if document != null and document.valid_view_object(selected_view):
+			select_team_requested.emit(document.object_team(selected_view)))
+	act_row.add_child(select_team_btn)
+	select_class_btn.text = "Select Class"
+	select_class_btn.pressed.connect(func():
+		if document != null and document.valid_view_object(selected_view):
+			select_class_requested.emit(document.object_odf(selected_view)))
+	act_row.add_child(select_class_btn)
 
 	var cap_sec := CollapsibleSection.new("Native Metadata & Capabilities", "obj_meta", false)
 	add_child(cap_sec)
@@ -119,15 +135,36 @@ func _add_coord_row(parent: Control, caption: String, field: SliderField, lo: fl
 
 
 func refresh(doc: Document, view_index: int) -> void:
+	var views: Array[int] = []
+	if view_index >= 0:
+		views.append(view_index)
+	refresh_selection(doc, views)
+
+
+func refresh_selection(doc: Document, views: Array[int]) -> void:
 	_rebuilding = true
 	document = doc
-	selected_view = view_index
-	var valid := document != null and document.valid_view_object(selected_view)
-	for ctrl in [pos_x, pos_y, pos_z, yaw_deg]:
+	selected_views.clear()
+	if document != null:
+		var seen := {}
+		for v in views:
+			if document.valid_view_object(v) and not seen.has(v):
+				seen[v] = true
+				selected_views.append(v)
+	selected_view = selected_views[selected_views.size() - 1] if not selected_views.is_empty() else -1
+	var is_multi := selected_views.size() > 1
+	var valid := document != null and selected_view >= 0
+	for ctrl in [pos_x, pos_y, pos_z]:
 		(ctrl as SliderField).editable = valid
-	for btn in [apply_xform_btn, focus_btn, apply_label_btn, dup_btn, remove_btn]:
-		(btn as Button).disabled = not valid
-	label_field.editable = valid
+	yaw_deg.editable = valid and not is_multi
+	apply_xform_btn.disabled = not valid
+	apply_xform_btn.text = "Apply Group Move" if is_multi else "Apply Transform"
+	focus_btn.disabled = not valid
+	for btn in [apply_label_btn, dup_btn, remove_btn]:
+		(btn as Button).disabled = not valid or is_multi
+	select_team_btn.disabled = not valid
+	select_class_btn.disabled = not valid
+	label_field.editable = valid and not is_multi
 	if not valid:
 		header_label.text = "No object selected. Pick an object in Scene Tree or viewport (Move Object)."
 		label_field.text = ""
@@ -138,16 +175,40 @@ func refresh(doc: Document, view_index: int) -> void:
 		_rebuilding = false
 		return
 
-	var odf := document.object_odf(selected_view)
-	var team := document.object_team(selected_view)
-	var xform := document.object_transform(selected_view)
-	var lbl := document.object_label(selected_view)
 	var terrain := document.package.terrain
 	var lo := Vector2(terrain.origin) * terrain.SPACING
 	var hi := lo + Vector2(terrain.dimensions) * terrain.SPACING
 	pos_x.set_slider_range(lo.x, hi.x)
 	pos_z.set_slider_range(lo.y, hi.y)
 	pos_y.set_slider_range(terrain.min_height - 50.0, terrain.max_height + 100.0)
+
+	if is_multi:
+		var sum := Vector3.ZERO
+		var teams := {}
+		var classes := {}
+		for v in selected_views:
+			sum += document.object_position(v)
+			teams[document.object_team(v)] = true
+			classes[document.object_odf(v)] = true
+		_group_centroid = sum / float(selected_views.size())
+		pos_x.set_value_no_signal(_group_centroid.x)
+		pos_y.set_value_no_signal(_group_centroid.y)
+		pos_z.set_value_no_signal(_group_centroid.z)
+		yaw_deg.set_value_no_signal(0.0)
+		label_field.text = ""
+		sound_btn.visible = false
+		sound_btn.disabled = true
+		header_label.text = "Multi-Selection: %d objects (Group Move = 1 Undo)" % selected_views.size()
+		meta_label.text = "Selected: %d objects · %d team(s) · %d ODF class(es)\nEdit centroid X/Y/Z and click Apply Group Move to shift all selected objects atomically." % [
+			selected_views.size(), teams.size(), classes.size()]
+		status_label.text = ""
+		_rebuilding = false
+		return
+
+	var odf := document.object_odf(selected_view)
+	var team := document.object_team(selected_view)
+	var xform := document.object_transform(selected_view)
+	var lbl := document.object_label(selected_view)
 	pos_x.set_value_no_signal(xform.origin.x)
 	pos_y.set_value_no_signal(xform.origin.y)
 	pos_z.set_value_no_signal(xform.origin.z)
@@ -176,9 +237,23 @@ func refresh(doc: Document, view_index: int) -> void:
 
 
 func apply_transform() -> void:
-	if _rebuilding or document == null or not document.valid_view_object(selected_view):
+	if _rebuilding or document == null or selected_view < 0:
 		return
 	var target_pos := Vector3(pos_x.value, pos_y.value, pos_z.value)
+	if selected_views.size() > 1:
+		var delta := target_pos - _group_centroid
+		if delta.length() <= 0.001:
+			status_label.text = "Group position unchanged."
+			return
+		if not document.move_objects_batch(selected_views, delta):
+			status_label.text = "[ERR] " + document.error
+			return
+		refresh_selection(document, selected_views)
+		status_label.text = "[OK] Moved %d objects (1 undo step)." % selected_views.size()
+		updated.emit("Moved %d selected objects by (%.1f, %.1f, %.1f) (1 undo step)." % [selected_views.size(), delta.x, delta.y, delta.z])
+		return
+	if not document.valid_view_object(selected_view):
+		return
 	var cur := document.object_transform(selected_view)
 	var cur_yaw := rad_to_deg(cur.basis.get_euler().y)
 	var moved := false

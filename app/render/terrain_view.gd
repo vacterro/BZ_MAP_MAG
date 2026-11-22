@@ -9,8 +9,8 @@ const MIN_STEP := 1
 const MAX_STEP := 4
 const LOD_NEAR_SAMPLES := 160.0
 const LOD_MID_SAMPLES := 384.0
-const LOD_BUDGET_PER_MOVE := 6
-const LOD_BUDGET_PER_FRAME := 8
+const LOD_BUDGET_PER_MOVE := 4
+const LOD_BUDGET_PER_FRAME := 4
 
 var document: Document
 var palette: Dictionary
@@ -47,6 +47,9 @@ var total_chunk_rebuilds := 0
 var _last_lod_cam_sample := Vector2(INF, INF)
 var _last_lod_brush := Vector2(INF, INF)
 var _index_cache := {}
+var _chunk_buffers := {}
+var _cursor_mesh := ImmediateMesh.new()
+var _cursor_material := StandardMaterial3D.new()
 var center := Vector3.ZERO
 var yaw := 0.55
 var pitch := 0.78
@@ -87,6 +90,9 @@ func _ready() -> void:
 	water_mesh.hide()
 	path_mesh.hide()
 	marker.hide()
+	_cursor_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_cursor_material.albedo_color = palette["borderHighlight"]
+	marker.mesh = _cursor_mesh
 	object_cursor.hide()
 	anchor_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	anchor_material.albedo_color = palette["borderHighlight"]
@@ -399,12 +405,23 @@ func build_chunk(start: Vector2i, step_override: int = 0) -> void:
 	var bottom_step := effective_chunk_step(start + Vector2i(0, CHUNK)) if end.y < max_z else step
 	var nx := ceili(float(end.x - start.x) / step) + 1
 	var nz := ceili(float(end.y - start.y) / step) + 1
-	var points := PackedVector3Array()
-	var normals := PackedVector3Array()
-	var colors := PackedColorArray()
-	points.resize(nx * nz)
-	normals.resize(nx * nz)
-	colors.resize(nx * nz)
+	var buf_key := Vector2i(nx, nz)
+	var points: PackedVector3Array
+	var normals: PackedVector3Array
+	var colors: PackedColorArray
+	if _chunk_buffers.has(buf_key):
+		var cached_buf: Array = _chunk_buffers[buf_key]
+		points = cached_buf[0]
+		normals = cached_buf[1]
+		colors = cached_buf[2]
+	else:
+		points = PackedVector3Array()
+		normals = PackedVector3Array()
+		colors = PackedColorArray()
+		points.resize(nx * nz)
+		normals.resize(nx * nz)
+		colors.resize(nx * nz)
+		_chunk_buffers[buf_key] = [points, normals, colors]
 	var amplitude := maxf(0.1, terrain.max_height - terrain.min_height)
 	var inv_amplitude := 1.0 / amplitude
 	var need_seam := (left_step > step) or (right_step > step) or (top_step > step) or (bottom_step > step)
@@ -412,38 +429,51 @@ func build_chunk(start: Vector2i, step_override: int = 0) -> void:
 	var tile_preview := graph_preview_layer == Terrain.Layer.TILES
 	var base_col: Color = palette["surface"]
 	var hi_col: Color = palette["textPrimary"]
+	var br := base_col.r
+	var bg := base_col.g
+	var bb := base_col.b
+	var dr := hi_col.r - br
+	var dg := hi_col.g - bg
+	var db := hi_col.b - bb
 	var min_h := terrain.min_height
 	var last_i := nx - 1
 	var last_j := nz - 1
+	var two_step_spacing := float(step * 2) * spacing
 	for j in nz:
 		var z := mini(start.y + j * step, end.y)
 		var z_lo := maxi(z - step, 0)
 		var z_hi := mini(z + step, max_z)
 		var dz_world := float(z_hi - z_lo) * spacing
+		var z_world := float(z + oz) * spacing
 		var z_row := z * row
 		var z_lo_row := z_lo * row
 		var z_hi_row := z_hi * row
 		var on_z_edge := (j == 0 or j == last_j)
+		var z_interior := (z_hi - z_lo == step * 2)
 		var row_base := j * nx
 		for i in nx:
 			var x := mini(start.x + i * step, end.x)
 			var x_lo := maxi(x - step, 0)
 			var x_hi := mini(x + step, max_x)
-			var dx_world := float(x_hi - x_lo) * spacing
 			var py := seam_snapped_height(x, z, start, end, step, left_step, right_step, top_step, bottom_step, heights, row) if (need_seam and (on_z_edge or i == 0 or i == last_i)) else heights[z_row + x]
 			var index := row_base + i
-			points[index] = Vector3(float(x + ox) * spacing, py, float(z + oz) * spacing)
+			points[index] = Vector3(float(x + ox) * spacing, py, z_world)
 			var dhy := heights[z_row + x_hi] - heights[z_row + x_lo]
 			var dhz := heights[z_hi_row + x] - heights[z_lo_row + x]
-			normals[index] = Vector3(-dhy * dz_world, dx_world * dz_world, -dhz * dx_world).normalized()
+			if z_interior and (x_hi - x_lo == step * 2):
+				normals[index] = Vector3(-dhy, two_step_spacing, -dhz).normalized()
+			else:
+				var dx_world := float(x_hi - x_lo) * spacing
+				normals[index] = Vector3(-dhy * dz_world, dx_world * dz_world, -dhz * dx_world).normalized()
 			if tile_preview:
 				var slot := terrain.material_value(Terrain.Layer.TILES, terrain.block_at(Vector2i(x, z))) & 15
-				colors[index] = base_col.lerp(hi_col, slot / 15.0)
+				var tt := slot / 15.0
+				colors[index] = Color(br + dr * tt, bg + dg * tt, bb + db * tt)
 			elif color_preview:
 				colors[index] = terrain.color_at(x, z)
 			else:
-				var fraction := clampf((py - min_h) * inv_amplitude, 0.0, 1.0)
-				colors[index] = base_col.lerp(hi_col, 0.25 + 0.69 * fraction)
+				var ct := 0.25 + 0.69 * clampf((py - min_h) * inv_amplitude, 0.0, 1.0)
+				colors[index] = Color(br + dr * ct, bg + dg * ct, bb + db * ct)
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = points
@@ -690,27 +720,27 @@ func sample_at(pixel: Vector2) -> Vector2:
 
 func show_cursor(point: Vector2) -> void:
 	if point.x >= 0.0:
-		var moved := brush_focus.distance_to(point) >= CHUNK * 0.5 or brush_focus.x < 0.0
+		var moved := brush_focus.x < 0.0 or brush_focus.distance_squared_to(point) >= float(CHUNK * CHUNK) * 0.25
 		brush_focus = point
 		if moved:
 			schedule_lod()
 	marker.visible = point.x >= 0
 	if not marker.visible:
 		return
-	var mesh := ImmediateMesh.new()
-	var ink := StandardMaterial3D.new()
-	ink.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	ink.albedo_color = palette["borderHighlight"]
-	mesh.surface_begin(Mesh.PRIMITIVE_LINE_STRIP, ink)
+	_cursor_material.albedo_color = palette["borderHighlight"]
+	_cursor_mesh.clear_surfaces()
+	_cursor_mesh.surface_begin(Mesh.PRIMITIVE_LINE_STRIP, _cursor_material)
+	var r_samples := radius_m / document.package.terrain.SPACING
 	for i in 49:
-		var offset := Vector2.from_angle(TAU * i / 48.0) * (radius_m / document.package.terrain.SPACING)
+		var ang := TAU * i / 48.0
+		var offset := Vector2.from_angle(ang) * r_samples
 		if square_brush:
-			offset /= maxf(absf(cos(TAU * i / 48.0)), absf(sin(TAU * i / 48.0)))
+			offset /= maxf(absf(cos(ang)), absf(sin(ang)))
 		var p := point_world(point + offset)
 		p.y += 1.5
-		mesh.surface_add_vertex(p)
-	mesh.surface_end()
-	marker.mesh = mesh
+		_cursor_mesh.surface_add_vertex(p)
+	_cursor_mesh.surface_end()
+	marker.mesh = _cursor_mesh
 
 
 func show_path(path: Dictionary) -> void:

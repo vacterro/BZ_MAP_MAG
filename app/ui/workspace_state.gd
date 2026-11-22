@@ -103,8 +103,11 @@ signal preset_changed(preset_id: int)
 signal pin_changed(pinned: bool)
 signal layout_changed
 signal selection_changed(kind: String, index: int)
+signal object_selection_changed(views: Array[int])
 signal editor_visibility_changed(channel: String, visible: bool)
 signal section_toggled(section_id: String, collapsed: bool)
+signal sections_reset
+signal preview_owner_changed(owner: String)
 
 var active_tool: int = Tool.TERRAIN_BRUSH
 var active_inspector_context: int = InspectorContext.TERRAIN_BRUSH
@@ -119,8 +122,10 @@ var bottom_log_visible := false
 var left_dock_width: int = DEFAULT_LEFT_WIDTH
 var right_dock_width: int = DEFAULT_RIGHT_WIDTH
 var viewport_split_ratio: float = DEFAULT_SPLIT_RATIO
+var stack_2d_below := false
 
 var selected_object_view := -1
+var selected_object_views: Array[int] = []
 var selected_path_index := -1
 var selected_path_point := -1
 var selected_layer_index := 0
@@ -208,13 +213,44 @@ func is_section_collapsed(section_id: String, default_collapsed := false) -> boo
 func set_section_collapsed(section_id: String, collapsed: bool) -> void:
 	if section_id.is_empty():
 		return
+	if collapsed_sections.has(section_id) and bool(collapsed_sections[section_id]) == collapsed:
+		return
 	collapsed_sections[section_id] = collapsed
 	section_toggled.emit(section_id, collapsed)
 
 
+func set_preview_owner(next_owner: String) -> void:
+	if active_preview_owner == next_owner:
+		return
+	active_preview_owner = next_owner
+	preview_owner_changed.emit(active_preview_owner)
+
+
 func select_object(view_index: int) -> void:
 	selected_object_view = view_index
+	selected_object_views.clear()
+	if view_index >= 0:
+		selected_object_views.append(view_index)
+	object_selection_changed.emit(selected_object_views.duplicate())
 	selection_changed.emit("object", view_index)
+
+
+func select_objects(views: Array[int] = [], primary: int = -1) -> void:
+	var clean: Array[int] = []
+	var seen := {}
+	for v in views:
+		if v >= 0 and not seen.has(v):
+			seen[v] = true
+			clean.append(v)
+	selected_object_views = clean
+	if primary >= 0 and clean.has(primary):
+		selected_object_view = primary
+	elif not clean.is_empty():
+		selected_object_view = clean[clean.size() - 1]
+	else:
+		selected_object_view = -1
+	object_selection_changed.emit(selected_object_views.duplicate())
+	selection_changed.emit("object", selected_object_view)
 
 
 func select_path(path_index: int, point_index: int = -1) -> void:
@@ -307,10 +343,10 @@ func exit_fullscreen() -> void:
 
 func clamp_to_viewport(viewport_size: Vector2) -> void:
 	var total_w := maxf(640.0, viewport_size.x)
-	var min_center := 320.0
+	var min_center := 380.0 if total_w >= 1000.0 else 320.0
 	var max_side_budget := maxf(300.0, total_w - min_center)
-	left_dock_width = clampi(left_dock_width, 168, int(minf(380.0, max_side_budget * 0.48)))
-	right_dock_width = clampi(right_dock_width, 224, int(minf(460.0, max_side_budget * 0.56)))
+	left_dock_width = clampi(left_dock_width, 168, int(minf(380.0, max_side_budget * 0.46)))
+	right_dock_width = clampi(right_dock_width, 224, int(minf(460.0, max_side_budget * 0.54)))
 	if left_dock_visible and right_dock_visible and float(left_dock_width + right_dock_width) > max_side_budget:
 		var scale := max_side_budget / float(left_dock_width + right_dock_width)
 		left_dock_width = maxi(168, int(floor(float(left_dock_width) * scale)))
@@ -326,6 +362,7 @@ func reset_layout(viewport_size: Vector2 = Vector2(1280, 720)) -> void:
 	left_dock_width = DEFAULT_LEFT_WIDTH
 	right_dock_width = DEFAULT_RIGHT_WIDTH
 	viewport_split_ratio = DEFAULT_SPLIT_RATIO
+	stack_2d_below = false
 	active_preset = LayoutPreset.DEFAULT
 	center_mode = CenterMode.SPLIT_3D_2D
 	left_tab = LeftTab.SCENE
@@ -336,6 +373,7 @@ func reset_layout(viewport_size: Vector2 = Vector2(1280, 720)) -> void:
 	preset_changed.emit(active_preset)
 	center_mode_changed.emit(center_mode)
 	left_tab_changed.emit(left_tab)
+	sections_reset.emit()
 	layout_changed.emit()
 
 
@@ -343,6 +381,7 @@ func save_to_config(cfg: ConfigFile) -> void:
 	cfg.set_value("workspace", "left_width", left_dock_width)
 	cfg.set_value("workspace", "right_width", right_dock_width)
 	cfg.set_value("workspace", "split_ratio", viewport_split_ratio)
+	cfg.set_value("workspace", "stack_2d_below", stack_2d_below)
 	cfg.set_value("workspace", "left_tab", left_tab)
 	cfg.set_value("workspace", "center_mode", center_mode if center_mode in [CenterMode.SPLIT_3D_2D, CenterMode.VIEW_3D, CenterMode.VIEW_2D, CenterMode.NODES] else CenterMode.SPLIT_3D_2D)
 	cfg.set_value("workspace", "preset", active_preset)
@@ -360,6 +399,7 @@ func load_from_config(cfg: ConfigFile, viewport_size: Vector2 = Vector2(1280, 72
 	left_dock_width = int(cfg.get_value("workspace", "left_width", DEFAULT_LEFT_WIDTH))
 	right_dock_width = int(cfg.get_value("workspace", "right_width", DEFAULT_RIGHT_WIDTH))
 	viewport_split_ratio = float(cfg.get_value("workspace", "split_ratio", DEFAULT_SPLIT_RATIO))
+	stack_2d_below = bool(cfg.get_value("workspace", "stack_2d_below", false))
 	left_tab = clampi(int(cfg.get_value("workspace", "left_tab", LeftTab.SCENE)), LeftTab.SCENE, LeftTab.TOOLS)
 	var saved_mode := int(cfg.get_value("workspace", "center_mode", CenterMode.SPLIT_3D_2D))
 	center_mode = saved_mode if saved_mode in [CenterMode.SPLIT_3D_2D, CenterMode.VIEW_3D, CenterMode.VIEW_2D, CenterMode.NODES] else CenterMode.SPLIT_3D_2D
@@ -376,3 +416,4 @@ func load_from_config(cfg: ConfigFile, viewport_size: Vector2 = Vector2(1280, 72
 	if active_preset != LayoutPreset.FULLSCREEN and not left_dock_visible and not right_dock_visible:
 		right_dock_visible = true
 	clamp_to_viewport(viewport_size)
+	sections_reset.emit()

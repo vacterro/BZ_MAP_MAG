@@ -57,6 +57,7 @@ var vrv_dir := ""
 var active_env: Dictionary = {}
 var layered_index: Dictionary = {}
 var catalog_stamp := ""
+var catalog_mod_profile := ""
 var catalog_revision := 0
 var in_map_templates: Dictionary = {} # odf_stem_lower -> view_index
 var catalog_entries: Array[Dictionary] = []
@@ -180,7 +181,8 @@ func _ready() -> void:
 
 
 func begin(doc: Document, reg: ModRegistry, game: String, vrv: String) -> void:
-	var same_env := (document == doc and registry == reg and game_dir == game and vrv_dir == vrv and not catalog_entries.is_empty())
+	var same_env := (document == doc and registry == reg and game_dir == game and vrv_dir == vrv
+		and doc != null and catalog_mod_profile == doc.mod_profile and not catalog_entries.is_empty())
 	document = doc
 	registry = reg
 	game_dir = game
@@ -239,6 +241,7 @@ func refresh_catalog() -> void:
 			in_map_templates[stem] = view
 
 	active_env = registry.resolve_content_environment(document, game_dir, vrv_dir)
+	catalog_mod_profile = document.mod_profile
 	var layered_roots: Array[Dictionary] = []
 	for lr_v in active_env.get("layeredRoots", []):
 		layered_roots.append(lr_v as Dictionary)
