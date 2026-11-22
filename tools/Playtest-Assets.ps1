@@ -7,13 +7,14 @@ function Get-BzmagAppSourceDigest([string] $AppDir) {
     $files = Get-ChildItem -LiteralPath $resolvedApp -Recurse -File | Where-Object {
         $rel = $_.FullName.Substring($resolvedApp.Length + 1).Replace('\','/')
         (-not $rel.StartsWith('.godot/')) -and (-not $rel.StartsWith('tests/')) -and ($_.Extension.ToLowerInvariant() -in $allowedExts)
-    } | Sort-Object { $_.FullName.Substring($resolvedApp.Length + 1).Replace('\','/') }
+    }
     $parts = [System.Collections.Generic.List[string]]::new()
     foreach ($f in $files) {
         $rel = $f.FullName.Substring($resolvedApp.Length + 1).Replace('\','/')
         $hash = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         $parts.Add("${rel}:${hash}")
     }
+    $parts.Sort([StringComparer]::Ordinal)
     return Get-StringSha256 ($parts -join "`n")
 }
 
@@ -23,13 +24,14 @@ function Get-BzmagImportDigest([string] $AppDir) {
     $files = Get-ChildItem -LiteralPath $resolvedApp -Recurse -File -Filter '*.import' | Where-Object {
         $rel = $_.FullName.Substring($resolvedApp.Length + 1).Replace('\','/')
         -not $rel.StartsWith('.godot/')
-    } | Sort-Object { $_.FullName.Substring($resolvedApp.Length + 1).Replace('\','/') }
+    }
     $parts = [System.Collections.Generic.List[string]]::new()
     foreach ($f in $files) {
         $rel = $f.FullName.Substring($resolvedApp.Length + 1).Replace('\','/')
         $hash = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         $parts.Add("${rel}:${hash}")
     }
+    $parts.Sort([StringComparer]::Ordinal)
     return Get-StringSha256 ($parts -join "`n")
 }
 

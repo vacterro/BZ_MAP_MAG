@@ -288,12 +288,33 @@ if ($runBuild) {
         }
         $bNotes.Add("Packaged BZ_MAP_MAG.exe --headless --quit exited 0")
 
-        if (Test-Path -LiteralPath $plgrBzn -PathType Leaf) {
-            $valOut = & (Join-Path $PSScriptRoot 'Start-Playtest.ps1') -Game $Game -ModProfile stock -Mission $plgrBzn -ValidateOnly
+        $validateMission = ''
+        $emLogForBuild = Join-Path $runRoot 'env-and-mission\godot.log'
+        if (Test-Path -LiteralPath $emLogForBuild -PathType Leaf) {
+            $mExp = Select-String -Path $emLogForBuild -Pattern '^EXPORTED_W567_PLAYTEST_BZN=(.+)$' | Select-Object -First 1
+            if ($mExp) {
+                $candExp = $mExp.Matches[0].Groups[1].Value.Trim()
+                if (Test-Path -LiteralPath $candExp -PathType Leaf) { $validateMission = $candExp }
+            }
+        }
+        if (-not $validateMission -and (Test-Path -LiteralPath $plgrBzn -PathType Leaf)) {
+            $stageDir = Join-Path $runRoot 'build-validate-stock'
+            New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+            foreach ($item in Get-ChildItem -LiteralPath (Split-Path -Parent $plgrBzn) -Filter 'plgr.*' -File) {
+                Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $stageDir $item.Name) -Force
+            }
+            $stageInf = Join-Path $stageDir 'plgr.inf'
+            if (-not (Test-Path -LiteralPath $stageInf -PathType Leaf)) {
+                [IO.File]::WriteAllText($stageInf, "[DESCRIPTION]`r`nmissionName = `"plgr`"`r`n", [Text.Encoding]::ASCII)
+            }
+            $validateMission = Join-Path $stageDir 'plgr.bzn'
+        }
+        if ($validateMission) {
+            $valOut = & (Join-Path $PSScriptRoot 'Start-Playtest.ps1') -Game $Game -ModProfile stock -Mission $validateMission -ValidateOnly
             if ($valOut.LaunchRoute -ne 'native' -or $valOut.BznVersion -ne 1192) {
                 throw "Packaged validator returned unexpected route=$($valOut.LaunchRoute) ver=$($valOut.BznVersion)"
             }
-            $bNotes.Add("Packaged Start-Playtest.ps1 -ValidateOnly (no -Godot) admitted Stock 1192 native")
+            $bNotes.Add("Packaged Start-Playtest.ps1 -ValidateOnly (no -Godot) admitted Stock 1192 native ($validateMission)")
         }
     } catch {
         $bOk = $false
