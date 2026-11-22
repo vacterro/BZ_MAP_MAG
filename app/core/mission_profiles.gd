@@ -52,8 +52,8 @@ const RULE_CONTRACTS := {
 		"dll_note": "Stock Instant.dll (29 KB, SHA-256 c3dc76d3…): spawns player Recycler at 'Recycler' and CPU base at 'RecyclerEnemy' with gtow2–gtow5 and AIP staging/hold points.",
 		"evidence": "BZ2R/Missions/Instant.dll + BZ2R/maps/Missions/Instant/DUNESI/dunesi.bzn.",
 		"semantics": "VERIFIED_STATIC",
-		"required": ["Recycler", "RecyclerEnemy", "edge_path"],
-		"recommended": ["gtow1", "gtow2", "gtow3", "gtow4", "gtow5", "hold1", "hold2", "stage1", "turretEnemy1", "turretEnemy2"],
+		"required": ["Recycler", "RecyclerEnemy", "edge_path", "hold1", "hold2"],
+		"recommended": ["gtow1", "gtow2", "gtow3", "gtow4", "gtow5", "stage1", "turretEnemy1", "turretEnemy2"],
 		"default_team": 1,
 	},
 	"mpi.stock": {

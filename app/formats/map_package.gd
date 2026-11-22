@@ -119,10 +119,9 @@ func open(path: String) -> bool:
 			water_name = roles["wat"]
 	if roles.has("sky"):
 		var sky_path := folder.path_join(roles["sky"])
+		sky_name = roles["sky"]
 		sky_bytes = FileAccess.get_file_as_bytes(sky_path)
 		sky_env = SkyEnv.decode_sky(sky_bytes)
-		if bool(sky_env.get("ok", false)):
-			sky_name = roles["sky"]
 	return true
 
 

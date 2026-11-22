@@ -160,10 +160,14 @@ func open(path: String) -> bool:
 		if not read_water_edits(saved.get("waterEdits", {})):
 			return false
 		if saved.has("environmentEdits"):
-			var env_err := SkyEnv.validate_edits(saved["environmentEdits"])
+			var raw_env: Variant = saved["environmentEdits"]
+			if raw_env is Dictionary and not (raw_env as Dictionary).is_empty() and not can_edit_environment():
+				return fail("Invalid project environment edits: " + String(package.sky_env.get("writeRefusalReason", "Map does not have a verified writable native .SKY layout.")))
+			var base_env_fields: Dictionary = package.sky_env.get("fields", {}) if package != null else {}
+			var env_err := SkyEnv.validate_edits(raw_env, base_env_fields)
 			if not env_err.is_empty():
 				return fail("Invalid project environment edits: " + env_err)
-			environment_edits = (saved["environmentEdits"] as Dictionary).duplicate(true)
+			environment_edits = (raw_env as Dictionary).duplicate(true)
 	if not package.check_sources():
 		return fail(package.error)
 	edit_revision += 1
@@ -363,12 +367,20 @@ func _apply_mission_dll(state: Dictionary) -> void:
 	profile_changed.emit()
 
 
+func has_readable_environment() -> bool:
+	return package != null and not package.sky_name.is_empty() and bool(package.sky_env.get("readable", false))
+
+
+func can_edit_environment() -> bool:
+	return package != null and not package.sky_name.is_empty() and SkyEnv.is_writable(package.sky_env)
+
+
 func has_environment_edits() -> bool:
 	return not environment_edits.is_empty()
 
 
 func effective_environment() -> Dictionary:
-	if package == null or not bool(package.sky_env.get("ok", false)):
+	if not has_readable_environment():
 		return {}
 	var base: Dictionary = (package.sky_env.get("fields", {}) as Dictionary).duplicate(true)
 	for k: String in environment_edits:
@@ -379,12 +391,17 @@ func effective_environment() -> Dictionary:
 func set_environment_edits(next_edits: Dictionary) -> bool:
 	if stroke_active or has_preview():
 		return fail("Finish the current terrain edit before changing environment settings.")
-	if package == null or not bool(package.sky_env.get("ok", false)) or package.sky_name.is_empty():
-		return fail("This map does not have a verified native .SKY file.")
-	var err := SkyEnv.validate_edits(next_edits)
+	if not can_edit_environment():
+		var reason := String(package.sky_env.get("writeRefusalReason", "")) if package != null else ""
+		if reason.is_empty() and package != null:
+			reason = String(package.sky_env.get("error", ""))
+		if reason.is_empty():
+			reason = "This map does not have a verified writable native .SKY layout."
+		return fail(reason)
+	var base_fields: Dictionary = package.sky_env.get("fields", {})
+	var err := SkyEnv.validate_edits(next_edits, base_fields)
 	if not err.is_empty():
 		return fail(err)
-	var base_fields: Dictionary = package.sky_env.get("fields", {})
 	var pruned := {}
 	for k: String in next_edits:
 		var val: Variant = next_edits[k]

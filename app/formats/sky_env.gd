@@ -18,6 +18,41 @@ const CHUNK_SKY1 := "1YKS"
 const SKY1_SIZE := 212
 const MAX_SKY_BYTES := 2 * 1024 * 1024
 
+const CAP_UNREADABLE := "UNREADABLE"
+const CAP_READABLE_SKY := "READABLE_SKY"
+const CAP_KNOWN_LAYOUT := "KNOWN_LAYOUT"
+const CAP_WRITABLE_SKY1 := "WRITABLE_SKY1"
+const CAP_RUNTIME_VERIFIED := "RUNTIME_VERIFIED"
+
+const LAYOUT_V1_7068 := "sky-v1-7068"
+
+## Strictly verified binary .SKY layouts. Only layouts explicitly admitted here
+## with exact chunk order, per-chunk payload sizes and total byte size are
+## eligible for surgical 1YKS writes; all other structurally readable .SKY
+## files stay strictly READABLE_SKY (read-only inspector only).
+const KNOWN_LAYOUTS := {
+	"sky-v1-7068": {
+		"version": 65536,
+		"sizeBytes": 7068,
+		"writableSky1": true,
+		"runtimeVerified": true,
+		"chunks": [
+			["1YKS", 212],
+			["EMOD", 1808],
+			["NIAR", 116],
+			["TLPS", 360],
+			[" GOF", 488],
+			["RRIM", 8],
+			["RATS", 64],
+			["TRPS", 3596],
+			["RTAW", 36],
+			["TLOB", 224],
+			["_VNE", 32],
+			["CVNE", 16],
+		],
+	},
+}
+
 const CHUNK_LABELS := {
 	"_YKS": "SKY_ Header",
 	"1YKS": "SKY1 Core Lighting & Fog",
@@ -40,6 +75,34 @@ const WRITABLE_KEYS := [
 ]
 
 
+static func _match_known_layout(version: int, size_bytes: int, subchunks: Array[Dictionary]) -> String:
+	for layout_id: String in KNOWN_LAYOUTS:
+		var spec: Dictionary = KNOWN_LAYOUTS[layout_id]
+		if int(spec["version"]) != version or int(spec["sizeBytes"]) != size_bytes:
+			continue
+		var expected: Array = spec["chunks"]
+		if subchunks.size() != expected.size():
+			continue
+		var matched := true
+		for i in expected.size():
+			var exp_entry: Array = expected[i]
+			if String(subchunks[i]["tag"]) != String(exp_entry[0]) or int(subchunks[i]["size"]) != int(exp_entry[1]):
+				matched = false
+				break
+		if matched:
+			return layout_id
+	return ""
+
+
+static func is_writable(decoded: Dictionary) -> bool:
+	return (
+		bool(decoded.get("readable", false))
+		and bool(decoded.get("knownLayout", false))
+		and bool(decoded.get("writableSky1", false))
+		and int(decoded.get("sky1Offset", -1)) >= 0
+	)
+
+
 static func _read_cstr(data: PackedByteArray, offset: int, max_len: int) -> String:
 	if offset < 0 or offset + max_len > data.size():
 		return ""
@@ -59,6 +122,14 @@ static func _read_cstr(data: PackedByteArray, offset: int, max_len: int) -> Stri
 static func decode_sky(data: PackedByteArray) -> Dictionary:
 	var out := {
 		"ok": false,
+		"readable": false,
+		"knownLayout": false,
+		"writableSky1": false,
+		"runtimeVerified": false,
+		"capability": CAP_UNREADABLE,
+		"layoutId": "",
+		"writeRefusalReason": "",
+		"duplicateTags": [] as Array[String],
 		"error": "",
 		"version": 0,
 		"sizeBytes": data.size(),
@@ -69,24 +140,33 @@ static func decode_sky(data: PackedByteArray) -> Dictionary:
 	}
 	if data.size() < 12 or data.size() > MAX_SKY_BYTES:
 		out["error"] = "SKY file size out of bounded range (%d bytes)." % data.size()
+		out["writeRefusalReason"] = out["error"]
 		return out
 	var magic := data.slice(0, 4).get_string_from_ascii()
 	if magic != SKY_MAGIC:
 		out["error"] = "Invalid SKY magic '%s' (expected '_YKS')." % magic
+		out["writeRefusalReason"] = out["error"]
 		return out
 	var hdr_sz := data.decode_u32(4)
 	if hdr_sz != 4:
 		out["error"] = "Unexpected SKY header payload size %d." % hdr_sz
+		out["writeRefusalReason"] = out["error"]
 		return out
 	var ver := data.decode_u32(8)
 	out["version"] = ver
 	if ver != SKY_VERSION:
 		out["error"] = "Unsupported SKY version %d (expected %d)." % [ver, SKY_VERSION]
+		out["writeRefusalReason"] = out["error"]
 		return out
 
 	var chunks: Array[Dictionary] = [{"tag": SKY_MAGIC, "label": String(CHUNK_LABELS[SKY_MAGIC]), "offset": 0, "size": 4}]
+	var subchunks: Array[Dictionary] = []
+	var seen_tags := {}
+	var dup_tags: Array[String] = []
 	var off := 12
 	var sky1_body := -1
+	var sky1_count := 0
+	var sky1_bad_size := -1
 	var dome_mesh := ""
 	var chunk_count := 0
 	while off + 8 <= data.size() and chunk_count < 64:
@@ -95,15 +175,28 @@ static func decode_sky(data: PackedByteArray) -> Dictionary:
 		var body_off := off + 8
 		if body_off + sz > data.size():
 			out["error"] = "SKY chunk '%s' at %d exceeds file size (%d > %d)." % [tag, off, body_off + sz, data.size()]
+			out["writeRefusalReason"] = out["error"]
 			return out
-		chunks.append({
+		var entry := {
 			"tag": tag,
 			"label": String(CHUNK_LABELS.get(tag, tag)),
 			"offset": off,
 			"size": sz,
-		})
-		if tag == CHUNK_SKY1 and sz == SKY1_SIZE and sky1_body < 0:
-			sky1_body = body_off
+		}
+		chunks.append(entry)
+		subchunks.append(entry)
+		if seen_tags.has(tag):
+			if not (tag in dup_tags):
+				dup_tags.append(tag)
+		else:
+			seen_tags[tag] = true
+		if tag == CHUNK_SKY1:
+			sky1_count += 1
+			if sz == SKY1_SIZE:
+				if sky1_body < 0:
+					sky1_body = body_off
+			else:
+				sky1_bad_size = sz
 		elif tag == "EMOD" and sz >= 64 and dome_mesh.is_empty():
 			dome_mesh = _read_cstr(data, body_off + 16, 48)
 		off = body_off + sz
@@ -111,9 +204,21 @@ static func decode_sky(data: PackedByteArray) -> Dictionary:
 
 	if off != data.size():
 		out["error"] = "SKY file contains trailing unparsed bytes (%d of %d)." % [data.size() - off, data.size()]
+		out["writeRefusalReason"] = out["error"]
+		return out
+	out["chunks"] = chunks
+	out["duplicateTags"] = dup_tags
+	if sky1_count > 1:
+		out["error"] = "SKY file contains duplicate 1YKS chunks (%d)." % sky1_count
+		out["writeRefusalReason"] = out["error"]
+		return out
+	if sky1_bad_size >= 0:
+		out["error"] = "SKY 1YKS payload size %d does not match verified %d-byte layout." % [sky1_bad_size, SKY1_SIZE]
+		out["writeRefusalReason"] = out["error"]
 		return out
 	if sky1_body < 0:
 		out["error"] = "SKY file is missing the verified 212-byte 1YKS chunk."
+		out["writeRefusalReason"] = out["error"]
 		return out
 
 	var fog_col := [
@@ -148,16 +253,18 @@ static func decode_sky(data: PackedByteArray) -> Dictionary:
 	for val: float in [fog_start, fog_end, vis_range, sun_period, sun_angle, sun_dir_rad, sky_height]:
 		if not is_finite(val):
 			out["error"] = "SKY 1YKS chunk contains non-finite float values."
+			out["writeRefusalReason"] = out["error"]
 			return out
 	for arr: Array in [fog_col, sun_col, amb_col]:
 		for c_v in arr:
 			if not is_finite(float(c_v)):
 				out["error"] = "SKY 1YKS color contains non-finite values."
+				out["writeRefusalReason"] = out["error"]
 				return out
 
 	out["ok"] = true
+	out["readable"] = true
 	out["sky1Offset"] = sky1_body
-	out["chunks"] = chunks
 	out["fields"] = {
 		"fogColor": fog_col,
 		"fogStart": fog_start,
@@ -177,6 +284,29 @@ static func decode_sky(data: PackedByteArray) -> Dictionary:
 		"domeMesh": dome_mesh,
 		"chunkCount": chunks.size(),
 	}
+
+	var matched_layout := ""
+	if dup_tags.is_empty():
+		matched_layout = _match_known_layout(ver, data.size(), subchunks)
+	if not matched_layout.is_empty():
+		var lspec: Dictionary = KNOWN_LAYOUTS[matched_layout]
+		out["layoutId"] = matched_layout
+		out["knownLayout"] = true
+		out["writableSky1"] = bool(lspec.get("writableSky1", false))
+		out["runtimeVerified"] = bool(lspec.get("runtimeVerified", false))
+		if bool(out["runtimeVerified"]):
+			out["capability"] = CAP_RUNTIME_VERIFIED
+		elif bool(out["writableSky1"]):
+			out["capability"] = CAP_WRITABLE_SKY1
+		else:
+			out["capability"] = CAP_KNOWN_LAYOUT
+			out["writeRefusalReason"] = "SKY layout '%s' is recognized read-only; native 1YKS writes are not enabled for this profile." % matched_layout
+	else:
+		out["capability"] = CAP_READABLE_SKY
+		if not dup_tags.is_empty():
+			out["writeRefusalReason"] = "SKY contains duplicate chunk tag(s) (%s); native writer is locked read-only." % ", ".join(dup_tags)
+		else:
+			out["writeRefusalReason"] = "Unverified SKY chunk layout (%d B, %d subchunks); read-only inspection only until layout profile is verified." % [data.size(), subchunks.size()]
 	return out
 
 
@@ -195,7 +325,7 @@ static func valid_color_array(val: Variant) -> bool:
 	return true
 
 
-static func validate_edits(edits: Variant) -> String:
+static func validate_edits(edits: Variant, base_fields: Dictionary = {}) -> String:
 	if not (edits is Dictionary):
 		return "Environment edits must be a dictionary."
 	var d: Dictionary = edits
@@ -220,17 +350,29 @@ static func validate_edits(edits: Variant) -> String:
 			"sunAngle":
 				if not (v is float or v is int) or not is_finite(float(v)) or float(v) < 0.0 or float(v) > 24.0:
 					return "'sunAngle' must be a finite value in [0, 24]."
+	if d.has("fogStart") or d.has("fogEnd"):
+		var has_start := d.has("fogStart") or base_fields.has("fogStart")
+		var has_end := d.has("fogEnd") or base_fields.has("fogEnd")
+		if has_start and has_end:
+			var eff_start := float(d["fogStart"]) if d.has("fogStart") else float(base_fields["fogStart"])
+			var eff_end := float(d["fogEnd"]) if d.has("fogEnd") else float(base_fields["fogEnd"])
+			if not is_finite(eff_start) or not is_finite(eff_end) or eff_start >= eff_end:
+				return "Invalid fog distance range: Fog Start (%.1f m) must be strictly less than Fog End (%.1f m)." % [eff_start, eff_end]
 	return ""
 
 
 ## Encodes validated 1YKS edits into a copy of source_bytes without modifying
 ## any byte outside the exact verified float slots of 1YKS.
+## Refuses any unverified SKY layout (requires WRITABLE_SKY1 admission).
 static func encode_sky(source_bytes: PackedByteArray, edits: Dictionary) -> PackedByteArray:
-	if not validate_edits(edits).is_empty():
-		return PackedByteArray()
 	var decoded := decode_sky(source_bytes)
-	if not bool(decoded["ok"]):
+	if not is_writable(decoded):
 		return PackedByteArray()
+	var base_fields: Dictionary = decoded.get("fields", {})
+	if not validate_edits(edits, base_fields).is_empty():
+		return PackedByteArray()
+	if edits.is_empty():
+		return source_bytes.duplicate()
 	var sky1_off := int(decoded["sky1Offset"])
 	var out := source_bytes.duplicate()
 	if edits.has("fogColor"):
@@ -256,7 +398,7 @@ static func encode_sky(source_bytes: PackedByteArray, edits: Dictionary) -> Pack
 		for i in 4:
 			out.encode_float(sky1_off + 60 + i * 4, clampf(float(ac[i]), 0.0, 1.0))
 	var verify := decode_sky(out)
-	if not bool(verify["ok"]) or out.size() != source_bytes.size():
+	if not is_writable(verify) or out.size() != source_bytes.size():
 		return PackedByteArray()
 	return out
 

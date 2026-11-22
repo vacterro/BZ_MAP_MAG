@@ -485,8 +485,8 @@ func export_native(document: Document, target: String) -> bool:
 		if wat.is_empty():
 			return fail("The native water edits could not be applied to this map.")
 	if document.has_environment_edits():
-		if package.sky_name.is_empty() or package.sky_bytes.is_empty():
-			return fail("Cannot export environment edits: this map has no verified native .SKY file.")
+		if package.sky_name.is_empty() or package.sky_bytes.is_empty() or not SkyEnv.is_writable(package.sky_env):
+			return fail("Cannot export environment edits: " + String(package.sky_env.get("writeRefusalReason", "this map has no verified writable native .SKY layout.")))
 		sky = SkyEnv.encode_sky(package.sky_bytes, document.environment_edits)
 		if sky.is_empty():
 			return fail("The native .SKY environment edits could not be encoded.")
@@ -625,7 +625,7 @@ func export_native(document: Document, target: String) -> bool:
 		if reimported.size() != document.water_layers_effective().size():
 			return rollback(stage, names, "Modified water did not re-import as edited.")
 	if not sky.is_empty():
-		if not bool(reimport.sky_env.get("ok", false)) or reimport.sky_bytes.size() != package.sky_bytes.size():
+		if not SkyEnv.is_writable(reimport.sky_env) or reimport.sky_bytes.size() != package.sky_bytes.size():
 			return rollback(stage, names, "Modified .SKY did not re-import cleanly.")
 		var eff_env := document.effective_environment()
 		var reimp_fields: Dictionary = reimport.sky_env.get("fields", {})
