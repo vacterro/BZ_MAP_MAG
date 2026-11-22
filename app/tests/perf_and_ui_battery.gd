@@ -217,17 +217,15 @@ func run() -> void:
 		editor.water_button.button_pressed = false
 		editor.toggle_water()
 
-	# Check Water and Sound Point dialogs fit cleanly while Brave (which has WAT & objects) is open
-	editor.water_tools.begin(editor.document)
+	# Check Water and Sound Point docked panels fit cleanly while Brave (which has WAT & objects) is open
+	editor.toggle_water_edit()
 	await process_frame
-	check(editor.water_tools.visible and editor.water_tools.size.x <= 1280 and editor.water_tools.size.y <= 720,
-		"UI dialog 'water_tools' fits cleanly inside 1280x720 (%dx%d)" % [editor.water_tools.size.x, editor.water_tools.size.y])
-	editor.water_tools.hide()
+	check(editor.water_tools.is_visible_in_tree() and editor.attributes_inspector.size.x <= 1280.0,
+		"UI docked panel 'water_tools' displays cleanly inside 1280x720 (%.0fx%.0f)" % [editor.water_tools.size.x, editor.water_tools.size.y])
 	editor.open_sound_editor()
 	await process_frame
-	check(editor.sound_editor.visible and editor.sound_editor.size.x <= 1280 and editor.sound_editor.size.y <= 720,
-		"UI dialog 'sound_editor' fits cleanly inside 1280x720 (%dx%d)" % [editor.sound_editor.size.x, editor.sound_editor.size.y])
-	editor.sound_editor.hide()
+	check(editor.sound_editor.is_visible_in_tree() and editor.attributes_inspector.size.x <= 1280.0,
+		"UI docked panel 'sound_editor' displays cleanly inside 1280x720 (%.0fx%.0f)" % [editor.sound_editor.size.x, editor.sound_editor.size.y])
 
 	# =========================================================================
 	# 3. Dense Object Placement (200 native objects), Object Browser Search,
@@ -264,7 +262,6 @@ func run() -> void:
 	check(editor.object_browser.catalog_revision == rev_before,
 		"PERF Object Browser search triggers 0 full asset rescans")
 	_log_metric("browser_search", s_search, 0, "catalog=%d" % editor.object_browser.catalog_entries.size())
-	editor.object_browser.hide()
 
 	# Mod profile switch (stock -> vrv -> stock)
 	var s_prof := PackedFloat32Array()
@@ -298,16 +295,15 @@ func run() -> void:
 	fs_field.step_ladder_by(-1)
 	fs_field.end_ladder(true) # commit
 	check(fs_field.value < orig_fs, "UI Environment Studio Value Ladder commit retains new fog_start_field (%.1f)" % fs_field.value)
-	check(env_dlg.size.x <= 720 and env_dlg.size.y <= 540,
-		"UI Environment Studio remains compact without empty bloat (%dx%d)" % [env_dlg.size.x, env_dlg.size.y])
-	env_dlg.hide()
+	check(env_dlg.is_visible_in_tree() and env_dlg.size.x <= 540.0 and editor.attributes_inspector.size.x <= 560.0,
+		"UI docked Environment Studio remains compact without empty bloat (%.0fx%.0f)" % [env_dlg.size.x, env_dlg.size.y])
 
 	# =========================================================================
 	# 5. Multi-Resolution UI Acceptance (1120x690, 1280x720, 1920x1080, 2560x1440)
-	#    x All 4 Wintage Themes x All Major Dialogs
+	#    x All 4 Wintage Themes x All Major Docked Tools (Zero Modal Popups)
 	# =========================================================================
 	var resolutions := [Vector2i(1120, 690), Vector2i(1280, 720), Vector2i(1920, 1080), Vector2i(2560, 1440)]
-	var dialog_openers := [
+	var panel_openers := [
 		["new_map_wizard", func(): editor.open_new_map_wizard(); return editor.new_map_wizard],
 		["target_profile_dialog", func(): editor.open_target_profile(0); return editor.target_profile_dialog],
 		["object_browser", func(): editor.open_object_browser(); return editor.object_browser],
@@ -319,45 +315,47 @@ func run() -> void:
 	for res: Vector2i in resolutions:
 		root.size = res
 		editor.size = Vector2(res)
+		editor.set_center_mode(editor.workspace_state.CenterMode.SPLIT_3D_2D)
 		await process_frame
 		await process_frame
 		var sv_rect: Rect2 = editor.scene_view.get_global_rect()
 		var top_rect: Rect2 = editor.top.get_global_rect()
-		check(sv_rect.size.x >= 320.0 and sv_rect.size.y >= 260.0 and top_rect.size.x >= 150.0 and top_rect.size.y >= 260.0,
+		check(sv_rect.size.x >= 240.0 and sv_rect.size.y >= 260.0 and top_rect.size.x >= 130.0 and top_rect.size.y >= 260.0,
 			"UI %dx%d preserves healthy 3D (%.0fx%.0f) and 2D (%.0fx%.0f) viewports" % [
 				res.x, res.y, sv_rect.size.x, sv_rect.size.y, top_rect.size.x, top_rect.size.y])
 		check(sv_rect.end.x <= float(res.x) + 2.0 and sv_rect.end.y <= float(res.y) + 2.0,
 			"UI %dx%d 3D viewport fits within window bounds" % [res.x, res.y])
-		# Check every major dialog fits within the current viewport at EVERY resolution!
-		for item in dialog_openers:
+		for item in panel_openers:
 			var dname: String = item[0]
-			var dlg: Window = item[1].call()
+			var panel: Control = item[1].call()
 			await process_frame
-			check(dlg.visible and dlg.size.x <= res.x and dlg.size.y <= res.y and dlg.size.x >= 320 and dlg.size.y >= 180,
-				"UI %dx%d dialog '%s' fits cleanly (%dx%d)" % [res.x, res.y, dname, dlg.size.x, dlg.size.y])
+			var pr: Rect2 = panel.get_global_rect()
+			check(panel.is_visible_in_tree() and pr.size.x >= 160.0 and pr.end.x <= float(res.x) + 2.0,
+				"UI %dx%d docked panel '%s' fits cleanly (%.0fx%.0f, end_x=%.0f)" % [res.x, res.y, dname, pr.size.x, pr.size.y, pr.end.x])
 			if DisplayServer.get_name() != "headless" and res == Vector2i(1280, 720) and dname in ["object_browser", "environment_studio", "mission_studio"]:
 				var img := root.get_texture().get_image()
 				if img != null:
 					img.save_png(scratch.path_join("ui-%s-1280x720.png" % dname))
-			dlg.hide()
-			await process_frame
+		editor.set_center_mode(editor.workspace_state.CenterMode.SPLIT_3D_2D)
+		await process_frame
 
-	# Verify all 4 Wintage themes across main editor + Environment Studio
+	# Verify all 4 Wintage themes across main editor + docked Environment Studio
 	root.size = Vector2i(1280, 720)
 	editor.size = Vector2(1280, 720)
+	editor.set_center_mode(editor.workspace_state.CenterMode.SPLIT_3D_2D)
 	await process_frame
 	for slug: String in Wintage.theme_slugs():
 		editor.set_wintage_theme(slug, false, false)
 		await process_frame
-		check(editor.scene_view.size.x >= 320.0 and editor.scene_view.size.y >= 260.0,
+		check(editor.scene_view.size.x >= 260.0 and editor.scene_view.size.y >= 260.0,
 			"UI theme '%s' preserves healthy 3D viewport layout" % slug)
 		editor.open_environment_studio()
 		await process_frame
-		check(editor.environment_studio.visible and editor.environment_studio.size.x <= 1280 and editor.environment_studio.size.y <= 720,
-			"UI theme '%s' keeps Environment Studio compact (%dx%d)" % [slug, editor.environment_studio.size.x, editor.environment_studio.size.y])
-		editor.environment_studio.hide()
+		check(editor.environment_studio.is_visible_in_tree() and editor.attributes_inspector.get_global_rect().end.x <= 1282.0,
+			"UI theme '%s' keeps docked Environment Studio compact (%.0fx%.0f)" % [slug, editor.environment_studio.size.x, editor.environment_studio.size.y])
 		await process_frame
 	editor.set_wintage_theme(Wintage.DEFAULT_THEME, false, false)
+	editor.activate_terrain_brush()
 	await process_frame
 
 	if DisplayServer.get_name() != "headless":

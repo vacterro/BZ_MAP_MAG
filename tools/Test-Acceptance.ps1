@@ -238,7 +238,7 @@ if ($runIntegration) {
     }
 }
 
-# 3. PERFORMANCE + MULTI-RES UI BATTERY
+# 3. PERFORMANCE + MULTI-RES UI BATTERY + UNIFIED DCC WORKSPACE DOCK
 if ($runPerf) {
     if (-not (Test-Path -LiteralPath $braveBzn -PathType Leaf) -or -not (Test-Path -LiteralPath $plgrBzn -PathType Leaf) -or -not (Test-Path -LiteralPath $Game -PathType Container)) {
         Add-StageResult 'perf-and-ui-battery' 'PERFORMANCE' 'BLOCKED' -1 'res://tests/perf_and_ui_battery.gd' 0 '' 'Missing Brave, plgr.bzn or game dir.'
@@ -250,6 +250,19 @@ if ($runPerf) {
     }
 } else {
     Add-StageResult 'perf-and-ui-battery' 'PERFORMANCE' 'SKIPPED_WITH_REASON' 0 '' 0 '' "Omitted for level '$Level'; run with -Level GUI, PERFORMANCE or RELEASE."
+}
+
+if ($runIntegration -or $runPerf) {
+    if (-not (Test-Path -LiteralPath $plgrBzn -PathType Leaf) -or -not (Test-Path -LiteralPath $braveBzn -PathType Leaf) -or -not (Test-Path -LiteralPath $Game -PathType Container)) {
+        Add-StageResult 'workspace-dock' 'GUI' 'BLOCKED' -1 'res://tests/workspace_dock.gd' 0 '' 'Missing plgr.bzn, Brave or game dir.'
+    } else {
+        $wdScratch = (New-Item -ItemType Directory -Path (Join-Path $runRoot 'workspace-dock-scratch') -Force).FullName
+        $wdArgs = @($plgrBzn, $braveBzn, $Game, $wdScratch)
+        if ($VrvSource -and (Test-Path -LiteralPath $VrvSource -PathType Container)) { $wdArgs += $VrvSource }
+        Invoke-GodotScriptStage 'workspace-dock' 'GUI' 'res://tests/workspace_dock.gd' $wdArgs $useGpuEffective 240000
+    }
+} else {
+    Add-StageResult 'workspace-dock' 'GUI' 'SKIPPED_WITH_REASON' 0 '' 0 '' "Not in selected level '$Level'."
 }
 
 # 4. BUILD INTEGRITY

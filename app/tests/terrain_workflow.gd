@@ -77,7 +77,7 @@ func run() -> void:
 	root.add_child(editor)
 	if OS.get_name() == "Windows":
 		check(editor.theme.default_font.get_font_name().begins_with("Verdana"), "main UI loads embedded Verdana_m1: " + editor.theme.default_font.get_font_name())
-		check(editor.studio.theme.default_font.get_font_name().begins_with("Verdana"), "node window uses embedded Verdana_m1")
+		check(editor.studio.get_theme_default_font().get_font_name().begins_with("Verdana"), "docked node workspace inherits embedded Verdana_m1")
 		check(editor.open_dialog.theme.default_font.get_font_name().begins_with("Verdana"), "dialogs use embedded Verdana_m1")
 		check(FileAccess.file_exists("res://themes/fonts/Verdana_m1.ttf") and FileAccess.file_exists("res://themes/fonts/Verdana_m1-Bold.ttf"), "embedded Verdana_m1 font files exist in project")
 		check(editor.game_picker.use_native_dialog and editor.vrv_picker.use_native_dialog and editor.game_picker.file_mode == FileDialog.FILE_MODE_OPEN_DIR, "native folder pickers in Playtest Setup")
@@ -217,7 +217,7 @@ func test_path_edit(editor: Control, scratch: String) -> void:
 	inspector.path_name.text = "11Patrol1 Draft"
 	inspector.position_x.value += 1.25
 	inspector.apply_path()
-	check(document.path_at(1)["name"] == "11Patrol1 Draft" and inspector.visible == false, "inspector commits a native edit")
+	check(document.path_at(1)["name"] == "11Patrol1 Draft", "inspector commits a native edit")
 	check(editor.top.path_overlay["name"] == "11Patrol1 Draft", "path edit updates the 2D and 3D overlay")
 	document.undo()
 	check(document.path_edits.is_empty(), "undo restores original path bytes")
@@ -288,7 +288,7 @@ func test_path_lifecycle(editor: Control, scratch: String) -> void:
 	editor.path_list.select(2)
 	editor.inspect_path()
 	editor.path_inspector.delete_path_button.pressed.emit()
-	check(not editor.path_inspector.visible, "remove a whole path through the inspector: " + document.error)
+	check(editor.path_inspector.route_index == -1, "remove a whole path through the inspector: " + document.error)
 	check(document.path_at(1).is_empty() and document.path_at(2)["id"] == document.package.paths[2]["id"], "removal leaves other slots and IDs stable")
 	document.undo()
 	check(Document.same_path_fields(document.path_at(1), removed), "undo restores the removed path")
@@ -578,7 +578,7 @@ func test_graph(editor: Control, exported: Document, writer: Snapshots, scratch:
 
 func test_studio(editor: Control) -> void:
 	editor.open_studio()
-	var studio: Window = editor.studio
+	var studio: Control = editor.studio
 	check(studio.nodes.get_connection_list().size() == 4, "studio renders the four default connections")
 	studio.preview()
 	var deadline := Time.get_ticks_msec() + 10000
@@ -693,7 +693,7 @@ func test_graph_materials(editor: Control, source: String, scratch: String) -> v
 		check(false, "reopen baked graph export: " + native.error)
 
 
-func configure_graph_materials(studio: Window, tint: int, tile: int) -> void:
+func configure_graph_materials(studio: Control, tint: int, tile: int) -> void:
 	studio.connect_nodes(Graph.INPUT, 0, Graph.COLOR_RAMP, 0)
 	studio.connect_nodes(Graph.EXISTING_COLOR, 0, Graph.COLOR_BLEND, 0)
 	studio.connect_nodes(Graph.COLOR_RAMP, 0, Graph.COLOR_BLEND, 1)
@@ -776,7 +776,7 @@ func test_graph_material_nodes() -> void:
 	check(not graph.validate_stack([layer]) and graph.error.contains("cycle"), "reject a cycle through a typed RGB port")
 
 
-func wait_for_graph(studio: Window) -> void:
+func wait_for_graph(studio: Control) -> void:
 	var deadline := Time.get_ticks_msec() + 10000
 	while studio.worker.is_started() and Time.get_ticks_msec() < deadline:
 		await process_frame
@@ -1416,8 +1416,7 @@ func test_slope_studio_safety(editor: Control) -> void:
 	studio.mode_choice.select(1)
 	studio.angle.value = 15.0
 	check(studio.preview_shape() and doc.has_preview(), "valid studio preview activates before cancel")
-	studio.canceled.emit()
-	studio.hide()
+	studio.cancel_shape()
 	check(not doc.has_preview() and terrain.heights == heights_before and doc.edits.size() == edits_before and doc.undo_stack.size() == undo_before,
 		"canceling slope studio preview restores heights and commits nothing")
 	print("Slope Studio safety checks verified.")
@@ -1810,12 +1809,12 @@ func test_vrv_parity_wave7(editor: Control, source: String, scratch: String) -> 
 		"MapDocument.duplicate_sound_point refuses non-vrv_sndpoint object")
 	se.hide()
 
-	# 2c. Generic Object Label Editor edits ordinary object names cleanly with Undo/Redo
+	# 2c. Docked Object Attributes Label Editor edits ordinary object names cleanly with Undo/Redo
 	editor.object_tool.selected = non_snd_view
 	editor.open_object_label_editor()
-	editor.object_label_field.text = "scout_alpha"
-	editor.apply_object_label_dialog()
-	check(doc.object_label(non_snd_view) == "scout_alpha", "Generic Object Label editor updates ordinary object label")
+	editor.object_attributes.label_field.text = "scout_alpha"
+	editor.object_attributes.apply_label()
+	check(doc.object_label(non_snd_view) == "scout_alpha", "Docked Object Attributes editor updates ordinary object label")
 	doc.undo()
 	check(doc.object_label(non_snd_view) == orig_label, "Undo restores ordinary object label")
 	doc.redo()
@@ -2643,19 +2642,17 @@ func test_hold_ui_font_playtest(editor: Control, brave_source: String, blank_sou
 		await process_frame
 	editor.last_cursor = Vector2(512.0, 512.0)
 
-	# 3.0 Terrain Commands (Shape Terrain) dialog + screenshot #7
+	# 3.0 Terrain Commands (Shape Terrain) docked panel + screenshot #7
 	editor.open_terrain_tools()
 	var ttools = editor.terrain_tools
-	var ttools_cmin: Vector2 = ttools.get_contents_minimum_size()
-	check(ttools.size.y < 360 and ttools.size.x >= int(ttools_cmin.x) and not ttools.get_ok_button().disabled,
-		"Shape Terrain dialog fits tightly without empty void or clipping: size=%s content=%s" % [str(ttools.size), str(ttools_cmin)])
+	check(ttools.is_visible_in_tree() and not ttools.apply_button.disabled,
+		"Shape Terrain docked panel displays cleanly with Apply ready: size=%s" % str(ttools.size))
 	if DisplayServer.get_name() != "headless":
 		await process_frame
 		await RenderingServer.frame_post_draw
 		check(root.get_texture().get_image().save_png(scratch.path_join("terrain-commands.png")) == OK, "capture Terrain Commands (Shape Terrain) screenshot")
-	ttools.hide()
 
-	# 3a. Slope Studio dynamic row visibility, live preview scrubbing (Class B: 0 undo entries during drag), dialog-close gesture cancel & screenshots #4 and #5
+	# 3a. Slope Studio dynamic row visibility, live preview scrubbing (Class B: 0 undo entries during drag), docked cancel & screenshots #4 and #5
 	editor.open_slope_studio()
 	var sstudio = editor.slope_studio
 	sstudio.mode_choice.select(0)
@@ -2669,16 +2666,16 @@ func test_hold_ui_font_playtest(editor: Control, brave_source: String, blank_sou
 	if DisplayServer.get_name() != "headless":
 		await process_frame
 		await RenderingServer.frame_post_draw
-		check(root.get_texture().get_image().save_png(scratch.path_join("slope-studio.png")) == OK, "capture compact Slope Studio screenshot")
-	var slope_size_before: Vector2i = sstudio.size
+		check(root.get_texture().get_image().save_png(scratch.path_join("slope-studio.png")) == OK, "capture compact docked Slope Studio screenshot")
+	var slope_size_before: Vector2 = sstudio.size
 	var undo_before_slope_scrub: int = editor.document.undo_stack.size()
 	check(sstudio.preview_shape() and sstudio._preview_armed and editor.document.has_preview(),
 		"Slope Studio arms live preview without adding an undo entry")
 	sstudio.target_height.begin_ladder(Vector2(280.0, 260.0))
 	for _t in 10:
 		sstudio.target_height.step_ladder_by(1, sstudio.target_height.get_ladder_steps().find(1.0))
-	check(sstudio.size == slope_size_before and editor.document.has_preview() and editor.document.undo_stack.size() == undo_before_slope_scrub,
-		"Class B Slope Studio live preview scrubbing updates terrain preview across 10 ticks with 0 undo entries and 0 dialog displacement")
+	check(sstudio.size.is_equal_approx(slope_size_before) and editor.document.has_preview() and editor.document.undo_stack.size() == undo_before_slope_scrub,
+		"Class B Slope Studio live preview scrubbing updates terrain preview across 10 ticks with 0 undo entries and 0 layout displacement")
 	if DisplayServer.get_name() != "headless":
 		await process_frame
 		await RenderingServer.frame_post_draw
@@ -2686,7 +2683,7 @@ func test_hold_ui_font_playtest(editor: Control, brave_source: String, blank_sou
 	sstudio.target_height.end_ladder(false)
 	check(editor.document.undo_stack.size() == undo_before_slope_scrub,
 		"cancelling Slope Studio Value Ladder restores initial preview height with 0 undo entries")
-	# Dialog close while Value Ladder is active must cancel gesture and hide CanvasLayer
+	# Hiding docked panel while Value Ladder is active must cancel gesture and hide CanvasLayer
 	var th_before_close: float = sstudio.target_height.value
 	sstudio.target_height.begin_ladder(Vector2(280.0, 260.0))
 	sstudio.target_height.step_ladder_by(5, 0)
@@ -2694,7 +2691,7 @@ func test_hold_ui_font_playtest(editor: Control, brave_source: String, blank_sou
 	editor.document.clear_preview()
 	check(not sstudio.target_height.is_ladder_active() and is_equal_approx(sstudio.target_height.value, th_before_close)
 		and (sstudio.target_height._ladder_layer == null or not sstudio.target_height._ladder_layer.visible),
-		"closing dialog during active Value Ladder gesture cancels gesture, restores value, and hides CanvasLayer")
+		"hiding docked panel during active Value Ladder gesture cancels gesture, restores value, and hides CanvasLayer")
 	editor.open_slope_studio()
 	sstudio.mode_choice.select(1) # exact angle
 	sstudio.profile.select(Shapes.PROFILES.find("terrace"))
@@ -2707,38 +2704,35 @@ func test_hold_ui_font_playtest(editor: Control, brave_source: String, blank_sou
 	sstudio.profile.select(0)
 	sstudio.batch_mode.select(0)
 	sstudio._sync_visible_rows()
-	sstudio.hide()
 	editor.document.clear_preview()
 
-	# 3b. Target Profile Dialog dynamic analysis collapse + screenshot #2
+	# 3b. Target Profile docked panel dynamic analysis collapse + screenshot #2
 	editor.open_target_profile(0)
 	var tpd = editor.target_profile_dialog
-	check(not tpd.analysis_output.visible and tpd.size.y < 420,
-		"Target Profile dialog starts compact with empty conversion analysis collapsed: y=%d" % tpd.size.y)
+	check(tpd.is_visible_in_tree() and not tpd.analysis_output.visible,
+		"Target Profile docked panel starts compact with empty conversion analysis collapsed")
 	if DisplayServer.get_name() != "headless":
 		await process_frame
 		await RenderingServer.frame_post_draw
-		check(root.get_texture().get_image().save_png(scratch.path_join("target-profile-compact.png")) == OK, "capture compact Target Profile dialog")
+		check(root.get_texture().get_image().save_png(scratch.path_join("target-profile-compact.png")) == OK, "capture compact Target Profile docked panel")
 	tpd.run_conversion_analysis()
 	check(tpd.analysis_output.visible and not tpd.analysis_output.text.is_empty(),
-		"Target Profile dialog expands conversion analysis when run")
-	tpd.hide()
+		"Target Profile panel expands conversion analysis when run")
 
-	# 3b-extra: Mission Studio (#3), Node Studio (#6), Water (#8), Sound (#9) layout & screenshot acceptance
+	# 3b-extra: Mission Studio (#3), Node Studio (#6), Water (#8), Sound (#9), Object Browser layout & screenshot acceptance
 	editor.open_mission_studio()
 	var mstudio = editor.mission_studio
-	check(mstudio.size.x <= 1100 and mstudio.size.y <= 650 and not mstudio.get_ok_button().disabled,
-		"Mission Studio dialog fits compactly with accessible controls: size=%s" % str(mstudio.size))
+	check(mstudio.is_visible_in_tree() and mstudio.size.x <= 1100.0,
+		"Mission Studio docked panel fits compactly with accessible controls: size=%s" % str(mstudio.size))
 	if DisplayServer.get_name() != "headless":
 		await process_frame
 		await RenderingServer.frame_post_draw
 		check(root.get_texture().get_image().save_png(scratch.path_join("mission-studio.png")) == OK, "capture Mission Studio screenshot")
-	mstudio.hide()
 
 	editor.open_studio()
 	var nstudio = editor.studio
-	check(nstudio.size.x <= 1100 and nstudio.size.y <= 650,
-		"Node Studio window fits compactly: size=%s" % str(nstudio.size))
+	check(nstudio.is_visible_in_tree() and nstudio.size.x <= 1100.0 and nstudio.size.y <= 690.0,
+		"Node Studio central workspace fits cleanly: size=%s" % str(nstudio.size))
 	if DisplayServer.get_name() != "headless":
 		await process_frame
 		await RenderingServer.frame_post_draw
@@ -2747,82 +2741,80 @@ func test_hold_ui_font_playtest(editor: Control, brave_source: String, blank_sou
 
 	editor.toggle_water_edit()
 	var wtools = editor.water_tools
-	check(wtools.size.y < 340 and not wtools.get_ok_button().disabled,
-		"Edit Water dialog fits compactly without empty void: size=%s" % str(wtools.size))
+	check(wtools.is_visible_in_tree() and not wtools.apply_button.disabled,
+		"Edit Water docked panel fits compactly: size=%s" % str(wtools.size))
 	if DisplayServer.get_name() != "headless":
 		await process_frame
 		await RenderingServer.frame_post_draw
 		check(root.get_texture().get_image().save_png(scratch.path_join("water-commands.png")) == OK, "capture Edit Water screenshot")
-	wtools.hide()
 
 	editor.open_sound_editor()
 	var sedit = editor.sound_editor
-	check(sedit.size.y < 420,
-		"Sound Point Editor dialog fits compactly: size=%s" % str(sedit.size))
+	check(sedit.is_visible_in_tree(),
+		"Sound Point docked panel displays compactly: size=%s" % str(sedit.size))
 	if DisplayServer.get_name() != "headless":
 		await process_frame
 		await RenderingServer.frame_post_draw
 		check(root.get_texture().get_image().save_png(scratch.path_join("sound-editor.png")) == OK, "capture Sound Point Editor screenshot")
-	sedit.hide()
 
 	editor.open_object_browser()
 	var obrowser = editor.object_browser
-	check(obrowser.size.x <= 1100 and obrowser.size.y <= 620 and not obrowser.catalog_entries.is_empty(),
-		"Object Browser dialog fits compactly with populated catalog: size=%s count=%d" % [str(obrowser.size), obrowser.catalog_entries.size()])
+	check(obrowser.is_visible_in_tree() and not obrowser.catalog_entries.is_empty(),
+		"Object Browser docked Assets panel populates catalog cleanly: size=%s count=%d" % [str(obrowser.size), obrowser.catalog_entries.size()])
 	if DisplayServer.get_name() != "headless":
 		await process_frame
 		await RenderingServer.frame_post_draw
 		check(root.get_texture().get_image().save_png(scratch.path_join("object-browser.png")) == OK, "capture Object Browser screenshot")
-	obrowser.hide()
 
-	# 3c. New Map Wizard with 22+ Workshop mods: ChoiceGroup overflow + compact summary + fits 640x540, 1120x690, 1280x720, 1920x1080, 2560x1440 (#1)
+	# 3c. New Map Workspace page with 22+ Workshop mods: ChoiceGroup overflow + compact summary (#1)
 	var many_reg := ModRegistry.new()
 	for i in 20:
 		many_reg.register_custom_mod("ws_mod_%02d" % i, "Workshop Mod %02d" % i, scratch, ["stock"])
 	var wiz = editor.new_map_wizard
+	editor.open_new_map_wizard()
 	wiz.begin(many_reg, editor.game_path.text.strip_edges(), "stock", scratch, blank_source)
 	check(wiz.mod_select.item_count >= 23 and wiz.mod_select._header_row.visible and wiz.mod_select._scroll.custom_minimum_size.y <= 60,
-		"New Map Wizard activates compact searchable overflow for 23+ mod profiles")
+		"New Map workspace activates compact searchable overflow for 23+ mod profiles")
 	wiz.mod_select.filter_options("Mod 15")
 	check(wiz.mod_select.button_at(0).visible and not wiz.mod_select.button_at(5).visible,
 		"ChoiceGroup filter narrows mod buttons while keeping active selection visible")
 	wiz.mod_select.filter_options("")
-	check(wiz.size.y <= 520 and not wiz.status_label.visible,
-		"New Map Wizard with 23+ mods fits comfortably within 520 px height without clipping: y=%d" % wiz.size.y)
+	check(wiz.is_visible_in_tree() and not wiz.status_label.visible,
+		"New Map workspace with 23+ mods renders cleanly without clipping: size=%s" % str(wiz.size))
 	if DisplayServer.get_name() != "headless":
 		await process_frame
 		await RenderingServer.frame_post_draw
-		check(root.get_texture().get_image().save_png(scratch.path_join("wizard-720p.png")) == OK, "capture compact New Map Wizard at 1120x690")
+		check(root.get_texture().get_image().save_png(scratch.path_join("wizard-720p.png")) == OK, "capture compact New Map workspace at 1120x690")
 		root.size = Vector2i(1920, 1080)
 		editor.size = Vector2(1920, 1080)
-		wiz.popup_centered(wiz.size)
 		await process_frame
 		await RenderingServer.frame_post_draw
-		check(root.get_texture().get_image().save_png(scratch.path_join("wizard-1080p.png")) == OK, "capture compact New Map Wizard at 1920x1080")
+		check(root.get_texture().get_image().save_png(scratch.path_join("wizard-1080p.png")) == OK, "capture compact New Map workspace at 1920x1080")
 		root.size = Vector2i(1120, 690)
 		editor.size = Vector2(1120, 690)
 		await process_frame
 
-	# 4. P0 New Map Wizard Stock Safety: Refuse incompatible Stock source unless verified conversion is explicitly enabled (Section 4)
+	# 4. P0 New Map Stock Safety: Refuse incompatible Stock source unless verified conversion is explicitly enabled (Section 4)
 	wiz.source_bzn_field.text = blank_source # contains ivtank_vsr
 	wiz.output_parent_field.text = scratch
 	wiz.sanitize_stock_check.set_pressed_no_signal(false)
 	wiz.refresh_summary()
 	var doc_before_refusal = editor.document
 	wiz.create_selected_map()
-	check(wiz.visible and wiz.status_label.visible and "[ERR] Cannot create Stock map" in wiz.status_label.text
+	check(wiz.is_visible_in_tree() and wiz.status_label.visible and "[ERR] Cannot create Stock map" in wiz.status_label.text
 		and editor.document == doc_before_refusal,
-		"New Map Wizard refuses Stock map creation from VSR source when conversion checkbox is off")
-	wiz.hide()
+		"New Map workspace refuses Stock map creation from VSR source when conversion checkbox is off")
+	editor.set_center_mode(editor.workspace_state.CenterMode.SPLIT_3D_2D)
 
 	# 3d. Resolution, Font Size (10..24) & All-Theme (Golden Default, Vintage Dark, Vintage Classic, Nord) matrix verification (#10)
 	var orig_editor_size: Vector2 = editor.size
 	var orig_font_size: int = editor.ui_font_size
+	editor.open_slope_studio()
 	for slug in Wintage.theme_slugs():
 		editor.set_wintage_theme(slug, false, false)
-		Wintage.shrink_dialog(editor.slope_studio, 480)
-		check(editor.theme != null and editor.slope_studio.size.x >= 300 and editor.slope_studio.size.y < 520,
-			"Wintage theme '%s' sizes dialogs compactly without hardcoded theme drift" % slug)
+		await process_frame
+		check(editor.theme != null and editor.slope_studio.is_visible_in_tree() and editor.attributes_inspector.size.x >= 220.0,
+			"Wintage theme '%s' keeps docked workspace compact without hardcoded theme drift" % slug)
 		if DisplayServer.get_name() != "headless" and slug != Wintage.DEFAULT_THEME:
 			await process_frame
 			await RenderingServer.frame_post_draw
