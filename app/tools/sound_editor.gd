@@ -1,14 +1,12 @@
-extends ConfirmationDialog
+extends VBoxContainer
+## Docked Sound Point editor inside Right Attributes Inspector.
 ## Structured editor for VRV sound points:
 ## vrvsnd:<sound>:<volume>:<range>:<interval>:<jitter>:<pitch>:<near>
 ## Strictly gated to verified sound-point-compatible ODF classes (vrv_sndpoint).
-## Ordinary object names belong in the generic Object Label editor.
 
 const Document := preload("res://core/map_document.gd")
-const Wintage := preload("res://themes/wintage.gd")
 const ChoiceGroup := preload("res://themes/choice_group.gd")
 const SliderField := preload("res://themes/slider_field.gd")
-const DIALOG_WIDTH := 460
 
 signal updated(message: String)
 signal sound_point_selected(view_index: int)
@@ -31,21 +29,16 @@ var jitter_spin := SliderField.new()
 var pitch_spin := SliderField.new()
 var near_spin := SliderField.new()
 var asset_status := Label.new()
-var duplicate_btn: Button
+var apply_btn := Button.new()
+var duplicate_btn := Button.new()
 
 
 func _ready() -> void:
-	title = "Sound Point Editor"
-	ok_button_text = "Apply Sound Point"
-	dialog_hide_on_ok = false
-	var layout := VBoxContainer.new()
-	layout.custom_minimum_size.x = DIALOG_WIDTH - 24
-	layout.add_theme_constant_override("separation", 4)
-	add_child(layout)
+	size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	add_theme_constant_override("separation", 4)
 
 	target_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	target_label.custom_minimum_size.x = DIALOG_WIDTH - 24
-	layout.add_child(target_label)
+	add_child(target_label)
 
 	var existing_hdr := HBoxContainer.new()
 	var existing_lbl := Label.new()
@@ -59,15 +52,15 @@ func _ready() -> void:
 	existing_select.item_selected.connect(func(_idx: int): select_chosen_sound_point())
 	existing_row.add_child(existing_select)
 	existing_row.hide()
-	layout.add_child(existing_row)
+	add_child(existing_row)
 
 	editor_fields.add_theme_constant_override("separation", 3)
-	layout.add_child(editor_fields)
+	add_child(editor_fields)
 	var sound_row := HBoxContainer.new()
 	editor_fields.add_child(sound_row)
 	var slbl := Label.new()
-	slbl.text = "Sound file (.wav/.ogg)"
-	slbl.custom_minimum_size.x = 140
+	slbl.text = "Sound file"
+	slbl.custom_minimum_size.x = 78
 	sound_row.add_child(slbl)
 	sound_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	sound_field.text_changed.connect(func(_t): refresh_asset_status())
@@ -75,35 +68,43 @@ func _ready() -> void:
 
 	add_spin(editor_fields, "Volume (%)", volume_spin, 0, 100, 70, "%")
 	add_spin(editor_fields, "Range (m)", range_spin, 10, 2000, 150, "m")
-	add_spin(editor_fields, "Interval (s, 0=loop)", interval_spin, 0, 600, 0, "s")
+	add_spin(editor_fields, "Interval (s)", interval_spin, 0, 600, 0, "s")
 	add_spin(editor_fields, "Jitter (%)", jitter_spin, 0, 100, 0, "%")
 	add_spin(editor_fields, "Pitch (%)", pitch_spin, 25, 200, 100, "%")
-	add_spin(editor_fields, "Near full-vol (%)", near_spin, 0, 90, 20, "%")
+	add_spin(editor_fields, "Near vol (%)", near_spin, 0, 90, 20, "%")
+
+	var actions := HFlowContainer.new()
+	actions.add_theme_constant_override("h_separation", 4)
+	add_child(actions)
+	apply_btn.text = "Apply Sound Point"
+	apply_btn.pressed.connect(apply_sound_point)
+	actions.add_child(apply_btn)
+	duplicate_btn.text = "Duplicate"
+	duplicate_btn.pressed.connect(duplicate_sound_point)
+	actions.add_child(duplicate_btn)
 
 	asset_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	asset_status.custom_minimum_size = Vector2(DIALOG_WIDTH - 24, 0)
-	layout.add_child(asset_status)
+	add_child(asset_status)
 
-	duplicate_btn = add_button("Duplicate Sound Point", true, "dup")
-	custom_action.connect(func(action: StringName):
-		if action == &"dup":
-			duplicate_sound_point()
-	)
-	confirmed.connect(apply_sound_point)
+
+func get_ok_button() -> Button:
+	return apply_btn
 
 
 func add_spin(parent: Control, caption: String, spin: SliderField, lo: int, hi: int, initial: int, unit: String = "") -> void:
 	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
 	parent.add_child(row)
 	var lbl := Label.new()
 	lbl.text = caption
-	lbl.custom_minimum_size.x = 140
+	lbl.custom_minimum_size.x = 78
 	row.add_child(lbl)
 	spin.min_value = lo
 	spin.max_value = hi
 	spin.step = 1
 	if not unit.is_empty():
 		spin.set_unit_suffix(unit)
+	spin.set_readout_width(44.0)
 	spin.value = initial
 	spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	spin.value_changed.connect(func(_v: float): refresh_asset_status())
@@ -146,7 +147,7 @@ func begin(doc: Document, view_index: int, game_path: String = "", vrv_path: Str
 	_refresh_existing_picker()
 	if document == null or not document.valid_view_object(selected_view):
 		var available := document.sound_point_views().size() if document != null else 0
-		target_label.text = "No object selected. Select a %s object in Move Object mode first." % Document.SOUND_POINT_ODF
+		target_label.text = "No object selected. Select a %s object in Scene Tree or Move Object." % Document.SOUND_POINT_ODF
 		asset_status.text = (
 			"[ERR] Select an existing %s sound point above (%d available). Playback requires VRV runtime." % [Document.SOUND_POINT_ODF, available]
 			if available > 0 else
@@ -154,7 +155,6 @@ func begin(doc: Document, view_index: int, game_path: String = "", vrv_path: Str
 		)
 		editor_fields.hide()
 		ok_button_disabled(true)
-		Wintage.popup_fit(self, DIALOG_WIDTH)
 		return
 	var odf := document.object_odf(selected_view)
 	var current := document.object_label(selected_view)
@@ -162,17 +162,16 @@ func begin(doc: Document, view_index: int, game_path: String = "", vrv_path: Str
 		var available := document.sound_point_views().size()
 		target_label.text = "Object #%d (%s) is NOT a VRV sound point (%s)." % [selected_view, odf, Document.SOUND_POINT_ODF]
 		asset_status.text = (
-			"[ERR] Incompatible ODF '%s': its label will not be modified. Pick one of the %d existing %s object(s) above or use Object Label for ordinary names." % [odf, available, Document.SOUND_POINT_ODF]
+			"[ERR] Incompatible ODF '%s': its label will not be modified. Pick one of the %d existing %s object(s) above or use Object Attributes for ordinary names." % [odf, available, Document.SOUND_POINT_ODF]
 			if available > 0 else
-			"[ERR] Incompatible ODF '%s': this map has no %s sound points. Use Object Label for ordinary object names." % [odf, Document.SOUND_POINT_ODF]
+			"[ERR] Incompatible ODF '%s': this map has no %s sound points. Use Object Attributes for ordinary names." % [odf, Document.SOUND_POINT_ODF]
 		)
 		editor_fields.hide()
 		ok_button_disabled(true)
-		Wintage.popup_fit(self, DIALOG_WIDTH)
 		return
 	editor_fields.show()
 	ok_button_disabled(false)
-	target_label.text = "Sound Point #%d (%s) · Current label: %s" % [selected_view, odf, current if not current.is_empty() else "(none)"]
+	target_label.text = "Sound Point #%d (%s) · Current: %s" % [selected_view, odf, current if not current.is_empty() else "(none)"]
 	var parsed := Document.sound_point(current)
 	if not parsed.is_empty():
 		sound_field.text = String(parsed["sound"])
@@ -191,13 +190,11 @@ func begin(doc: Document, view_index: int, game_path: String = "", vrv_path: Str
 		pitch_spin.value = 100
 		near_spin.value = 20
 	refresh_asset_status()
-	Wintage.popup_fit(self, DIALOG_WIDTH)
 
 
 func ok_button_disabled(flag: bool) -> void:
-	get_ok_button().disabled = flag
-	if duplicate_btn != null:
-		duplicate_btn.disabled = flag
+	apply_btn.disabled = flag
+	duplicate_btn.disabled = flag
 
 
 func encoded_label() -> Dictionary:
@@ -295,8 +292,8 @@ func apply_sound_point() -> void:
 	if not document.set_sound_point_label(selected_view, lbl):
 		asset_status.text = "[ERR] " + document.error
 		return
+	target_label.text = "Sound Point #%d (%s) · Current: %s" % [selected_view, document.object_odf(selected_view), lbl]
 	updated.emit("Updated sound point label: " + lbl)
-	hide()
 
 
 func duplicate_sound_point() -> void:
@@ -315,5 +312,6 @@ func duplicate_sound_point() -> void:
 	if dup < 0:
 		asset_status.text = "[ERR] " + document.error
 		return
+	selected_view = dup
+	_refresh_existing_picker()
 	updated.emit("Duplicated sound point #%d with label %s." % [dup, built["label"]])
-	hide()

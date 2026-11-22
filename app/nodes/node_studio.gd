@@ -1,16 +1,23 @@
-extends Window
+extends VBoxContainer
+## Docked Procedural Node Workspace hosted in the Central Workspace "Nodes" tab.
+## Central canvas holds full-size GraphEdit; layer parameters live in
+## attributes_panel (hosted inside Right Attributes Inspector) and stay synced
+## with the Left Dock LayersPanel and MapDocument.layers.
 
 const Graph := preload("res://nodes/height_graph.gd")
 const Document := preload("res://core/map_document.gd")
 const Terrain := preload("res://formats/terrain_v5.gd")
 const ChoiceGroup := preload("res://themes/choice_group.gd")
 const SliderField := preload("res://themes/slider_field.gd")
+const CollapsibleSection := preload("res://ui/collapsible_section.gd")
 
 signal updated(message: String)
 signal preview_display(layer: int)
+signal layers_changed(selected_index: int)
+signal viewport_requested
 
 var document: Document
-var working: Array
+var working: Array = [Graph.layer()]
 var selected := 0
 var focus: Vector2i
 var nodes := GraphEdit.new()
@@ -23,7 +30,9 @@ var message := Label.new()
 var bake_button: Button
 var preview_button: Button
 var keep_button: Button
+var viewport_button: Button
 var preview_channel := ChoiceGroup.new(0)
+var attributes_panel := VBoxContainer.new()
 var loading := false
 var worker := Thread.new()
 var job_graph: Graph
@@ -34,104 +43,128 @@ var job_revision := -1
 
 
 func _ready() -> void:
-	title = "Terrain Layers and Nodes"
-	transient = true
-	exclusive = true
-	unresizable = false
-	min_size = Vector2i(600, 390)
-	size = Vector2i(720, 480)
-	close_requested.connect(close_studio)
-	var layout := VBoxContainer.new()
-	layout.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT, Control.PRESET_MODE_MINSIZE, 6)
-	layout.add_theme_constant_override("separation", 3)
-	add_child(layout)
-	var layers_bar := HBoxContainer.new()
-	layers_bar.add_theme_constant_override("separation", 4)
-	layout.add_child(layers_bar)
-	layers_bar.add_child(layer_select)
-	layer_select.item_selected.connect(load_layer)
-	button(layers_bar, "Add", add_layer)
-	button(layers_bar, "Remove", remove_layer)
-	button(layers_bar, "Move up", move_layer.bind(-1))
-	button(layers_bar, "Move down", move_layer.bind(1))
-	enabled.text = "Visible"
-	layers_bar.add_child(enabled)
-	enabled.toggled.connect(func(on): set_parameter("enabled", on))
-	var bar := HFlowContainer.new()
-	bar.add_theme_constant_override("h_separation", 4)
-	bar.add_theme_constant_override("v_separation", 2)
-	layout.add_child(bar)
-	parameter(bar, "Opacity", "opacity", 0, 1, 0.05)
-	parameter(bar, "Seed", "seed", 0, 999999, 1, "", 0, 9999)
-	parameter(bar, "Scale", "scale", 2, 512, 1, "m")
-	parameter(bar, "Noise", "amplitude", 0, 100, 0.5, "m")
-	var limits := HFlowContainer.new()
-	limits.add_theme_constant_override("h_separation", 4)
-	limits.add_theme_constant_override("v_separation", 2)
-	layout.add_child(limits)
-	parameter(limits, "Min", "low", -3000, 3000, 1, "m", -200, 500)
-	parameter(limits, "Max", "high", -3000, 3000, 1, "m", -200, 500)
-	var rad_grp := HBoxContainer.new()
-	rad_grp.add_theme_constant_override("separation", 3)
-	label(rad_grp, "Radius")
-	spin(rad_grp, range_field, 32, 256, 16, "m")
-	limits.add_child(rad_grp)
-	range_field.value = 128
-	range_field.value_changed.connect(func(_value): invalidate())
-	var materials := HFlowContainer.new()
-	materials.add_theme_constant_override("h_separation", 4)
-	materials.add_theme_constant_override("v_separation", 2)
-	layout.add_child(materials)
-	color_parameter(materials, "RGB low", "color_low")
-	color_parameter(materials, "RGB high", "color_high")
-	parameter(materials, "Tile below", "tile_low", 0, 15, 1)
-	parameter(materials, "Tile above", "tile_high", 0, 15, 1)
-	parameter(materials, "At", "tile_height", -100000, 100000, 1, "m", -200, 500)
-	var masks := HFlowContainer.new()
-	masks.add_theme_constant_override("h_separation", 4)
-	masks.add_theme_constant_override("v_separation", 2)
-	layout.add_child(masks)
-	parameter(masks, "Slope min", "slope_low", 0, 90, 1, "°")
-	parameter(masks, "Slope max", "slope_high", 0, 90, 1, "°")
-	parameter(masks, "Mask weight", "mask_weight", 0, 1, 0.05)
-	nodes.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	nodes.right_disconnects = true
-	nodes.minimap_enabled = false
-	nodes.snapping_enabled = false
-	nodes.show_menu = false
-	layout.add_child(nodes)
-	make_graph()
-	nodes.connection_request.connect(connect_nodes)
-	nodes.disconnection_request.connect(disconnect_nodes)
+	size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	size_flags_vertical = Control.SIZE_EXPAND_FILL
+	add_theme_constant_override("separation", 4)
+
+	# Compact single-row top action strip for the central Node Graph canvas
 	var actions := HBoxContainer.new()
+	actions.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	actions.add_theme_constant_override("separation", 4)
-	layout.add_child(actions)
+	add_child(actions)
 	preview_button = button(actions, "Preview", preview)
 	bake_button = button(actions, "Bake to Terrain", bake)
 	keep_button = button(actions, "Keep Layers", keep_layers)
-	button(actions, "Close", close_studio)
+	viewport_button = button(actions, "View 3D/2D", func(): viewport_requested.emit())
+	for b in [preview_button, bake_button, keep_button, viewport_button]:
+		b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	actions.add_child(spacer)
+
 	var view_row := HBoxContainer.new()
 	view_row.add_theme_constant_override("separation", 6)
-	layout.add_child(view_row)
-	label(view_row, "Preview view:")
-	for name in ["Automatic view", "Height view", "Color view", "Base tile view"]:
+	add_child(view_row)
+	label(view_row, "Preview channel:")
+	for name in ["Auto", "Height", "Color", "Base tile"]:
 		preview_channel.add_item(name)
 	preview_channel.disabled = true
 	preview_channel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	preview_channel.item_selected.connect(func(_index): show_preview_channel())
 	view_row.add_child(preview_channel)
+
+	# Full central GraphEdit
+	nodes.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	nodes.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	nodes.right_disconnects = true
+	nodes.minimap_enabled = false
+	nodes.snapping_enabled = false
+	nodes.show_menu = false
+	add_child(nodes)
+	make_graph()
+	nodes.connection_request.connect(connect_nodes)
+	nodes.disconnection_request.connect(disconnect_nodes)
+
 	message.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	layout.add_child(message)
+	message.text = "Connect Height, Color or Base Tile output. Preview around the terrain cursor."
+	add_child(message)
+
+	# Build Right-Inspector Node Attributes panel (hosted in AttributesInspector)
+	attributes_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	attributes_panel.add_theme_constant_override("separation", 4)
+
+	var layer_sec := CollapsibleSection.new("Active Procedural Layer", "node_layer", false)
+	attributes_panel.add_child(layer_sec)
+	layer_sec.add_content(layer_select)
+	layer_select.item_selected.connect(load_layer)
+	var lbtns := HFlowContainer.new()
+	lbtns.add_theme_constant_override("h_separation", 3)
+	layer_sec.add_content(lbtns)
+	button(lbtns, "+ Add", add_layer)
+	button(lbtns, "− Del", remove_layer)
+	button(lbtns, "▲ Up", move_layer.bind(-1))
+	button(lbtns, "▼ Dn", move_layer.bind(1))
+	enabled.text = "Layer Enabled"
+	enabled.toggled.connect(func(on): set_parameter("enabled", on))
+	layer_sec.add_content(enabled)
+
+	var noise_sec := CollapsibleSection.new("Noise & Height Range", "node_noise", false)
+	attributes_panel.add_child(noise_sec)
+	parameter(noise_sec.body, "Opacity", "opacity", 0, 1, 0.05)
+	parameter(noise_sec.body, "Seed", "seed", 0, 999999, 1, "", 0, 9999)
+	parameter(noise_sec.body, "Scale", "scale", 2, 512, 1, "m")
+	parameter(noise_sec.body, "Noise", "amplitude", 0, 100, 0.5, "m")
+	parameter(noise_sec.body, "Min H", "low", -3000, 3000, 1, "m", -200, 500)
+	parameter(noise_sec.body, "Max H", "high", -3000, 3000, 1, "m", -200, 500)
+	var rad_grp := HBoxContainer.new()
+	rad_grp.add_theme_constant_override("separation", 4)
+	var rad_lbl := Label.new()
+	rad_lbl.text = "Radius"
+	rad_lbl.custom_minimum_size.x = 76
+	rad_grp.add_child(rad_lbl)
+	spin(rad_grp, range_field, 32, 256, 16, "m")
+	noise_sec.add_content(rad_grp)
+	range_field.value = 128
+	range_field.value_changed.connect(func(_value): invalidate())
+
+	var mat_sec := CollapsibleSection.new("Vertex Color & Base Tile", "node_materials", false)
+	attributes_panel.add_child(mat_sec)
+	color_parameter(mat_sec.body, "RGB low", "color_low")
+	color_parameter(mat_sec.body, "RGB high", "color_high")
+	parameter(mat_sec.body, "Tile below", "tile_low", 0, 15, 1)
+	parameter(mat_sec.body, "Tile above", "tile_high", 0, 15, 1)
+	parameter(mat_sec.body, "Tile at", "tile_height", -100000, 100000, 1, "m", -200, 500)
+
+	var mask_sec := CollapsibleSection.new("Slope & Mask", "node_masks", true)
+	attributes_panel.add_child(mask_sec)
+	parameter(mask_sec.body, "Slope min", "slope_low", 0, 90, 1, "°")
+	parameter(mask_sec.body, "Slope max", "slope_high", 0, 90, 1, "°")
+	parameter(mask_sec.body, "Mask wt", "mask_weight", 0, 1, 0.05)
 
 
-func begin(value: Document, center: Vector2i) -> void:
+func begin(value: Document, center: Vector2i, initial_layer: int = -1) -> void:
 	invalidate()
 	document = value
 	focus = center
+	if document == null:
+		return
 	working = document.layers.duplicate(true)
-	load_layer(0)
+	if working.is_empty():
+		working = [Graph.layer()]
+	var target_layer := clampi(initial_layer if initial_layer >= 0 else selected, 0, working.size() - 1)
+	load_layer(target_layer)
 	set_message("Connect Height, Color or Base Tile output. Preview around the terrain cursor.")
-	popup_centered()
+
+
+func sync_from_document(select_idx: int = -1) -> void:
+	if document == null:
+		return
+	invalidate()
+	working = document.layers.duplicate(true)
+	if working.is_empty():
+		working = [Graph.layer()]
+	var idx := clampi(select_idx if select_idx >= 0 else selected, 0, working.size() - 1)
+	load_layer(idx)
 
 
 func button(parent: Control, caption: String, action: Callable) -> Button:
@@ -156,15 +189,18 @@ func spin(parent: Control, field: SliderField, minimum: float, maximum: float, s
 		field.set_slider_range(slider_lo, slider_hi)
 	if not unit.is_empty():
 		field.set_unit_suffix(unit)
-	field.set_readout_width(42.0)
-	field.custom_minimum_size.x = 100
+	field.set_readout_width(44.0)
+	field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	parent.add_child(field)
 
 
 func parameter(bar: Control, caption: String, key: String, minimum: float, maximum: float, step: float, unit: String = "", slider_lo: float = NAN, slider_hi: float = NAN) -> void:
 	var grp := HBoxContainer.new()
-	grp.add_theme_constant_override("separation", 3)
-	label(grp, caption)
+	grp.add_theme_constant_override("separation", 4)
+	var lbl := Label.new()
+	lbl.text = caption
+	lbl.custom_minimum_size.x = 76
+	grp.add_child(lbl)
 	var field := SliderField.new()
 	spin(grp, field, minimum, maximum, step, unit, slider_lo, slider_hi)
 	field.value_changed.connect(func(value): set_parameter(key, value))
@@ -174,10 +210,14 @@ func parameter(bar: Control, caption: String, key: String, minimum: float, maxim
 
 func color_parameter(bar: Control, caption: String, key: String) -> void:
 	var grp := HBoxContainer.new()
-	grp.add_theme_constant_override("separation", 3)
-	label(grp, caption)
+	grp.add_theme_constant_override("separation", 4)
+	var lbl := Label.new()
+	lbl.text = caption
+	lbl.custom_minimum_size.x = 76
+	grp.add_child(lbl)
 	var field := ColorPickerButton.new()
-	field.custom_minimum_size = Vector2(34, 20)
+	field.custom_minimum_size = Vector2(64, 22)
+	field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	field.edit_alpha = false
 	field.color_changed.connect(func(color: Color): set_parameter(key, Terrain.rgb_word(color)))
 	grp.add_child(field)
@@ -221,7 +261,9 @@ func make_graph() -> void:
 func load_layer(index: int) -> void:
 	invalidate()
 	loading = true
-	selected = index
+	if working.is_empty():
+		working = [Graph.layer()]
+	selected = clampi(index, 0, working.size() - 1)
 	layer_select.clear()
 	for i in working.size():
 		layer_select.add_item("Layer %d" % (i + 1))
@@ -268,12 +310,14 @@ func add_layer() -> void:
 	if working.size() < Graph.MAX_LAYERS:
 		working.append(Graph.layer())
 		load_layer(working.size() - 1)
+		_sync_working_to_doc_non_destructive()
 
 
 func remove_layer() -> void:
 	if working.size() > 1:
 		working.remove_at(selected)
 		load_layer(mini(selected, working.size() - 1))
+		_sync_working_to_doc_non_destructive()
 
 
 func move_layer(direction: int) -> void:
@@ -282,18 +326,27 @@ func move_layer(direction: int) -> void:
 		var item: Dictionary = working.pop_at(selected)
 		working.insert(next, item)
 		load_layer(next)
+		_sync_working_to_doc_non_destructive()
 
 
 func set_parameter(key: String, value: Variant) -> void:
-	if not loading:
+	if not loading and selected >= 0 and selected < working.size():
 		working[selected][key] = value
 		invalidate()
 
 
+func _sync_working_to_doc_non_destructive() -> void:
+	if document != null:
+		document.layers = working.map(Graph.normalize_layer)
+	layers_changed.emit(selected)
+
+
 func invalidate() -> void:
 	generation += 1
-	bake_button.disabled = true
-	preview_channel.disabled = true
+	if bake_button != null:
+		bake_button.disabled = true
+	if preview_channel != null:
+		preview_channel.disabled = true
 	if document:
 		document.clear_preview()
 		preview_display.emit(-1)
@@ -335,7 +388,7 @@ func _process(_delta: float) -> void:
 
 
 func accept_preview(result: Dictionary) -> void:
-	if not visible or generation != job_generation or document != job_document or document.edit_revision != job_revision:
+	if document == null or generation != job_generation or document != job_document or document.edit_revision != job_revision:
 		return
 	var materials: Dictionary = result["materials"]
 	if not document.show_preview(result["heights"], materials):
@@ -344,12 +397,13 @@ func accept_preview(result: Dictionary) -> void:
 	bake_button.disabled = not document.has_preview()
 	preview_channel.disabled = bake_button.disabled
 	show_preview_channel()
-	set_message("Preview: %d heights · %d colors · %d tile blocks. Bake to commit." % [
+	layers_changed.emit(selected)
+	set_message("Preview: %d heights · %d colors · %d tile blocks. Switch to 3D/2D to inspect or Bake to commit." % [
 		result["heights"].size(), materials[Terrain.Layer.COLOR].size(), materials[Terrain.Layer.TILES].size()])
 
 
 func show_preview_channel() -> void:
-	if not document.has_preview():
+	if document == null or not document.has_preview():
 		return
 	var layer := Terrain.Layer.HEIGHT
 	if preview_channel.selected > 0:
@@ -364,16 +418,21 @@ func show_preview_channel() -> void:
 
 
 func keep_layers() -> void:
+	if document == null:
+		return
 	var graph := Graph.new()
 	if not graph.validate_stack(working):
 		set_message(graph.error)
 		return
 	document.layers = working.map(Graph.normalize_layer)
+	layers_changed.emit(selected)
 	updated.emit("Saved node settings in the document. Save Project to persist them.")
 	set_message("Keeping layer settings. Terrain changes only on Bake.")
 
 
 func bake() -> void:
+	if document == null:
+		return
 	var heights := document.preview_after.size()
 	var materials := document.package.terrain.material_previews
 	var colors: int = materials.get(Terrain.Layer.COLOR, {}).size()
@@ -386,13 +445,11 @@ func bake() -> void:
 	preview_channel.disabled = true
 	preview_display.emit(-1)
 	updated.emit("Baked %d heights · %d colors · %d tile blocks." % [heights, colors, tiles])
-	hide()
 
 
 func close_studio() -> void:
 	invalidate()
 	document = null
-	hide()
 
 
 func set_message(value: String) -> void:

@@ -1,29 +1,17 @@
-extends AcceptDialog
-## Universal Mod-Aware Object Browser & Placement Catalog.
-##
-## Strictly scoped to the active document's resolved content environment
-## (ModRegistry.resolve_content_environment + AssetIndex). Never leaks VSR/VRV
-## assets into Stock maps and NEVER advertises unavailable / missing ODFs as
-## placeable VERIFIED_NEW_CLASS.
-##
-## Separates five independent per-entry capabilities:
-##   1. serialization     : VERIFIED_NATIVE_WRITER | TEMPLATE_CLONE | UNSUPPORTED
-##   2. assetAvailability : AVAILABLE | AVAILABLE_PACKED | MISSING | CORRUPT
-##   3. preview           : AVAILABLE | MISSING_MESH | PACKED_UNVERIFIED | UNKNOWN
-##   4. runtime           : READY | MISSING_ASSETS | UNRESOLVED_MOD_DEPS | UNVERIFIED
-##   5. placement         : ENABLED | DISABLED
+extends VBoxContainer
+## Docked Universal Mod-Aware Object Browser & Placement Catalog.
+## Mounted in the Left Dock "Assets" tab for continuous multi-object placement
+## without modal popups. Preserves all five separated capability statuses.
 
 const AssetIndex := preload("res://core/asset_index.gd")
 const ModRegistry := preload("res://core/mod_registry.gd")
 const Document := preload("res://core/map_document.gd")
 const BznObjects := preload("res://formats/bzn_objects.gd")
 const Layouts := preload("res://formats/bzn_layouts.gd")
-const Wintage := preload("res://themes/wintage.gd")
 const ChoiceGroup := preload("res://themes/choice_group.gd")
 const SliderField := preload("res://themes/slider_field.gd")
+const CollapsibleSection := preload("res://ui/collapsible_section.gd")
 
-const DIALOG_WIDTH := 780
-const DIALOG_MIN_HEIGHT := 470
 const PAGE_SIZE := 260
 
 const CAP_NEW_CLASS := "VERIFIED_NEW_CLASS"
@@ -60,6 +48,7 @@ const AVAILABILITY_FILTERS := ["All", "Available", "Missing"]
 signal place_requested(odf: String, team: int, template_view: int, is_native_new: bool)
 signal place_at_cursor_requested(odf: String, team: int, template_view: int, is_native_new: bool)
 signal status_message(text: String)
+signal entry_selected(entry: Dictionary)
 
 var document: Document
 var registry: ModRegistry
@@ -72,8 +61,8 @@ var catalog_revision := 0
 var in_map_templates: Dictionary = {} # odf_stem_lower -> view_index
 var catalog_entries: Array[Dictionary] = []
 var filtered_entries: Array[Dictionary] = []
-var parsed_cache: Dictionary = {} # "stem|stamp" -> parsed info dict
-var dep_cache: Dictionary = {} # "odf_key|stamp" -> inspect_odf_dependencies dict
+var parsed_cache: Dictionary = {}
+var dep_cache: Dictionary = {}
 var visible_limit := PAGE_SIZE
 
 var env_badge := Label.new()
@@ -83,124 +72,76 @@ var faction_group := ChoiceGroup.new(0)
 var availability_group := ChoiceGroup.new(0)
 var count_label := Label.new()
 var item_list := ItemList.new()
-var show_more_button: Button
-var refresh_button: Button
+var show_more_button := Button.new()
+var refresh_button := Button.new()
+var detail_panel := VBoxContainer.new()
 var detail_title := Label.new()
 var detail_meta := Label.new()
 var detail_deps := Label.new()
 var capability_label := Label.new()
 var team_field := SliderField.new()
-var place_mode_button: Button
-var place_cursor_button: Button
+var place_mode_button := Button.new()
+var place_cursor_button := Button.new()
 var _rebuilding := false
 
 
 func _ready() -> void:
-	title = "Object Browser"
-	ok_button_text = "Close"
-	var root := VBoxContainer.new()
-	root.custom_minimum_size.x = DIALOG_WIDTH - 24
-	root.add_theme_constant_override("separation", 4)
-	add_child(root)
+	size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	size_flags_vertical = Control.SIZE_EXPAND_FILL
+	add_theme_constant_override("separation", 3)
 
 	env_badge.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	env_badge.custom_minimum_size.x = DIALOG_WIDTH - 32
-	root.add_child(env_badge)
+	env_badge.text = "Open a map to browse mod assets."
+	add_child(env_badge)
 
 	var filter_row := HBoxContainer.new()
-	filter_row.add_theme_constant_override("separation", 6)
-	root.add_child(filter_row)
-	var search_lbl := Label.new()
-	search_lbl.text = "Search:"
-	filter_row.add_child(search_lbl)
-	search_box.placeholder_text = "Filter by ODF, name, class, faction, source…"
+	filter_row.add_theme_constant_override("separation", 4)
+	add_child(filter_row)
+	search_box.placeholder_text = "Filter ODF, class, faction…"
 	search_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	search_box.text_changed.connect(func(_t: String): _reset_paging_and_rebuild())
 	filter_row.add_child(search_box)
-	count_label.text = "0 objects"
-	filter_row.add_child(count_label)
-	refresh_button = Button.new()
-	refresh_button.text = "Refresh"
+	refresh_button.text = "↻"
 	refresh_button.tooltip_text = "Re-scan active mod asset roots and update availability"
 	refresh_button.pressed.connect(func(): refresh_catalog())
 	filter_row.add_child(refresh_button)
 
+	var filters_sec := CollapsibleSection.new("Filters", "obj_browser_filters", true)
+	add_child(filters_sec)
 	for cat: String in CATEGORIES:
 		category_group.add_item(cat)
 	category_group.item_selected.connect(func(_i: int): _reset_paging_and_rebuild())
-	root.add_child(category_group)
-
-	var subfilter_row := HBoxContainer.new()
-	subfilter_row.add_theme_constant_override("separation", 10)
-	root.add_child(subfilter_row)
-	faction_group.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	faction_group.size_flags_stretch_ratio = 2.0
+	filters_sec.add_content(category_group)
 	for fac: String in FACTIONS:
 		faction_group.add_item(fac)
 	faction_group.item_selected.connect(func(_i: int): _reset_paging_and_rebuild())
-	subfilter_row.add_child(faction_group)
-	availability_group.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	availability_group.size_flags_stretch_ratio = 1.0
+	filters_sec.add_content(faction_group)
 	for av: String in AVAILABILITY_FILTERS:
 		availability_group.add_item(av)
 	availability_group.item_selected.connect(func(_i: int): _reset_paging_and_rebuild())
-	subfilter_row.add_child(availability_group)
+	filters_sec.add_content(availability_group)
 
-	var split := HSplitContainer.new()
-	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	split.custom_minimum_size = Vector2(DIALOG_WIDTH - 24, 290)
-	root.add_child(split)
+	count_label.text = "0 objects"
+	add_child(count_label)
 
-	var left := VBoxContainer.new()
-	left.custom_minimum_size = Vector2(370, 280)
-	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	left.size_flags_stretch_ratio = 1.05
-	left.add_theme_constant_override("separation", 3)
-	split.add_child(left)
+	item_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	item_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	item_list.custom_minimum_size = Vector2(360, 250)
+	item_list.custom_minimum_size.y = 140
 	item_list.item_selected.connect(func(_i: int): update_selection_detail())
 	item_list.item_activated.connect(func(_i: int): request_place_mode())
-	left.add_child(item_list)
-	show_more_button = Button.new()
+	add_child(item_list)
+
 	show_more_button.text = "Show More (+%d)" % PAGE_SIZE
 	show_more_button.hide()
 	show_more_button.pressed.connect(_show_more_rows)
-	left.add_child(show_more_button)
+	add_child(show_more_button)
 
-	var right := VBoxContainer.new()
-	right.custom_minimum_size = Vector2(340, 280)
-	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	right.size_flags_stretch_ratio = 1.0
-	right.add_theme_constant_override("separation", 4)
-	split.add_child(right)
-
-	detail_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	detail_title.custom_minimum_size.x = 328
-	right.add_child(detail_title)
-	capability_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	capability_label.custom_minimum_size.x = 328
-	right.add_child(capability_label)
-	detail_meta.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	detail_meta.custom_minimum_size.x = 328
-	right.add_child(detail_meta)
-
-	var dep_scroll := ScrollContainer.new()
-	dep_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	dep_scroll.custom_minimum_size = Vector2(328, 100)
-	right.add_child(dep_scroll)
-	detail_deps.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	detail_deps.custom_minimum_size.x = 310
-	detail_deps.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	dep_scroll.add_child(detail_deps)
-
-	var action_row := HFlowContainer.new()
-	action_row.add_theme_constant_override("h_separation", 6)
-	action_row.add_theme_constant_override("v_separation", 4)
-	right.add_child(action_row)
-
+	var quick_place := HFlowContainer.new()
+	quick_place.add_theme_constant_override("h_separation", 4)
+	quick_place.add_theme_constant_override("v_separation", 3)
+	add_child(quick_place)
 	var team_grp := HBoxContainer.new()
-	team_grp.add_theme_constant_override("separation", 4)
+	team_grp.add_theme_constant_override("separation", 3)
 	var team_lbl := Label.new()
 	team_lbl.text = "Team"
 	team_grp.add_child(team_lbl)
@@ -208,32 +149,48 @@ func _ready() -> void:
 	team_field.max_value = 15
 	team_field.step = 1
 	team_field.value = 0
-	team_field.set_readout_width(32.0)
-	team_field.custom_minimum_size.x = 86
+	team_field.set_readout_width(28.0)
+	team_field.custom_minimum_size.x = 76
 	team_grp.add_child(team_field)
-	action_row.add_child(team_grp)
+	quick_place.add_child(team_grp)
 
-	place_mode_button = Button.new()
-	place_mode_button.text = "Place on Terrain"
-	place_mode_button.tooltip_text = "Click in the 2D or 3D view to place the selected object on the terrain"
+	place_mode_button.text = "Place"
+	place_mode_button.tooltip_text = "Click in 2D or 3D viewport to place (Shift+click repeats, Esc cancels)"
 	place_mode_button.pressed.connect(request_place_mode)
-	action_row.add_child(place_mode_button)
+	quick_place.add_child(place_mode_button)
 
-	place_cursor_button = Button.new()
-	place_cursor_button.text = "Place at Cursor"
-	place_cursor_button.tooltip_text = "Place immediately at the current terrain cursor or map center"
+	place_cursor_button.text = "At Cursor"
+	place_cursor_button.tooltip_text = "Place immediately at current terrain cursor or map center"
 	place_cursor_button.pressed.connect(request_place_at_cursor)
-	action_row.add_child(place_cursor_button)
+	quick_place.add_child(place_cursor_button)
+
+	# Detail panel (mounted inside Right Attributes Inspector OBJECT_BROWSER context!)
+	detail_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	detail_panel.add_theme_constant_override("separation", 4)
+	detail_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	detail_panel.add_child(detail_title)
+	capability_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	detail_panel.add_child(capability_label)
+	detail_meta.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	detail_panel.add_child(detail_meta)
+	var dep_sec := CollapsibleSection.new("Dependencies & Native Verification", "obj_browser_deps", false)
+	detail_panel.add_child(dep_sec)
+	detail_deps.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	dep_sec.add_content(detail_deps)
 
 
 func begin(doc: Document, reg: ModRegistry, game: String, vrv: String) -> void:
+	var same_env := (document == doc and registry == reg and game_dir == game and vrv_dir == vrv and not catalog_entries.is_empty())
 	document = doc
 	registry = reg
 	game_dir = game
 	vrv_dir = vrv
+	if same_env:
+		if not _sync_if_assets_changed():
+			update_selection_detail()
+		return
 	visible_limit = PAGE_SIZE
 	refresh_catalog()
-	Wintage.popup_fit(self, DIALOG_WIDTH, DIALOG_MIN_HEIGHT)
 
 
 func _compute_live_env_stamp() -> String:
@@ -273,11 +230,9 @@ func refresh_catalog() -> void:
 	catalog_entries.clear()
 	visible_limit = PAGE_SIZE
 
-	# Ensure mod discovery ran if Object Browser was opened before initial scan completed
 	if not game_dir.strip_edges().is_empty() and registry.last_game_dir != game_dir.strip_edges():
 		registry.discover_installed(game_dir, vrv_dir)
 
-	# Collect in-map templates (first view index per ODF stem)
 	for view in document.object_count():
 		var stem := _stem(document.object_odf(view))
 		if not stem.is_empty() and not in_map_templates.has(stem):
@@ -313,18 +268,17 @@ func refresh_catalog() -> void:
 
 	var dep_note := ""
 	if not known_profile or mod_id == "custom:unknown":
-		dep_note = "  |  [WARN] Unknown Mod Profile"
+		dep_note = " · [WARN] Unknown Mod"
 	elif not mod_installed:
-		dep_note = "  |  [WARN] Mod Not Installed"
+		dep_note = " · [WARN] Not Installed"
 	elif not disabled_deps.is_empty():
-		dep_note = "  |  [WARN] Disabled Dep(s): %s" % ", ".join(disabled_deps)
+		dep_note = " · [WARN] Disabled Dep"
 	elif not missing_deps.is_empty():
-		dep_note = "  |  [WARN] Missing Dep(s): %s" % ", ".join(missing_deps)
-	env_badge.text = "Environment: %s (%s)  |  Mounted Roots: %d  |  Indexed ODFs: %d  |  Layout: %s%s" % [
-		mod_id.to_upper(), document.mission_profile, layered_roots.size(), all_odfs.size(), document.package.layout_id, dep_note]
+		dep_note = " · [WARN] Missing Dep"
+	env_badge.text = "%s (%s) · %d roots · %d ODFs%s" % [
+		mod_id.to_upper(), document.mission_profile, layered_roots.size(), all_odfs.size(), dep_note]
 
 	var seen := {}
-	# 1. Verified native new-class builders: NEVER claim available or placeable when ODF is missing!
 	for v_stem: String in BznObjects.VERIFIED_NATIVE_CLASSES:
 		seen[v_stem] = true
 		var odf_key := v_stem + ".odf"
@@ -362,7 +316,6 @@ func refresh_catalog() -> void:
 			"priority": 0 if place_st == PLACE_ENABLED else 1,
 		})
 
-	# 2. In-map cloneable templates not already listed above
 	for stem: String in in_map_templates:
 		if seen.has(stem):
 			continue
@@ -398,7 +351,6 @@ func refresh_catalog() -> void:
 			"priority": 1 if place_st == PLACE_ENABLED else 2,
 		})
 
-	# 3. Remaining ODFs in active mod environment (sorted deterministically, lazy-inspected on selection)
 	var extra_keys: Array = all_odfs.keys()
 	extra_keys.sort()
 	for odf_key_v in extra_keys:
@@ -499,13 +451,13 @@ func rebuild_list() -> void:
 		var cap := String(e["capability"])
 		var tag := "[NEW]" if cap == CAP_NEW_CLASS else ("[CLONE]" if cap == CAP_TEMPLATE_CLONE else ("[MISS]" if cap == CAP_MISSING_ASSET else "[VIEW]"))
 		var title_part := "%s — %s" % [e["odf"], e["displayName"]] if String(e["displayName"]) != String(e["odf"]) else String(e["odf"])
-		item_list.add_item("%s %s  (%s · %s)" % [tag, title_part, e["category"], e["sourceMod"]])
+		item_list.add_item("%s %s (%s)" % [tag, title_part, e["category"]])
 		item_list.set_item_metadata(i, i)
 
 	var remaining := filtered_entries.size() - shown
 	if remaining > 0:
-		count_label.text = "Showing %d / %d matches (total %d)" % [shown, filtered_entries.size(), catalog_entries.size()]
-		show_more_button.text = "Show More (+%d of %d remaining)" % [mini(PAGE_SIZE, remaining), remaining]
+		count_label.text = "%d / %d matches (total %d)" % [shown, filtered_entries.size(), catalog_entries.size()]
+		show_more_button.text = "Show More (+%d)" % mini(PAGE_SIZE, remaining)
 		show_more_button.show()
 	else:
 		count_label.text = "%d / %d objects" % [filtered_entries.size(), catalog_entries.size()]
@@ -584,7 +536,7 @@ func inspect_entry_capabilities(entry: Dictionary) -> Dictionary:
 func update_selection_detail() -> void:
 	var entry := selected_entry()
 	if entry.is_empty():
-		detail_title.text = "No object selected."
+		detail_title.text = "No catalog asset selected."
 		capability_label.text = ""
 		detail_meta.text = ""
 		detail_deps.text = ""
@@ -609,8 +561,8 @@ func update_selection_detail() -> void:
 			class_lbl = "(unknown)"
 
 	var mod_id := String(active_env.get("modProfile", document.mod_profile)).to_upper()
-	detail_title.text = "%s  (%s)" % [disp_name, odf_key]
-	capability_label.text = "Writer: %s  |  ODF: %s (%s)\nMesh Preview: %s  |  Mod: %s  |  Playtest: %s  |  Place: %s" % [
+	detail_title.text = "%s (%s)" % [disp_name, odf_key]
+	capability_label.text = "Writer: %s | ODF: %s (%s)\nPreview: %s | Mod: %s | Runtime: %s | Place: %s" % [
 		String(caps["serialization"]),
 		String(caps["assetAvailability"]),
 		String(caps["inspectionStatus"]),
@@ -623,7 +575,7 @@ func update_selection_detail() -> void:
 	var asset_path := String(entry["assetPath"])
 	if asset_path.is_empty():
 		asset_path = "(ODF MISSING in active content environment)"
-	detail_meta.text = "Class: %s  |  Category: %s  |  Faction: %s\nSource: %s\nAsset: %s" % [
+	detail_meta.text = "Class: %s | Category: %s | Faction: %s\nSource: %s\nAsset: %s" % [
 		class_lbl, entry["category"], entry["faction"], entry["sourceMod"], asset_path]
 
 	var dep_lines: Array[String] = []
@@ -672,6 +624,7 @@ func update_selection_detail() -> void:
 	var can_place := String(caps["placement"]) == PLACE_ENABLED
 	place_mode_button.disabled = not can_place
 	place_cursor_button.disabled = not can_place
+	entry_selected.emit(entry)
 
 
 func request_place_mode() -> void:
@@ -687,7 +640,6 @@ func request_place_mode() -> void:
 		return
 	var is_new := String(caps["serialization"]) == SER_NATIVE_WRITER
 	var tpl := -1 if is_new else int(entry["templateView"])
-	hide()
 	place_requested.emit(String(entry["odf"]), int(team_field.value), tpl, is_new)
 
 

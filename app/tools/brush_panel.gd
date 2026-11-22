@@ -38,15 +38,14 @@ var _tile_box := VBoxContainer.new()
 
 func _ready() -> void:
 	custom_minimum_size.x = 176
-	var scroll := ScrollContainer.new()
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	add_child(scroll)
+	size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var margin := MarginContainer.new()
 	margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	for side in ["top", "left", "bottom", "right"]:
-		margin.add_theme_constant_override("margin_" + side, 5)
-	scroll.add_child(margin)
+		margin.add_theme_constant_override("margin_" + side, 4)
+	add_child(margin)
 	var layout := VBoxContainer.new()
+	layout.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	layout.add_theme_constant_override("separation", 4)
 	margin.add_child(layout)
 	section(layout, "Terrain Brush", "Paint height, native color or tile IDs")

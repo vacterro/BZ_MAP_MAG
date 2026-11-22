@@ -1,17 +1,12 @@
-extends AcceptDialog
-## Target Profile Switcher + Mod Manager UI.
-## Tab 1 ("Target Profile"): Switch editing environment (non-destructive,
-## undoable) or run a dry-run conversion compatibility analysis.
-## Tab 2 ("Game & Mods"): Discover installed Steam Workshop mods, inspect
-## paths/DLLs/dependencies, enable/disable profiles, register custom mods, and
-## choose the default profile for new maps.
+extends VBoxContainer
+## Docked Target Profile Switcher + Mod Manager inside Right Attributes Inspector.
+## Tab 1 ("Target Profile"): Switch editing environment or analyze/convert ODFs.
+## Tab 2 ("Game & Mods"): Discover Workshop mods, inspect dependencies & add custom mods.
 
 const Document := preload("res://core/map_document.gd")
 const ModRegistry := preload("res://core/mod_registry.gd")
 const MissionProfiles := preload("res://core/mission_profiles.gd")
-const Wintage := preload("res://themes/wintage.gd")
 const ChoiceGroup := preload("res://themes/choice_group.gd")
-const DIALOG_WIDTH := 640
 
 signal profile_applied(message: String)
 signal mods_changed(default_mod_id: String)
@@ -27,133 +22,117 @@ var detected_label := RichTextLabel.new()
 var engine_select := ChoiceGroup.new(0)
 var mod_select := ChoiceGroup.new(0)
 var mission_select := ChoiceGroup.new(0)
-var switch_btn: Button
-var analyze_btn: Button
-var convert_btn: Button
+var switch_btn := Button.new()
+var analyze_btn := Button.new()
+var convert_btn := Button.new()
 var analysis_output := RichTextLabel.new()
 
 var mod_list := ItemList.new()
 var mod_detail := RichTextLabel.new()
-var toggle_mod_btn: Button
-var set_default_btn: Button
-var workshop_btn: Button
+var toggle_mod_btn := Button.new()
+var set_default_btn := Button.new()
+var workshop_btn := Button.new()
 var custom_name_field := LineEdit.new()
 var custom_dir_field := LineEdit.new()
 var custom_dir_picker := FileDialog.new()
 
 
 func _ready() -> void:
-	title = "Target Profile & Mod Manager"
-	ok_button_text = "Close"
+	size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	add_theme_constant_override("separation", 4)
 
-	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	tabs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	tabs.custom_minimum_size.x = DIALOG_WIDTH - 24
-	tabs.tab_changed.connect(func(_t): _fit_dialog())
+	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	add_child(tabs)
 
 	# --- Tab 1: Project Target Profile ---
-	var prof_scroll := ScrollContainer.new()
-	prof_scroll.name = "Target Profile"
-	prof_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	prof_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	prof_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	prof_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	tabs.add_child(prof_scroll)
-
 	var prof_tab := VBoxContainer.new()
+	prof_tab.name = "Profile"
 	prof_tab.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	prof_tab.add_theme_constant_override("separation", 4)
-	prof_scroll.add_child(prof_tab)
+	tabs.add_child(prof_tab)
 
 	var det_hdr := Label.new()
-	det_hdr.text = "Detected Map Evidence (read-only inspection — native source bytes are never altered by switching)"
+	det_hdr.text = "Detected Map Evidence (non-destructive)"
 	prof_tab.add_child(det_hdr)
 	detected_label.fit_content = true
 	detected_label.scroll_active = false
-	detected_label.custom_minimum_size = Vector2(DIALOG_WIDTH - 48, 0)
+	detected_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	prof_tab.add_child(detected_label)
 
-	_add_row(prof_tab, "Engine Profile", engine_select)
+	_add_section_widget(prof_tab, "Engine Profile", engine_select)
 	for eid: String in ["bzcc-2.0.185", "bzcc-auto-detected", "bzcc-unknown-readonly"]:
 		engine_select.add_item(String(ModRegistry.ENGINE_PROFILES[eid]["displayName"]))
 		engine_select.set_item_metadata(engine_select.item_count - 1, eid)
+
 	mod_select.set_overflow_limit(6, 54)
-	_add_row(prof_tab, "Mod Profile", mod_select)
-	_add_row(prof_tab, "Mission Profile", mission_select)
+	_add_section_widget(prof_tab, "Mod Profile", mod_select)
+
+	_add_section_widget(prof_tab, "Mission Profile", mission_select)
 	for mode: String in MissionProfiles.MISSION_MODES:
 		mission_select.add_item(String(MissionProfiles.MODE_LABELS.get(mode, mode)))
 		mission_select.set_item_metadata(mission_select.item_count - 1, mode)
 
 	var actions := HFlowContainer.new()
-	actions.add_theme_constant_override("h_separation", 6)
-	actions.add_theme_constant_override("v_separation", 4)
+	actions.add_theme_constant_override("h_separation", 4)
+	actions.add_theme_constant_override("v_separation", 3)
 	prof_tab.add_child(actions)
-	switch_btn = Button.new()
-	switch_btn.text = "Change Editing Environment (Non-Destructive)"
+	switch_btn.text = "Switch Environment"
+	switch_btn.tooltip_text = "Change editing environment (non-destructive, undoable)"
 	switch_btn.pressed.connect(apply_environment_switch)
 	actions.add_child(switch_btn)
-	analyze_btn = Button.new()
-	analyze_btn.text = "Analyze Conversion (Dry-Run)"
+	analyze_btn.text = "Analyze Conversion"
 	analyze_btn.pressed.connect(run_conversion_analysis)
 	actions.add_child(analyze_btn)
-	convert_btn = Button.new()
-	convert_btn.text = "Convert Objects (Verified / Undoable)"
+	convert_btn.text = "Convert Objects"
 	convert_btn.pressed.connect(apply_verified_conversion)
 	actions.add_child(convert_btn)
 
 	analysis_output.fit_content = true
 	analysis_output.scroll_active = false
-	analysis_output.custom_minimum_size = Vector2(DIALOG_WIDTH - 48, 0)
+	analysis_output.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	analysis_output.hide()
 	prof_tab.add_child(analysis_output)
 
 	# --- Tab 2: Game & Mods Manager ---
 	var mods_tab := VBoxContainer.new()
-	mods_tab.name = "Game & Mods"
+	mods_tab.name = "Mods"
+	mods_tab.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	mods_tab.add_theme_constant_override("separation", 4)
 	tabs.add_child(mods_tab)
 
 	var scan_row := HFlowContainer.new()
 	scan_row.add_theme_constant_override("h_separation", 4)
+	scan_row.add_theme_constant_override("v_separation", 3)
 	mods_tab.add_child(scan_row)
 	var scan_btn := Button.new()
-	scan_btn.text = "Scan Installed Mods"
+	scan_btn.text = "Scan Mods"
 	scan_btn.pressed.connect(rescan_mods)
 	scan_row.add_child(scan_btn)
-	toggle_mod_btn = Button.new()
-	toggle_mod_btn.text = "Enable / Disable"
+	toggle_mod_btn.text = "Toggle On/Off"
 	toggle_mod_btn.pressed.connect(toggle_selected_mod)
 	scan_row.add_child(toggle_mod_btn)
-	set_default_btn = Button.new()
-	set_default_btn.text = "Set Default for New Maps"
+	set_default_btn.text = "Set Default"
 	set_default_btn.pressed.connect(set_selected_as_default)
 	scan_row.add_child(set_default_btn)
-	workshop_btn = Button.new()
-	workshop_btn.text = "Open Workshop Page"
+	workshop_btn.text = "Workshop"
 	workshop_btn.pressed.connect(open_selected_workshop)
 	scan_row.add_child(workshop_btn)
 
-	var split := HSplitContainer.new()
-	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	split.custom_minimum_size.y = 220
-	mods_tab.add_child(split)
-
-	mod_list.custom_minimum_size.x = 260
-	mod_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mod_list.custom_minimum_size.y = 120
 	mod_list.item_selected.connect(func(_i): show_selected_mod_detail())
-	split.add_child(mod_list)
+	mods_tab.add_child(mod_list)
 
-	mod_detail.custom_minimum_size.x = 280
+	mod_detail.fit_content = true
+	mod_detail.scroll_active = false
 	mod_detail.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	split.add_child(mod_detail)
+	mods_tab.add_child(mod_detail)
 
+	custom_name_field.placeholder_text = "Custom mod name"
+	mods_tab.add_child(custom_name_field)
 	var custom_row := HBoxContainer.new()
 	custom_row.add_theme_constant_override("separation", 4)
 	mods_tab.add_child(custom_row)
-	custom_name_field.placeholder_text = "Custom mod name"
-	custom_name_field.custom_minimum_size.x = 140
-	custom_row.add_child(custom_name_field)
 	custom_dir_field.placeholder_text = "Custom mod asset folder"
 	custom_dir_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	custom_row.add_child(custom_dir_field)
@@ -162,39 +141,26 @@ func _ready() -> void:
 	custom_dir_picker.dir_selected.connect(func(d: String): custom_dir_field.text = d)
 	add_child(custom_dir_picker)
 	var browse_btn := Button.new()
-	browse_btn.text = "Browse…"
+	browse_btn.text = "…"
 	browse_btn.pressed.connect(func(): custom_dir_picker.popup_centered_ratio(0.72))
 	custom_row.add_child(browse_btn)
 	var add_custom_btn := Button.new()
-	add_custom_btn.text = "Add Custom Mod"
+	add_custom_btn.text = "+ Add"
 	add_custom_btn.pressed.connect(add_custom_mod)
 	custom_row.add_child(add_custom_btn)
 
 
-func _add_row(parent: Control, caption: String, widget: Control) -> void:
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 6)
-	parent.add_child(row)
+func _add_section_widget(parent: Control, caption: String, widget: Control) -> void:
 	var lbl := Label.new()
 	lbl.text = caption
-	lbl.custom_minimum_size.x = 120
-	row.add_child(lbl)
+	parent.add_child(lbl)
 	widget.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(widget)
+	parent.add_child(widget)
 
 
 func _set_analysis_text(text: String) -> void:
 	analysis_output.text = text
 	analysis_output.visible = not text.strip_edges().is_empty()
-	_fit_dialog()
-
-
-func _fit_dialog(initial_popup: bool = false) -> void:
-	var min_h := 360 if tabs.current_tab == 1 else 0
-	if initial_popup:
-		Wintage.popup_fit(self, DIALOG_WIDTH, min_h)
-	elif visible:
-		Wintage.shrink_dialog(self, DIALOG_WIDTH, min_h)
 
 
 func begin(doc: Document, mod_reg: ModRegistry, game_path: String, vrv_path: String, current_default_mod: String = "stock", initial_tab: int = 0) -> void:
@@ -205,7 +171,6 @@ func begin(doc: Document, mod_reg: ModRegistry, game_path: String, vrv_path: Str
 	default_new_mod = current_default_mod
 	tabs.current_tab = clampi(initial_tab, 0, 1)
 	refresh_all()
-	_fit_dialog(true)
 
 
 func refresh_all() -> void:
@@ -222,9 +187,9 @@ func _refresh_mod_lists() -> void:
 		var prof := registry.get_profile(mid)
 		var enabled: bool = (mid == "stock") or not registry.disabled_mods.get(mid, false)
 		var installed := bool(prof.get("installed", mid == "stock"))
-		var def_tag := " [DEFAULT]" if mid == default_new_mod else ""
+		var def_tag := " [DEF]" if mid == default_new_mod else ""
 		var state_tag := "[ON]" if enabled else "[OFF]"
-		var inst_tag := "installed" if installed else "not installed"
+		var inst_tag := "ok" if installed else "missing"
 		mod_list.add_item("%s %s (%s)%s" % [state_tag, String(prof.get("displayName", mid)), inst_tag, def_tag])
 		mod_list.set_item_metadata(mod_list.item_count - 1, mid)
 		if enabled:
@@ -239,21 +204,20 @@ func _refresh_project_tab() -> void:
 	var has_doc := document != null
 	switch_btn.disabled = not has_doc
 	analyze_btn.disabled = not has_doc
-	if convert_btn != null:
-		convert_btn.disabled = not has_doc
+	convert_btn.disabled = not has_doc
 	if not has_doc:
 		detected_label.text = "Open a map or BZMAG project to inspect or switch its Target Profile."
 		_set_analysis_text("")
 		return
 	var info := document.detected_profile_info
 	var lines: Array[String] = [
-		"Active: Engine=%s | Mod=%s | Mission=%s | Format=%s (%s)" % [
+		"Active: %s | %s | %s | %s (%s)" % [
 			document.engine_profile, document.mod_profile, document.mission_profile,
-			document.package.layout_id, "explicit" if document.profile_explicit else "auto-detected"],
+			document.package.layout_id, "explicit" if document.profile_explicit else "auto"],
 	]
 	for cand_v in info.get("candidates", []):
 		var cand: Dictionary = cand_v
-		lines.append("Candidate: %s / %s (%s) — %s" % [
+		lines.append("Candidate: %s/%s (%s) — %s" % [
 			String(cand["modProfile"]), String(cand["missionProfile"]), String(cand["confidence"]),
 			"; ".join(cand.get("evidence", []))])
 	detected_label.text = "\n".join(lines)
@@ -304,11 +268,11 @@ func run_conversion_analysis() -> void:
 	var report := registry.analyze_conversion(document, selected_target_mod(), selected_target_mission(), MissionProfiles, {}, game_dir, vrv_dir)
 	var dll_id: Dictionary = report.get("dllIdentity", {})
 	var lines: Array[String] = [
-		"=== Dry-Run Conversion & Compatibility Report (%s/%s -> %s/%s) ===" % [
+		"=== Dry-Run Conversion Report (%s/%s -> %s/%s) ===" % [
 			report["sourceMod"], report["sourceMission"], report["targetMod"], report["targetMission"]],
 		"Format: %s | Mod installed: %s" % [
 			report["formatProfile"], "yes" if report["modInstalled"] else "NO"],
-		"Environment Switch: %s | Native Conversion: %s | Playtest: %s" % [
+		"Switch: %s | Conversion: %s | Playtest: %s" % [
 			String(report.get("environmentSwitchStatus", "UNKNOWN")),
 			String(report.get("nativeConversionStatus", "UNKNOWN")),
 			String(report.get("playtestStatus", "UNKNOWN"))],
@@ -347,8 +311,7 @@ func apply_verified_conversion() -> void:
 	_refresh_project_tab()
 	var rep_cnt := int(res.get("replacedCount", 0))
 	var rem_cnt := int(res.get("removedCount", 0))
-	_set_analysis_text("[OK] Converted %d object ODF(s) (removed %d) to %s / %s in 1 undo step. Source files remain untouched until Export Native." % [
-		rep_cnt, rem_cnt, mid, mis])
+	_set_analysis_text("[OK] Converted %d object ODF(s) (removed %d) to %s / %s in 1 undo step." % [rep_cnt, rem_cnt, mid, mis])
 	profile_applied.emit("Converted %d object(s) to %s / %s (1 undo step)." % [rep_cnt, mid, mis])
 
 
@@ -382,7 +345,7 @@ func show_selected_mod_detail() -> void:
 	workshop_btn.disabled = not url.begins_with("https://steamcommunity.com/")
 	toggle_mod_btn.disabled = (mid == "stock")
 	var lines: Array[String] = [
-		"ID: %s  |  Playtest: %s" % [mid, String(diag["playtestStatus"])],
+		"ID: %s | Playtest: %s" % [mid, String(diag["playtestStatus"])],
 		"Name: %s" % String(p.get("displayName", mid)),
 		"Type: %s | Installed: %s | Enabled: %s" % [
 			String(p.get("modType", "")),
@@ -398,13 +361,9 @@ func show_selected_mod_detail() -> void:
 	var disabled_d: Array = diag.get("disabledDependencies", [])
 	var cycles_d: Array = diag.get("dependencyCycles", [])
 	if not missing_d.is_empty():
-		lines.append("[WARN] Missing dependency ID(s): " + ", ".join(missing_d))
-		for ud_v in diag.get("unresolvedDetails", []):
-			var ud: Dictionary = ud_v
-			var note := String(ud.get("note", ""))
-			lines.append("  • %s%s" % [String(ud["workshopId"]), (" — " + note) if not note.is_empty() else ""])
+		lines.append("[WARN] Missing dep(s): " + ", ".join(missing_d))
 	if not disabled_d.is_empty():
-		lines.append("[WARN] Disabled dependency: " + ", ".join(disabled_d))
+		lines.append("[WARN] Disabled dep: " + ", ".join(disabled_d))
 	if not cycles_d.is_empty():
 		lines.append("[ERR] Dependency cycle: " + ", ".join(cycles_d))
 	for imp_v in diag.get("impactedCapabilities", []):

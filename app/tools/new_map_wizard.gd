@@ -1,24 +1,17 @@
-extends ConfirmationDialog
-## Stock-first Universal New Map Wizard.
-## Step 1: Target Engine -> Step 2: Mod/Content Profile (Stock default) ->
-## Step 3: Mission Mode -> Step 4: Terrain & Source -> Step 5: Summary -> Create.
-## Stock maps generate native TER v5 directly without requiring VRV or VSR, and
-## never silently override an explicit Stock choice with VSR/VRV.
+extends VBoxContainer
+## Embedded Workspace New Map page (no modal ConfirmationDialog).
+## Step 1: Engine -> Step 2: Mod Profile (Stock default) -> Step 3: Mission ->
+## Step 4: Terrain & Template -> Step 5: Summary -> Create Map.
 
 const ModRegistry := preload("res://core/mod_registry.gd")
 const CompatibilityEngine := preload("res://core/compatibility_engine.gd")
 const MissionProfiles := preload("res://core/mission_profiles.gd")
 const Snapshots := preload("res://bridge/snapshots.gd")
-const Package := preload("res://formats/map_package.gd")
-const Layouts := preload("res://formats/bzn_layouts.gd")
-const BznPaths := preload("res://formats/bzn_paths.gd")
-const BznObjects := preload("res://formats/bzn_objects.gd")
-const Wintage := preload("res://themes/wintage.gd")
 const ChoiceGroup := preload("res://themes/choice_group.gd")
 const SliderField := preload("res://themes/slider_field.gd")
-const DIALOG_WIDTH := 640
 
 signal map_created(bzn_path: String, engine_id: String, mod_id: String, mission_id: String)
+signal cancel_requested
 
 var registry: ModRegistry
 var game_dir := ""
@@ -41,6 +34,8 @@ var use_stock_tpl_btn := Button.new()
 var sanitize_stock_check := CheckBox.new()
 var summary_text := RichTextLabel.new()
 var status_label := Label.new()
+var create_button := Button.new()
+var cancel_button := Button.new()
 var source_picker := FileDialog.new()
 var ter_picker := FileDialog.new()
 var output_picker := FileDialog.new()
@@ -49,44 +44,47 @@ var _detected_source_info: Dictionary = {}
 
 
 func _ready() -> void:
-	title = "New Map Wizard"
-	ok_button_text = "Create Map"
-	dialog_hide_on_ok = false
+	size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	size_flags_vertical = Control.SIZE_EXPAND_FILL
 
 	var scroll := ScrollContainer.new()
-	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	add_child(scroll)
 
-	var layout := VBoxContainer.new()
-	layout.custom_minimum_size.x = DIALOG_WIDTH - 24
-	layout.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	layout.add_theme_constant_override("separation", 2)
-	scroll.add_child(layout)
+	var pad := MarginContainer.new()
+	pad.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for side in ["top", "bottom", "left", "right"]:
+		pad.add_theme_constant_override("margin_" + side, 8)
+	scroll.add_child(pad)
 
-	# Step 1 — Target Engine
-	_add_row(layout, "1. Target Game / Engine", engine_select)
+	var layout := VBoxContainer.new()
+	layout.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	layout.add_theme_constant_override("separation", 5)
+	pad.add_child(layout)
+
+	var hdr := Label.new()
+	hdr.text = "New Map Workspace (Stock-First · Universal BZCC Mod Support)"
+	layout.add_child(hdr)
+
+	_add_row(layout, "1. Engine", engine_select)
 	for eid: String in ["bzcc-2.0.185", "bzcc-auto-detected", "bzcc-unknown-readonly"]:
 		engine_select.add_item(String(ModRegistry.ENGINE_PROFILES[eid]["displayName"]))
 		engine_select.set_item_metadata(engine_select.item_count - 1, eid)
 	engine_select.item_selected.connect(func(_i): refresh_summary())
 
-	# Step 2 — Content / Mod Profile (compact overflow for large Workshop lists)
 	mod_select.set_overflow_limit(6, 48)
-	_add_row(layout, "2. Content Profile (Mod)", mod_select)
+	_add_row(layout, "2. Mod Profile", mod_select)
 	mod_select.item_selected.connect(func(_i): _on_mod_changed())
 
-	# Step 3 — Mission Mode
 	_add_row(layout, "3. Mission Mode", mission_select)
 	mission_select.item_selected.connect(func(_i): refresh_summary())
 
-	# Step 4 — Terrain & Base Files
 	for sz in [1024, 2048, 4096]:
 		size_select.add_item("%d × %d m" % [sz, sz])
 		size_select.set_item_metadata(size_select.item_count - 1, sz)
-	size_select.select(1) # 2048 m default
+	size_select.select(1)
 	size_select.item_selected.connect(func(_i): refresh_summary())
 	_add_row(layout, "4a. Terrain Size", size_select)
 
@@ -97,26 +95,24 @@ func _ready() -> void:
 	height_spin.set_unit_suffix("m")
 	height_spin.value = 100.0
 	height_spin.value_changed.connect(func(_v): refresh_summary())
-	_add_row(layout, "4b. Initial Height (m)", height_spin)
+	_add_row(layout, "4b. Initial Height", height_spin)
 
 	source_bzn_field.placeholder_text = "Blank BZN source (auto-selected for Stock if BZCC installed)"
 	source_bzn_field.text_changed.connect(func(_t): refresh_summary())
-	_add_browse_row(layout, "4c. Blank BZN Source", source_bzn_field, source_picker, FileDialog.FILE_MODE_OPEN_FILE, ["*.bzn ; Battlezone mission"])
+	_add_browse_row(layout, "4c. Blank BZN", source_bzn_field, source_picker, FileDialog.FILE_MODE_OPEN_FILE, ["*.bzn ; Battlezone mission"])
 
-	template_ter_field.placeholder_text = "(Optional) External .ter template — leave blank to generate native flat TER"
+	template_ter_field.placeholder_text = "(Optional) External .ter template — blank generates native flat TER"
 	template_ter_field.text_changed.connect(func(_t): refresh_summary())
-	_add_browse_row(layout, "4d. TER Template (Optional)", template_ter_field, ter_picker, FileDialog.FILE_MODE_OPEN_FILE, ["*.ter ; Terrain v5"])
+	_add_browse_row(layout, "4d. TER Template", template_ter_field, ter_picker, FileDialog.FILE_MODE_OPEN_FILE, ["*.ter ; Terrain v5"])
 
 	output_parent_field.placeholder_text = "Parent folder for the new map package"
 	output_parent_field.text_changed.connect(func(_t): refresh_summary())
-	_add_browse_row(layout, "4e. Output Parent Folder", output_parent_field, output_picker, FileDialog.FILE_MODE_OPEN_DIR, [])
+	_add_browse_row(layout, "4e. Output Folder", output_parent_field, output_picker, FileDialog.FILE_MODE_OPEN_DIR, [])
 
-	# Dynamic Incompatibility Notice (visible ONLY when template BZN has ODFs contradicting selected ModProfile)
-	incompat_box.add_theme_constant_override("separation", 2)
+	incompat_box.add_theme_constant_override("separation", 3)
 	incompat_box.hide()
 	layout.add_child(incompat_box)
 	incompat_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	incompat_label.custom_minimum_size.x = DIALOG_WIDTH - 32
 	incompat_box.add_child(incompat_label)
 	var incompat_actions := HFlowContainer.new()
 	incompat_actions.add_theme_constant_override("h_separation", 4)
@@ -132,18 +128,24 @@ func _ready() -> void:
 	switch_profile_btn.pressed.connect(_apply_suggested_profile_from_source)
 	incompat_actions.add_child(switch_profile_btn)
 
-	# Step 5 — Summary (fit-to-content, explicit width so RichTextLabel never wraps at width=0)
 	summary_text.fit_content = true
 	summary_text.scroll_active = false
-	summary_text.custom_minimum_size = Vector2(DIALOG_WIDTH - 190, 0)
-	_add_row(layout, "5. Summary & Checks", summary_text)
+	summary_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_add_row(layout, "5. Summary", summary_text)
+
+	var footer := HFlowContainer.new()
+	footer.add_theme_constant_override("h_separation", 6)
+	layout.add_child(footer)
+	create_button.text = "Create Map & Open in Editor"
+	create_button.pressed.connect(create_selected_map)
+	footer.add_child(create_button)
+	cancel_button.text = "Back to Viewport"
+	cancel_button.pressed.connect(func(): cancel_requested.emit())
+	footer.add_child(cancel_button)
 
 	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	status_label.custom_minimum_size.x = DIALOG_WIDTH - 24
 	status_label.hide()
 	layout.add_child(status_label)
-
-	confirmed.connect(create_selected_map)
 
 
 func _add_row(parent: Control, caption: String, widget: Control) -> void:
@@ -152,7 +154,7 @@ func _add_row(parent: Control, caption: String, widget: Control) -> void:
 	parent.add_child(row)
 	var lbl := Label.new()
 	lbl.text = caption
-	lbl.custom_minimum_size.x = 155
+	lbl.custom_minimum_size.x = 124
 	row.add_child(lbl)
 	widget.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(widget)
@@ -164,7 +166,7 @@ func _add_browse_row(parent: Control, caption: String, field: LineEdit, picker: 
 	parent.add_child(row)
 	var lbl := Label.new()
 	lbl.text = caption
-	lbl.custom_minimum_size.x = 155
+	lbl.custom_minimum_size.x = 124
 	row.add_child(lbl)
 	field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(field)
@@ -185,8 +187,6 @@ func _add_browse_row(parent: Control, caption: String, field: LineEdit, picker: 
 func _set_status(msg: String) -> void:
 	status_label.text = msg
 	status_label.visible = not msg.is_empty()
-	if visible:
-		Wintage.shrink_dialog(self, DIALOG_WIDTH)
 
 
 func begin(mod_reg: ModRegistry, game_path: String, preferred_mod: String = "stock", parent_dir: String = "", fallback_bzn: String = "") -> void:
@@ -213,7 +213,6 @@ func begin(mod_reg: ModRegistry, game_path: String, preferred_mod: String = "sto
 	if output_parent_field.text.strip_edges().is_empty() and not default_parent_dir.is_empty():
 		output_parent_field.text = default_parent_dir
 	_on_mod_changed()
-	Wintage.popup_fit(self, DIALOG_WIDTH)
 
 
 func selected_engine_id() -> String:
@@ -271,7 +270,6 @@ func _on_mod_changed() -> void:
 			restore_idx = idx
 	if mission_select.item_count > 0:
 		mission_select.select(restore_idx)
-	# Auto-populate a compatible blank BZN without requiring VRV for Stock
 	var templates: Array = prof.get("templates", [])
 	var auto_bzn := ""
 	for t_v in templates:
@@ -375,8 +373,6 @@ func refresh_summary() -> void:
 		if not missing_deps.is_empty():
 			lines.append("[WARN] Missing Workshop dependencies: " + ", ".join(missing_deps))
 	summary_text.text = "\n".join(lines)
-	if visible:
-		Wintage.shrink_dialog(self, DIALOG_WIDTH)
 
 
 func create_selected_map() -> void:
@@ -438,5 +434,4 @@ func create_selected_map() -> void:
 		_set_status("[ERR] " + writer.error)
 		return
 	var created_bzn := target.path_join(src_bzn.get_file())
-	hide()
 	map_created.emit(created_bzn, selected_engine_id(), mid, mis)

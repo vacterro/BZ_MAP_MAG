@@ -1,16 +1,13 @@
-extends AcceptDialog
-## Mission & Path Studio workspace built directly on the native BZN AiPath
-## document commands. Supports mission profiles, preset generation, multi-path
-## selection, translate/rotate/mirror/clone, point spacing, 2 m terrain snap,
-## automatic edge_path proposal, and mission validation.
+extends VBoxContainer
+## Docked Mission & Path Studio inside Right Attributes Inspector.
+## Compact single-column collapsible sections keep the 2D/3D viewport open
+## while managing mission profiles, presets, multi-path transforms & validation.
 
 const Document := preload("res://core/map_document.gd")
 const MissionProfiles := preload("res://core/mission_profiles.gd")
-const Wintage := preload("res://themes/wintage.gd")
 const ChoiceGroup := preload("res://themes/choice_group.gd")
 const SliderField := preload("res://themes/slider_field.gd")
-const DIALOG_WIDTH := 700
-const DIALOG_MIN_HEIGHT := 400
+const CollapsibleSection := preload("res://ui/collapsible_section.gd")
 
 signal paths_selection_changed(indices: Array[int])
 signal path_focused(index: int)
@@ -45,111 +42,73 @@ var _rebuilding := false
 
 
 func _ready() -> void:
-	title = "Mission & Path Studio"
-	ok_button_text = "Close"
-	var scroller := ScrollContainer.new()
-	scroller.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	scroller.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
-	add_child(scroller)
-	var root := VBoxContainer.new()
-	root.custom_minimum_size.x = DIALOG_WIDTH - 24
-	root.add_theme_constant_override("separation", 4)
-	scroller.add_child(root)
+	size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	add_theme_constant_override("separation", 4)
 
-	var mode_row := HBoxContainer.new()
-	mode_row.add_theme_constant_override("separation", 6)
-	root.add_child(mode_row)
-	var prof_lbl := Label.new()
-	prof_lbl.text = "Mission Mode:"
-	prof_lbl.custom_minimum_size.x = 92
-	mode_row.add_child(prof_lbl)
+	var mode_sec := CollapsibleSection.new("Mission Profile & Validation", "mission_profile", false)
+	add_child(mode_sec)
 	for id: String in MissionProfiles.MISSION_MODES:
 		profile_select.add_item(String(MissionProfiles.MODE_LABELS.get(id, id)))
 		profile_select.set_item_metadata(profile_select.item_count - 1, id)
 	profile_select.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	profile_select.item_selected.connect(_on_mission_mode_selected)
-	mode_row.add_child(profile_select)
+	mode_sec.add_content(profile_select)
 
 	var top := HFlowContainer.new()
-	top.add_theme_constant_override("h_separation", 6)
+	top.add_theme_constant_override("h_separation", 4)
 	top.add_theme_constant_override("v_separation", 3)
-	root.add_child(top)
+	mode_sec.add_content(top)
 	generate_profile_button = add_btn(top, "Generate Required", generate_missing_required)
 	propose_edge_button = add_btn(top, "Propose edge_path", create_proposed_edge_path)
-	snap_check.text = "Snap drag to 2 m grid"
+	snap_check.text = "Snap drag 2 m"
 	snap_check.toggled.connect(func(on: bool): snap_toggled.emit(on))
 	top.add_child(snap_check)
 
 	mod_badge.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	root.add_child(mod_badge)
+	mode_sec.add_content(mod_badge)
 	profile_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	root.add_child(profile_note)
+	mode_sec.add_content(profile_note)
+	validation_label.fit_content = true
+	validation_label.scroll_active = false
+	validation_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mode_sec.add_content(validation_label)
 
-	var split := HSplitContainer.new()
-	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	split.custom_minimum_size.y = 180
-	root.add_child(split)
-
-	# Left pane: Preset browser
-	var left := VBoxContainer.new()
-	left.custom_minimum_size.x = 240
-	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	left.size_flags_stretch_ratio = 0.85
-	left.add_theme_constant_override("separation", 4)
-	split.add_child(left)
-	var p_hdr := Label.new()
-	p_hdr.text = "Path Presets"
-	left.add_child(p_hdr)
-	preset_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	preset_list.item_selected.connect(func(_i): update_preset_detail())
-	left.add_child(preset_list)
-	preset_detail.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	preset_detail.custom_minimum_size.y = 0
-	left.add_child(preset_detail)
-	create_preset_button = add_btn(left, "Create Selected Preset", create_selected_preset)
-
-	# Right pane: Multi-select paths + transform / clone / spacing tools
-	var right := VBoxContainer.new()
-	right.custom_minimum_size.x = 340
-	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	right.size_flags_stretch_ratio = 1.15
-	right.add_theme_constant_override("separation", 4)
-	split.add_child(right)
-	var m_hdr := Label.new()
-	m_hdr.text = "Map Paths (Ctrl/Shift multi-select for 2D/3D & batch ops)"
-	right.add_child(m_hdr)
+	var paths_sec := CollapsibleSection.new("Map Paths & Batch Transform", "mission_paths", false)
+	add_child(paths_sec)
 	empty_paths_note.text = "No paths in map — select a preset or click Generate Required."
 	empty_paths_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	empty_paths_note.hide()
-	right.add_child(empty_paths_note)
+	paths_sec.add_content(empty_paths_note)
 	path_list.select_mode = ItemList.SELECT_MULTI
-	path_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	path_list.custom_minimum_size.y = 110
 	path_list.multi_selected.connect(func(_i, _s): emit_selection())
 	path_list.item_selected.connect(func(_i): emit_selection())
-	right.add_child(path_list)
+	paths_sec.add_content(path_list)
 
-	var xform_row := HFlowContainer.new()
-	xform_row.add_theme_constant_override("h_separation", 4)
-	right.add_child(xform_row)
-	add_spin(xform_row, "dX", delta_x, -4096.0, 4096.0, 2.0, 0.0, "m", -512.0, 512.0)
-	add_spin(xform_row, "dZ", delta_z, -4096.0, 4096.0, 2.0, 0.0, "m", -512.0, 512.0)
-	add_spin(xform_row, "Rot", rotate_deg, -180.0, 180.0, 1.0, 0.0, "°")
-	translate_rotate_button = add_btn(xform_row, "Transform", apply_transform)
+	add_spin(paths_sec.body, "dX (m)", delta_x, -4096.0, 4096.0, 2.0, 0.0, "m", -512.0, 512.0)
+	add_spin(paths_sec.body, "dZ (m)", delta_z, -4096.0, 4096.0, 2.0, 0.0, "m", -512.0, 512.0)
+	add_spin(paths_sec.body, "Rot (°)", rotate_deg, -180.0, 180.0, 1.0, 0.0, "°")
+	add_spin(paths_sec.body, "Spacing", spacing_m, 2.0, 512.0, 2.0, 32.0, "m")
 
 	var op_row := HFlowContainer.new()
 	op_row.add_theme_constant_override("h_separation", 4)
-	right.add_child(op_row)
+	op_row.add_theme_constant_override("v_separation", 3)
+	paths_sec.add_content(op_row)
+	translate_rotate_button = add_btn(op_row, "Transform", apply_transform)
 	mirror_x_button = add_btn(op_row, "Mirror X", func(): apply_mirror(true, false))
 	mirror_z_button = add_btn(op_row, "Mirror Z", func(): apply_mirror(false, true))
-	clone_button = add_btn(op_row, "Clone Path", clone_selected_path)
-	add_spin(op_row, "Spacing", spacing_m, 2.0, 512.0, 2.0, 32.0, "m")
+	clone_button = add_btn(op_row, "Clone", clone_selected_path)
 	resample_button = add_btn(op_row, "Resample", apply_resample)
 	snap_now_button = add_btn(op_row, "Snap 2 m", apply_snap_grid)
 
-	validation_label.fit_content = true
-	validation_label.scroll_active = false
-	validation_label.custom_minimum_size = Vector2(DIALOG_WIDTH - 40, 0)
-	root.add_child(validation_label)
+	var presets_sec := CollapsibleSection.new("Path Presets", "mission_presets", false)
+	add_child(presets_sec)
+	preset_list.custom_minimum_size.y = 110
+	preset_list.item_selected.connect(func(_i): update_preset_detail())
+	presets_sec.add_content(preset_list)
+	preset_detail.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	presets_sec.add_content(preset_detail)
+	create_preset_button = add_btn(presets_sec.body, "Create Selected Preset", create_selected_preset)
 
 
 func add_btn(parent: Control, text: String, action: Callable) -> Button:
@@ -162,9 +121,10 @@ func add_btn(parent: Control, text: String, action: Callable) -> Button:
 
 func add_spin(parent: Control, caption: String, box: SliderField, lo: float, hi: float, step_val: float, initial: float, unit: String = "", slider_lo: float = NAN, slider_hi: float = NAN) -> void:
 	var grp := HBoxContainer.new()
-	grp.add_theme_constant_override("separation", 3)
+	grp.add_theme_constant_override("separation", 4)
 	var lbl := Label.new()
 	lbl.text = caption
+	lbl.custom_minimum_size.x = 60
 	grp.add_child(lbl)
 	box.min_value = lo
 	box.max_value = hi
@@ -175,7 +135,7 @@ func add_spin(parent: Control, caption: String, box: SliderField, lo: float, hi:
 		box.set_unit_suffix(unit)
 	box.value = initial
 	box.set_readout_width(44.0)
-	box.custom_minimum_size.x = 104
+	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	grp.add_child(box)
 	parent.add_child(grp)
 
@@ -212,9 +172,6 @@ func begin(doc: Document, world_anchor: Vector2) -> void:
 	anchor = world_anchor
 	_sync_profile_select()
 	refresh_all()
-	if visible:
-		hide()
-	Wintage.popup_fit(self, DIALOG_WIDTH, DIALOG_MIN_HEIGHT)
 
 
 func refresh_all() -> void:
@@ -229,7 +186,7 @@ func refresh_all() -> void:
 	var dll_text := String(document.effective_mission_dll()) if document.has_method("effective_mission_dll") else String(document.package.mission_dll)
 	if dll_text.is_empty():
 		dll_text = "(none in BZN)"
-	mod_badge.text = "Target Mod: %s  |  BZN DLL: %s  |  Rule Semantics: %s" % [
+	mod_badge.text = "Mod: %s · DLL: %s · %s" % [
 		mod_id, dll_text, String(validation.get("semantics", "UNKNOWN"))]
 	profile_note.text = String(validation["dll_note"])
 

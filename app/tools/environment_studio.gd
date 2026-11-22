@@ -1,20 +1,12 @@
-extends AcceptDialog
-## Native Sky, Fog & Environment Studio (Vertical Slice).
-##
-## - Read-Only Environment Inspector: decodes binary .SKY chunks (_YKS / 1YKS /
-##   EMOD / NIAR / GOF / RATS / TRPS / TLOB / ...) and .TRN [NormalView]/[Light]/[Sky]/[World].
-## - Verified Native Writable Properties (1YKS fixed-offset float fields only):
-##   FogColor, FogStart, FogEnd, VisibilityRange, SunPeriod, SunAngle, SunColor, AmbientColor.
-## - Zero decorative sliders: controls are enabled ONLY when a verified .SKY 1YKS
-##   chunk exists with a round-trip native export path.
+extends VBoxContainer
+## Docked Native Sky, Fog & Environment panel inside Right Attributes Inspector.
+## - Writable 1YKS Fog & Lighting controls (verified layouts only) on top.
+## - Long Read-Only .SKY/.TRN chunk report placed in a collapsible section.
 
 const Document := preload("res://core/map_document.gd")
 const SkyEnv := preload("res://formats/sky_env.gd")
-const Wintage := preload("res://themes/wintage.gd")
 const SliderField := preload("res://themes/slider_field.gd")
-
-const DIALOG_WIDTH := 660
-const DIALOG_MIN_HEIGHT := 420
+const CollapsibleSection := preload("res://ui/collapsible_section.gd")
 
 signal updated(message: String)
 signal preview_toggled(enabled: bool)
@@ -22,6 +14,7 @@ signal preview_toggled(enabled: bool)
 var document: Document
 var header_label := Label.new()
 var inspector_text := RichTextLabel.new()
+var inspector_section: CollapsibleSection
 var preview_check := CheckBox.new()
 var fog_color_picker := ColorPickerButton.new()
 var fog_start_field := SliderField.new()
@@ -31,98 +24,76 @@ var sun_period_field := SliderField.new()
 var sun_angle_field := SliderField.new()
 var sun_color_picker := ColorPickerButton.new()
 var ambient_color_picker := ColorPickerButton.new()
-var apply_button: Button
-var reset_button: Button
+var apply_button := Button.new()
+var reset_button := Button.new()
 var status_label := Label.new()
 var _rebuilding := false
 
 
 func _ready() -> void:
-	title = "Sky, Fog & Environment Studio"
-	ok_button_text = "Close"
-	var root := VBoxContainer.new()
-	root.custom_minimum_size.x = DIALOG_WIDTH - 24
-	root.add_theme_constant_override("separation", 4)
-	add_child(root)
+	size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	add_theme_constant_override("separation", 4)
 
 	header_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	header_label.custom_minimum_size.x = DIALOG_WIDTH - 32
-	root.add_child(header_label)
-
-	var split := HSplitContainer.new()
-	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	split.custom_minimum_size = Vector2(DIALOG_WIDTH - 24, 270)
-	root.add_child(split)
-
-	# Left pane: Read-Only Native .SKY / .TRN Inspector
-	var left := VBoxContainer.new()
-	left.custom_minimum_size.x = 290
-	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	left.add_theme_constant_override("separation", 3)
-	split.add_child(left)
-	var insp_hdr := Label.new()
-	insp_hdr.text = "Read-Only Native Inspector (.SKY & .TRN)"
-	left.add_child(insp_hdr)
-	inspector_text.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	inspector_text.custom_minimum_size = Vector2(280, 230)
-	left.add_child(inspector_text)
-
-	# Right pane: Verified Native 1YKS Fog & Lighting Editor
-	var right := VBoxContainer.new()
-	right.custom_minimum_size.x = 320
-	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	right.add_theme_constant_override("separation", 4)
-	split.add_child(right)
-	var edit_hdr := Label.new()
-	edit_hdr.text = "1YKS Fog & Lighting Writer (Verified Layouts Only)"
-	right.add_child(edit_hdr)
+	add_child(header_label)
 
 	preview_check.text = "Approximate Editor Preview (3D View Fog & Lighting)"
+	preview_check.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	preview_check.tooltip_text = "Approximate Godot viewport preview of .SKY fog and lighting; visual match to BZCC renderer is approximate."
 	preview_check.toggled.connect(func(on: bool): preview_toggled.emit(on))
-	right.add_child(preview_check)
+	add_child(preview_check)
 
-	_add_color_row(right, "Fog Color", fog_color_picker)
-	_add_slider_row(right, "Fog Start", fog_start_field, 0.0, 4000.0, 5.0, 300.0, "m", 0.0, 2000.0)
-	_add_slider_row(right, "Fog End", fog_end_field, 0.0, 4000.0, 5.0, 500.0, "m", 0.0, 2000.0)
-	_add_slider_row(right, "Visibility", vis_range_field, 50.0, 6000.0, 10.0, 600.0, "m", 100.0, 2500.0)
-	_add_slider_row(right, "Sun Period", sun_period_field, 1.0, 120.0, 0.5, 24.0, "h", 1.0, 48.0)
+	var fog_sec := CollapsibleSection.new("Fog & Visibility (1YKS)", "env_fog", false)
+	add_child(fog_sec)
+	_add_color_row(fog_sec.body, "Fog Color", fog_color_picker)
+	_add_slider_row(fog_sec.body, "Fog Start", fog_start_field, 0.0, 4000.0, 5.0, 300.0, "m", 0.0, 2000.0)
+	_add_slider_row(fog_sec.body, "Fog End", fog_end_field, 0.0, 4000.0, 5.0, 500.0, "m", 0.0, 2000.0)
+	_add_slider_row(fog_sec.body, "Visibility", vis_range_field, 50.0, 6000.0, 10.0, 600.0, "m", 100.0, 2500.0)
+
+	var sun_sec := CollapsibleSection.new("Sun & Ambient Lighting (1YKS)", "env_sun", false)
+	add_child(sun_sec)
+	_add_slider_row(sun_sec.body, "Sun Period", sun_period_field, 1.0, 120.0, 0.5, 24.0, "h", 1.0, 48.0)
 	sun_period_field.tooltip_text = "Length of one full day/night cycle in real hours (verified in BZCC 2.0.185)."
-	_add_slider_row(right, "Sun Angle", sun_angle_field, 0.0, 24.0, 0.1, 9.0, "h", 0.0, 24.0)
+	_add_slider_row(sun_sec.body, "Sun Angle", sun_angle_field, 0.0, 24.0, 0.1, 9.0, "h", 0.0, 24.0)
 	sun_angle_field.tooltip_text = "Starting time of day in Sun Period hours (0.25*period=sunrise, 0.5*period=noon, 0.75*period=sunset)."
-	_add_color_row(right, "Sun Color", sun_color_picker)
-	_add_color_row(right, "Ambient Color", ambient_color_picker)
+	_add_color_row(sun_sec.body, "Sun Color", sun_color_picker)
+	_add_color_row(sun_sec.body, "Ambient", ambient_color_picker)
 
 	var btn_row := HFlowContainer.new()
-	btn_row.add_theme_constant_override("h_separation", 6)
-	right.add_child(btn_row)
-	apply_button = Button.new()
+	btn_row.add_theme_constant_override("h_separation", 4)
+	add_child(btn_row)
 	apply_button.text = "Apply to .SKY (Undoable)"
 	apply_button.pressed.connect(apply_edits)
 	btn_row.add_child(apply_button)
-	reset_button = Button.new()
-	reset_button.text = "Reset to Source"
+	reset_button.text = "Reset"
 	reset_button.pressed.connect(reset_edits)
 	btn_row.add_child(reset_button)
 
 	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	status_label.custom_minimum_size.x = DIALOG_WIDTH - 32
-	root.add_child(status_label)
+	add_child(status_label)
+
+	inspector_section = CollapsibleSection.new("Read-Only Native .SKY & .TRN Data", "env_native_data", true)
+	add_child(inspector_section)
+	inspector_text.fit_content = true
+	inspector_text.scroll_active = false
+	inspector_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	inspector_section.add_content(inspector_text)
 
 
 func _add_slider_row(parent: Control, caption: String, field: SliderField, lo: float, hi: float, step_val: float, initial: float, unit: String, slider_lo: float, slider_hi: float) -> void:
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 6)
+	row.add_theme_constant_override("separation", 4)
 	parent.add_child(row)
 	var lbl := Label.new()
 	lbl.text = caption
-	lbl.custom_minimum_size.x = 96
+	lbl.custom_minimum_size.x = 76
 	row.add_child(lbl)
 	field.min_value = lo
 	field.max_value = hi
 	field.step = step_val
 	field.set_slider_range(slider_lo, slider_hi)
 	field.set_unit_suffix(unit)
+	field.set_readout_width(48.0)
 	field.value = initial
 	field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(field)
@@ -130,14 +101,14 @@ func _add_slider_row(parent: Control, caption: String, field: SliderField, lo: f
 
 func _add_color_row(parent: Control, caption: String, picker: ColorPickerButton) -> void:
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 6)
+	row.add_theme_constant_override("separation", 4)
 	parent.add_child(row)
 	var lbl := Label.new()
 	lbl.text = caption
-	lbl.custom_minimum_size.x = 96
+	lbl.custom_minimum_size.x = 76
 	row.add_child(lbl)
 	picker.edit_alpha = false
-	picker.custom_minimum_size = Vector2(90, 22)
+	picker.custom_minimum_size = Vector2(72, 22)
 	picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(picker)
 
@@ -146,7 +117,6 @@ func begin(doc: Document, preview_enabled: bool = false) -> void:
 	document = doc
 	preview_check.set_pressed_no_signal(preview_enabled)
 	refresh_all()
-	Wintage.popup_fit(self, DIALOG_WIDTH, DIALOG_MIN_HEIGHT)
 
 
 func refresh_all() -> void:
@@ -162,17 +132,16 @@ func refresh_all() -> void:
 	var trn_env := SkyEnv.inspect_trn_environment(document.package.metadata.get("trn", {}))
 
 	if writable_sky:
-		header_label.text = "Native .SKY: %s (%d B, v%d, %s)  |  Capability: %s  |  Edited: %s" % [
-			document.package.sky_name, int(sky_info["sizeBytes"]), int(sky_info["version"]),
+		header_label.text = ".SKY: %s (%d B, %s) · %s · Edited: %s" % [
+			document.package.sky_name, int(sky_info["sizeBytes"]),
 			layout_id, sky_cap, "yes" if document.has_environment_edits() else "no"]
 	elif readable_sky:
-		header_label.text = "Native .SKY: %s (%d B, v%d)  |  Capability: %s (Read-Only)" % [
+		header_label.text = ".SKY: %s (%d B, v%d) · %s (Read-Only)" % [
 			document.package.sky_name, int(sky_info["sizeBytes"]), int(sky_info["version"]), sky_cap]
 	elif has_sky_file:
-		header_label.text = "Native .SKY: %s  |  Capability: %s (Read-Only .TRN Only)" % [
-			document.package.sky_name, sky_cap]
+		header_label.text = ".SKY: %s · %s (Read-Only .TRN Only)" % [document.package.sky_name, sky_cap]
 	else:
-		header_label.text = "Native .SKY: (absent)  |  Read-Only .TRN Inspection Only"
+		header_label.text = ".SKY: (absent) · Read-Only .TRN Only"
 
 	var lines: Array[String] = []
 	if readable_sky:

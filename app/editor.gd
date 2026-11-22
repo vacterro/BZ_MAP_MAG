@@ -5,6 +5,7 @@ const Snapshots := preload("res://bridge/snapshots.gd")
 const Layouts := preload("res://formats/bzn_layouts.gd")
 const Wintage := preload("res://themes/wintage.gd")
 const ChoiceGroup := preload("res://themes/choice_group.gd")
+const SliderField := preload("res://themes/slider_field.gd")
 const TopView := preload("res://render/top_view.gd")
 const TerrainView := preload("res://render/terrain_view.gd")
 const NodeStudio := preload("res://nodes/node_studio.gd")
@@ -27,23 +28,67 @@ const ObjectBrowser := preload("res://tools/object_browser.gd")
 const EnvironmentStudio := preload("res://tools/environment_studio.gd")
 const SoundEditor := preload("res://tools/sound_editor.gd")
 const AutoSaveStore := preload("res://core/autosave_store.gd")
+const WorkspaceState := preload("res://ui/workspace_state.gd")
+const AttributesInspector := preload("res://ui/attributes_inspector.gd")
+const SceneTreePanel := preload("res://ui/scene_tree.gd")
+const LayersPanel := preload("res://ui/layers_panel.gd")
+const ToolsPanel := preload("res://ui/tools_panel.gd")
+const ObjectAttributesPanel := preload("res://ui/object_attributes_panel.gd")
+
 const SETTINGS := "user://editor.cfg"
+
 var document: Document
+var workspace_state := WorkspaceState.new()
 var top := TopView.new()
 var scene_view := TerrainView.new()
+
+# Unified DCC workspace containers
+var left_split := HSplitContainer.new()
+var right_split := HSplitContainer.new()
+var views := HSplitContainer.new()
+var scene_dock_box := VBoxContainer.new()
+var top_dock_box := VBoxContainer.new()
+var left_dock := PanelContainer.new()
+var left_tabs := TabContainer.new()
+var attributes_inspector := AttributesInspector.new()
+var scene_tree := SceneTreePanel.new()
+var layers_panel := LayersPanel.new()
+var tools_panel := ToolsPanel.new()
+var object_attributes := ObjectAttributesPanel.new()
+var center_mode_buttons: Dictionary = {} # int(CenterMode) -> Button
+var viewport_bar := HFlowContainer.new()
+var preset_select := OptionButton.new()
+var diagnostics_button := Button.new()
+var diagnostics_drawer := RichTextLabel.new()
+var diagnostics_lines: Array[String] = []
+var tool_badge := Label.new()
 var status := Label.new()
 var coordinates := Label.new()
 var title := Label.new()
+var _applying_layout := false
+
+# Docked tools (zero modal editing Windows)
+var brush_panel := BrushPanel.new()
+var slope_studio := SlopeStudio.new()
+var terrain_tools := TerrainCommands.new()
+var water_tools := WaterCommands.new()
+var environment_studio := EnvironmentStudio.new()
+var sound_editor := SoundEditor.new()
+var path_inspector := PathInspector.new()
+var mission_studio := MissionStudio.new()
+var object_browser := ObjectBrowser.new()
+var studio := NodeStudio.new()
+var new_map_wizard := NewMapWizard.new()
+var target_profile_dialog := TargetProfileDialog.new()
+var playtest_dialog := ScrollContainer.new() # Embedded Settings workspace page (no popup Window)
+
+# Path / object / water state
 var path_list := OptionButton.new()
 var new_path_button: Button
 var edit_path_button: Button
 var move_path_button: Button
 var mission_studio_button: Button
-var path_inspector := PathInspector.new()
-var mission_studio := MissionStudio.new()
 var mod_registry := ModRegistry.new()
-var new_map_wizard := NewMapWizard.new()
-var target_profile_dialog := TargetProfileDialog.new()
 var target_profile_button: Button
 var default_new_mod_profile := "stock"
 var snap_path_drag := false
@@ -51,17 +96,14 @@ var selected_extra_paths: Array[int] = []
 var path_drag_view: Control
 var path_draft := {}
 var selected_path_point := -1
-var brush_panel := BrushPanel.new()
 var camera_buttons: Array[Button] = []
 var objects_button: Button
 var object_browser_button: Button
-var object_browser := ObjectBrowser.new()
 var pending_place_spec: Dictionary = {}
 var move_objects_button: Button
 var object_tool := MoveObject.new()
 var water_button: Button
 var water_edit_button: Button
-var water_tools := WaterCommands.new()
 var painting_water := false
 var water_add := true
 var color_button: Button
@@ -75,6 +117,8 @@ var loaded_objects: Document
 var solid_button: Button
 var wire_button: Button
 var fly_button: Button
+
+# Autosave & allowed OS/transient dialogs
 const AUTOSAVE_INTERVAL := 180.0
 const AUTOSAVE_KEEP := 3
 var autosave_seconds := 0.0
@@ -101,32 +145,22 @@ var focus_button: Button
 var playtest_button: Button
 var nodes_button: Button
 var slope_studio_button: Button
-var studio := NodeStudio.new()
 var terrain_tools_button: Button
-var terrain_tools := TerrainCommands.new()
-var slope_studio := SlopeStudio.new()
-var environment_studio := EnvironmentStudio.new()
 var environment_button: Button
-var sound_editor := SoundEditor.new()
 var sound_button: Button
 var object_label_button: Button
-var object_label_dialog := ConfirmationDialog.new()
-var object_label_target := Label.new()
-var object_label_field := LineEdit.new()
-var object_label_status := Label.new()
-var object_label_view := -1
 var theme_slug := Wintage.DEFAULT_THEME
 var ui_font_size := 12
 var ui_compact := false
 var backdrop := ColorRect.new()
 var theme_select := ChoiceGroup.new(0)
+var font_size_field := SliderField.new()
 var compact_check := CheckBox.new()
 var tool_search := LineEdit.new()
 var empty_state_hint := Label.new()
 var toolbar_buttons: Array[Button] = []
 var confirmation := ConfirmationDialog.new()
 var keys_dialog := AcceptDialog.new()
-var playtest_dialog := ConfirmationDialog.new()
 var game_path := LineEdit.new()
 var vrv_path := LineEdit.new()
 var asset_profile_path := LineEdit.new()
@@ -143,6 +177,8 @@ var playtest_result := ""
 var settings_path := SETTINGS
 var playtest_root := ""
 var pending_path := ""
+
+# Unsaved-change tracking
 var saved_edits := {}
 var saved_layers: Array = []
 var saved_path_edits := {}
@@ -161,6 +197,8 @@ var saved_water_edits := {}
 var saved_water_heights := {}
 var saved_mission_dll := ""
 var saved_environment_edits := {}
+
+# Continuous paint state
 const HOLD_STEP_SECONDS := 0.05
 const HOLD_DAB_SCALE := 0.15
 var cursor := Vector2(-1, -1)
@@ -185,141 +223,486 @@ func _ready() -> void:
 	var colors := Wintage.palette(theme_slug)
 	theme = Wintage.make(colors, ui_font_size, ui_compact)
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	for window in all_dialogs():
-		window.theme = theme
 	backdrop.color = colors["background"]
 	backdrop.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	backdrop.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(backdrop)
+
 	var margin := MarginContainer.new()
 	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	for side in ["top", "bottom", "left", "right"]:
-		margin.add_theme_constant_override("margin_" + side, 8)
+		margin.add_theme_constant_override("margin_" + side, 4)
 	add_child(margin)
-	var layout := VBoxContainer.new()
-	layout.add_theme_constant_override("separation", 6)
-	margin.add_child(layout)
-	var tools := HFlowContainer.new()
-	layout.add_child(tools)
-	toolbar_buttons.append(add_button(tools, "Open", open_dialog.popup_centered_ratio.bind(0.72), "Open a BZN map or BZMAG project", KEY_O))
-	var new_map := add_button(tools, "New Map", open_new_map_wizard, "Create a new Stock, VSR, VRV or custom-mod map")
-	toolbar_buttons.append(new_map)
-	target_profile_button = add_button(tools, "Target Profile", func(): open_target_profile(0), "Inspect detected mod/mission profiles, switch editing environment or analyze conversion")
-	toolbar_buttons.append(target_profile_button)
-	save_button = add_button(tools, "Save Project", request_save, "Create a .bzmag project snapshot", KEY_S)
+
+	var root_col := VBoxContainer.new()
+	root_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	root_col.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	root_col.add_theme_constant_override("separation", 4)
+	margin.add_child(root_col)
+
+	# 1. TOP BAR: Menu strip + compact frequent actions + workspace preset + command filter
+	_build_top_bar(root_col)
+
+	# 2. MAIN 3-COLUMN DOCKED WORKSPACE (Left Dock | Center Workspace | Right Attributes)
+	left_split.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left_split.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	left_split.dragged.connect(_on_left_split_dragged)
+	root_col.add_child(left_split)
+
+	left_split.add_child(left_dock)
+	_build_left_dock()
+
+	right_split.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right_split.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	right_split.dragged.connect(_on_right_split_dragged)
+	left_split.add_child(right_split)
+
+	var center_col := VBoxContainer.new()
+	right_split.add_child(center_col)
+	_build_center_workspace(center_col, colors)
+
+	right_split.add_child(attributes_inspector)
+	_build_right_inspector()
+
+	# 3. BOTTOM STATUS BAR + COLLAPSIBLE DIAGNOSTICS DRAWER
+	_build_bottom_bar(root_col, colors)
+
+	# 4. ALLOWED OS / TRANSIENT DIALOGS (FileDialogs, destructive confirm, autosave recover, hotkeys)
+	_build_allowed_dialogs()
+
+	# 5. WIRE ALL TOOL SIGNALS & WORKSPACE STATE
+	_wire_workspace_signals()
+
+	# 6. LOAD SETTINGS & WORKSPACE LAYOUT
+	game_path.text = String(settings.get_value("playtest", "game", ""))
+	vrv_path.text = String(settings.get_value("playtest", "vrv", ""))
+	autosave_root_field.text = String(settings.get_value("autosave", "root", ""))
+	autosave_custom_root = autosave_root_field.text.strip_edges()
+	engine_editor_mode.button_pressed = bool(settings.get_value("playtest", "engine_editor", false))
+	vrv_configured = settings.has_section_key("playtest", "vrv")
+	default_new_mod_profile = String(settings.get_value("new_map", "default_mod", "stock"))
+	if default_new_mod_profile.is_empty():
+		default_new_mod_profile = "stock"
+	mod_registry.discover_installed(game_path.text.strip_edges(), vrv_path.text.strip_edges())
+	sync_theme_controls()
+	for window in all_dialogs():
+		window.theme = theme
+
+	workspace_state.load_from_config(settings, get_viewport_rect().size)
+	_apply_workspace_layout()
+	resized.connect(_on_editor_resized)
+
+	sync_actions()
+	var args := OS.get_cmdline_user_args()
+	if args.size() == 1 and FileAccess.file_exists(args[0]):
+		call_deferred("open_command_line", args[0])
+
+
+func _build_top_bar(parent: Control) -> void:
+	var bar := HBoxContainer.new()
+	bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bar.add_theme_constant_override("separation", 4)
+	parent.add_child(bar)
+
+	# Menus (Cinema 4D / Photoshop style compact horizontal bar)
+	_add_menu(bar, "File", [
+		["Open Map / Project… (Ctrl+O)", func(): open_dialog.popup_centered_ratio(0.72)],
+		["New Map…", open_new_map_wizard],
+		["Save Project… (Ctrl+S)", request_save],
+		["Recover Autosave…", recover_autosaves],
+		["Export Native…", request_export],
+		["---", Callable()],
+		["Target Profile & Mods", func(): open_target_profile(0)],
+		["Settings & Theme", show_playtest_setup],
+	])
+	_add_menu(bar, "Edit", [
+		["Undo (Ctrl+Z)", func(): if document != null: document.undo(); sync_actions()],
+		["Redo (Ctrl+Y)", func(): if document != null: document.redo(); sync_actions()],
+		["Cancel Active Preview", func(): clear_active_preview("Preview cancelled.")],
+	])
+	_add_menu(bar, "View", [
+		["Split 3D + 2D", func(): set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)],
+		["3D Viewport Only", func(): set_center_mode(WorkspaceState.CenterMode.VIEW_3D)],
+		["2D Top View Only", func(): set_center_mode(WorkspaceState.CenterMode.VIEW_2D)],
+		["Node Graph Workspace", open_studio],
+		["---", Callable()],
+		["Toggle Left Dock (Scene/Layers)", toggle_left_dock],
+		["Toggle Right Inspector (Attributes)", toggle_right_dock],
+		["Toggle Diagnostics Drawer", toggle_diagnostics_drawer],
+		["Fullscreen Viewport (F11)", toggle_fullscreen_viewport],
+		["Reset Workspace Layout", reset_workspace_layout],
+	])
+	_add_menu(bar, "Terrain", [
+		["Terrain Brush (Alt+H)", activate_terrain_brush],
+		["Slope Studio (Docked)", open_slope_studio],
+		["Shape Terrain (Docked)", open_terrain_tools],
+		["Procedural Layers / Nodes", open_studio],
+		["Water Editor", toggle_water_edit],
+	])
+	_add_menu(bar, "Objects", [
+		["Object Browser (Assets Dock)", open_object_browser],
+		["Move / Edit Object", func(): _toggle_move_objects(true)],
+		["Object Attributes / Label", open_object_label_editor],
+		["Sound Point Editor", open_sound_editor],
+	])
+	_add_menu(bar, "Paths", [
+		["Mission Studio", open_mission_studio],
+		["New AI Path", start_new_path],
+		["Edit Selected Path", inspect_path],
+		["Move Path Points", func(): _toggle_move_paths(true)],
+	])
+	_add_menu(bar, "Env", [
+		["Sky, Fog & Environment", open_environment_studio],
+		["Water Editor", toggle_water_edit],
+	])
+	_add_menu(bar, "Tools", [
+		["Target Profile & Mods", func(): open_target_profile(0)],
+		["Settings & Wintage Theme", show_playtest_setup],
+		["Hotkeys (F1)", func(): Wintage.popup_fit(keys_dialog, 420)],
+	])
+
+	var sep1 := VSeparator.new()
+	bar.add_child(sep1)
+
+	# Frequent actions (always single row)
+	toolbar_buttons.append(add_button(bar, "Open", open_dialog.popup_centered_ratio.bind(0.72), "Open a BZN map or BZMAG project", KEY_O))
+	save_button = add_button(bar, "Save", request_save, "Create a .bzmag project snapshot", KEY_S)
 	toolbar_buttons.append(save_button)
-	recover_button = add_button(tools, "Recover…", recover_autosaves, "Open a rolling autosave from the verified recovery store")
-	toolbar_buttons.append(recover_button)
-	export_button = add_button(tools, "Export Native", request_export, "Export and re-import a new native map folder")
-	toolbar_buttons.append(export_button)
-	playtest_button = add_button(tools, "Playtest", playtest, "Launch Battlezone with the current edits")
-	toolbar_buttons.append(playtest_button)
-	toolbar_buttons.append(add_button(tools, "Setup", show_playtest_setup, "Choose the Battlezone and VRV folders"))
-	undo_button = add_button(tools, "Undo", func(): document.undo(); sync_actions(), "Undo the last stroke", KEY_Z)
+	undo_button = add_button(bar, "Undo", func(): document.undo(); sync_actions(), "Undo the last edit", KEY_Z)
 	toolbar_buttons.append(undo_button)
-	redo_button = add_button(tools, "Redo", func(): document.redo(); sync_actions(), "Redo the last stroke", KEY_Y)
+	redo_button = add_button(bar, "Redo", func(): document.redo(); sync_actions(), "Redo the last edit", KEY_Y)
 	toolbar_buttons.append(redo_button)
-	nodes_button = add_button(tools, "Layers / Nodes", open_studio, "Preview and bake procedural height, color or base tile layers")
-	toolbar_buttons.append(nodes_button)
-	terrain_tools_button = add_button(tools, "Shape Terrain", open_terrain_tools, "Preview a slope plane, mirror heights, or apply VRV Smooth/Rough/Relief")
-	toolbar_buttons.append(terrain_tools_button)
-	slope_studio_button = add_button(tools, "Slope Studio", open_slope_studio, "Build exact-angle ramps, terraces, ridges, valleys, trenches and excavations with batch stamps and masks")
-	toolbar_buttons.append(slope_studio_button)
-	environment_button = add_button(tools, "Environment", open_environment_studio, "Inspect .SKY/.TRN and edit verified native .SKY fog and sun lighting")
-	toolbar_buttons.append(environment_button)
-	toolbar_buttons.append(add_button(tools, "Hotkeys", func(): Wintage.popup_fit(keys_dialog, 420), "Show editor shortcuts"))
-	tool_search.placeholder_text = "Filter tools…"
-	tool_search.custom_minimum_size.x = 110
-	tool_search.tooltip_text = "Filter main toolbar commands by name or hint"
+	export_button = add_button(bar, "Export", request_export, "Export and re-import a new native map folder")
+	toolbar_buttons.append(export_button)
+	playtest_button = add_button(bar, "Playtest", playtest, "Launch Battlezone with the current edits (F5)")
+	toolbar_buttons.append(playtest_button)
+
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bar.add_child(spacer)
+
+	# Workspace Layout Preset selector
+	preset_select.custom_minimum_size.x = 114
+	preset_select.tooltip_text = "Switch workspace layout preset"
+	for pid in [
+		WorkspaceState.LayoutPreset.DEFAULT,
+		WorkspaceState.LayoutPreset.SCULPTING,
+		WorkspaceState.LayoutPreset.MISSION,
+		WorkspaceState.LayoutPreset.OBJECT_PLACEMENT,
+		WorkspaceState.LayoutPreset.NODES,
+		WorkspaceState.LayoutPreset.FULLSCREEN,
+	]:
+		preset_select.add_item(String(WorkspaceState.PRESET_NAMES[pid]))
+		preset_select.set_item_metadata(preset_select.item_count - 1, pid)
+	preset_select.item_selected.connect(_on_preset_dropdown_selected)
+	bar.add_child(preset_select)
+
+	tool_search.placeholder_text = "Find tool…"
+	tool_search.custom_minimum_size.x = 96
+	tool_search.tooltip_text = "Filter commands and tools by name or hint (Enter triggers first match)"
 	tool_search.text_changed.connect(filter_toolbar)
-	tools.add_child(tool_search)
-	title.text = "Open a map to edit terrain"
-	title.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	var map_info := HBoxContainer.new()
-	layout.add_child(map_info)
-	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	map_info.add_child(title)
-	path_list.custom_minimum_size.x = 146
-	path_list.tooltip_text = "Display a native BZN path in both views"
-	path_list.add_item("Path overlay")
-	path_list.disabled = true
-	path_list.item_selected.connect(select_path)
-	map_info.add_child(path_list)
-	new_path_button = add_button(map_info, "New Path", start_new_path, "Create a native path at the last terrain cursor")
-	edit_path_button = add_button(map_info, "Edit Path", inspect_path, "Edit the selected path's name, type and points")
-	move_path_button = add_button(map_info, "Move Points", path_tool_changed, "Drag points in either view. Shift+click appends a point. Delete removes the selected point.")
-	move_path_button.toggle_mode = true
-	mission_studio_button = add_button(map_info, "Mission Studio", open_mission_studio, "Browse mission profiles, generate AI paths, transform/mirror/clone/resample and validate readiness")
-	add_child(path_inspector)
-	add_child(mission_studio)
-	add_child(new_map_wizard)
-	add_child(target_profile_dialog)
-	new_map_wizard.map_created.connect(_on_wizard_map_created)
-	target_profile_dialog.profile_applied.connect(func(msg: String): sync_actions(); report(msg))
-	target_profile_dialog.mods_changed.connect(_on_mods_settings_changed)
-	path_inspector.path_created.connect(select_created_path)
-	path_inspector.path_removed.connect(func(label: String): report("Removed path %s." % label))
-	mission_studio.paths_selection_changed.connect(set_extra_path_selection)
-	mission_studio.path_focused.connect(select_created_path)
-	mission_studio.snap_toggled.connect(func(on: bool): snap_path_drag = on)
-	mission_studio.status_message.connect(report)
-	var work_area := HBoxContainer.new()
-	work_area.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	layout.add_child(work_area)
-	work_area.add_child(brush_panel)
-	brush_panel.brush_changed.connect(update_brush_cursor)
-	var views := HSplitContainer.new()
+	tool_search.text_submitted.connect(_on_tool_search_submitted)
+	bar.add_child(tool_search)
+
+
+func _add_menu(parent: Control, caption: String, items: Array) -> MenuButton:
+	var mb := MenuButton.new()
+	mb.text = caption
+	mb.flat = false
+	var pop := mb.get_popup()
+	var actions: Array[Callable] = []
+	for entry in items:
+		var lbl: String = entry[0]
+		var cb: Callable = entry[1]
+		if lbl == "---":
+			pop.add_separator()
+		else:
+			var id := actions.size()
+			actions.append(cb)
+			pop.add_item(lbl, id)
+	pop.id_pressed.connect(func(id: int):
+		if id >= 0 and id < actions.size() and actions[id].is_valid():
+			actions[id].call())
+	parent.add_child(mb)
+	return mb
+
+
+func _build_left_dock() -> void:
+	left_dock.custom_minimum_size.x = 204
+	left_dock.size_flags_vertical = Control.SIZE_EXPAND_FILL
+
+	left_tabs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left_tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	left_tabs.tab_changed.connect(_on_left_tab_changed)
+	left_dock.add_child(left_tabs)
+
+	scene_tree.name = "Scene"
+	left_tabs.add_child(scene_tree)
+	layers_panel.name = "Layers"
+	left_tabs.add_child(layers_panel)
+	object_browser.name = "Assets"
+	left_tabs.add_child(object_browser)
+	tools_panel.name = "Tools"
+	left_tabs.add_child(tools_panel)
+	tools_panel.ensure_built()
+
+	# Bind legacy button references to the docked ToolsPanel buttons so existing
+	# callers & filter_toolbar() work seamlessly without modal clutter.
+	slope_studio_button = tools_panel.buttons["slope_studio"]
+	terrain_tools_button = tools_panel.buttons["shape_terrain"]
+	nodes_button = tools_panel.buttons["nodes"]
+	environment_button = tools_panel.buttons["environment"]
+	object_browser_button = tools_panel.buttons["object_browser"]
+	mission_studio_button = tools_panel.buttons["mission_studio"]
+	sound_button = tools_panel.buttons["sound_editor"]
+	water_edit_button = tools_panel.buttons["water_editor"]
+	target_profile_button = tools_panel.buttons["target_profile"]
+	new_path_button = tools_panel.buttons["new_path"]
+	edit_path_button = tools_panel.buttons["path_inspector"]
+	object_label_button = tools_panel.buttons["move_object"]
+	recover_button = Button.new()
+	recover_button.visible = false
+	for aid: String in tools_panel.buttons:
+		toolbar_buttons.append(tools_panel.buttons[aid] as Button)
+
+
+func _build_center_workspace(center: VBoxContainer, colors: Dictionary) -> void:
+	center.custom_minimum_size.x = 320
+	center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	center.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	center.add_theme_constant_override("separation", 4)
+
+	# Single compact contextual header bar for the central workspace (wraps cleanly on narrow widths without pushing Right Inspector off-screen)
+	var hdr_row := HFlowContainer.new()
+	hdr_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hdr_row.custom_minimum_size.x = 0
+	hdr_row.add_theme_constant_override("h_separation", 3)
+	hdr_row.add_theme_constant_override("v_separation", 3)
+	center.add_child(hdr_row)
+
+	for spec in [
+		[WorkspaceState.CenterMode.SPLIT_3D_2D, "3D+2D", "Synchronized 3D and 2D editing"],
+		[WorkspaceState.CenterMode.VIEW_3D, "3D", "3D Terrain Viewport only"],
+		[WorkspaceState.CenterMode.VIEW_2D, "2D", "2D Top Heightmap only"],
+		[WorkspaceState.CenterMode.NODES, "Nodes", "Central Procedural Node Graph workspace"],
+		[WorkspaceState.CenterMode.NEW_MAP, "New Map", "Embedded Stock/VSR/VRV New Map workspace"],
+		[WorkspaceState.CenterMode.SETTINGS, "Settings", "Paths, Wintage themes and layout controls"],
+	]:
+		var mid: int = spec[0]
+		var btn := Button.new()
+		btn.text = spec[1]
+		btn.tooltip_text = spec[2]
+		btn.toggle_mode = true
+		btn.pressed.connect(func(): _on_center_mode_button_pressed(mid))
+		hdr_row.add_child(btn)
+		center_mode_buttons[mid] = btn
+
+	viewport_bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	viewport_bar.custom_minimum_size.x = 0
+	viewport_bar.add_theme_constant_override("h_separation", 3)
+	viewport_bar.add_theme_constant_override("v_separation", 3)
+	center.add_child(viewport_bar)
+	add_camera_toolbar(viewport_bar)
+
+	# Main split 3D + 2D viewports
 	views.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	work_area.add_child(views)
+	views.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	views.dragged.connect(_on_views_split_dragged)
+	center.add_child(views)
+
 	top.palette = colors
 	scene_view.palette = colors
 	top.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+
+	scene_dock_box.custom_minimum_size.x = 180
+	scene_dock_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scene_dock_box.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scene_dock_box.size_flags_stretch_ratio = 2.1
+	views.add_child(scene_dock_box)
+	scene_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scene_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scene_dock_box.add_child(scene_view)
+
+	empty_state_hint.text = "No map loaded — click Open or switch to New Map"
+	empty_state_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	empty_state_hint.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	empty_state_hint.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	empty_state_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	empty_state_hint.add_theme_color_override("font_color", colors["textMuted"])
+	scene_view.add_child(empty_state_hint)
+
+	top_dock_box.custom_minimum_size.x = 140
+	top_dock_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top_dock_box.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	top_dock_box.size_flags_stretch_ratio = 1.0
+	views.add_child(top_dock_box)
+	top.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	top_dock_box.add_child(top)
+
 	for panel in [scene_view, top]:
-		var dock := VBoxContainer.new()
-		dock.custom_minimum_size.x = 158 if panel == top else 225
-		dock.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		dock.size_flags_stretch_ratio = 2.05 if panel == scene_view else 1.0
-		views.add_child(dock)
-		var heading := HFlowContainer.new()
-		heading.add_theme_constant_override("h_separation", 3)
-		heading.add_theme_constant_override("v_separation", 3)
-		dock.add_child(heading)
-		if panel == scene_view:
-			add_camera_toolbar(heading)
-		else:
-			add_label(heading, "2D Map")
-			objects_button = add_button(heading, "Objects", toggle_objects, "Display supported native BZCC models in the 3D view")
-			objects_button.toggle_mode = true
-			object_browser_button = add_button(heading, "Object Browser", open_object_browser, "Browse active mod ODFs, inspect dependencies and place verified native objects onto terrain")
-			move_objects_button = add_button(heading, "Move Object", object_tool_changed, "Select and drag an object in either view. Shift snaps to the terrain grid. [ / ] rotate ±15° (Shift 1°), Ctrl+D duplicates, Delete removes. Esc cancels.")
-			move_objects_button.toggle_mode = true
-			object_label_button = add_button(heading, "Object Label", open_object_label_editor, "Edit the native BZN label of the selected object")
-			sound_button = add_button(heading, "Sound Point", open_sound_editor, "Edit structured VRV sound point settings (vrvsnd:...) on a selected vrv_sndpoint object")
-			water_button = add_button(heading, "Water", toggle_water, "Preview decoded native water layers in both views")
-			water_button.toggle_mode = true
-			water_edit_button = add_button(heading, "Edit Water", toggle_water_edit, "Edit water layer coverage and elevations. Left drag paints, Shift erases.")
-		panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
-		dock.add_child(panel)
-		if panel == scene_view:
-			empty_state_hint.text = "No map loaded — click Open or New Map"
-			empty_state_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-			empty_state_hint.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-			empty_state_hint.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-			empty_state_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			empty_state_hint.add_theme_color_override("font_color", colors["textMuted"])
-			panel.add_child(empty_state_hint)
 		panel.mouse_exited.connect(func():
 			set_cursor(Vector2(-1, -1))
 			if paint_view == panel:
 				anchor = Vector2(-1, -1))
 		panel.gui_input.connect(view_input.bind(panel))
-	coordinates.text = "Hold or drag left to paint. Orbit with right drag. Pan with middle drag. Zoom with wheel."
+
+	# Central Node Graph Workspace (hidden unless CenterMode.NODES)
+	studio.hide()
+	center.add_child(studio)
+
+	# Embedded New Map Workspace page (hidden unless CenterMode.NEW_MAP)
+	new_map_wizard.hide()
+	center.add_child(new_map_wizard)
+
+	# Embedded Settings Workspace page (hidden unless CenterMode.SETTINGS)
+	_build_settings_workspace_page()
+	playtest_dialog.hide()
+	center.add_child(playtest_dialog)
+
+
+func _build_settings_workspace_page() -> void:
+	playtest_dialog.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	playtest_dialog.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	playtest_dialog.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+
+	var pad := MarginContainer.new()
+	pad.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for side in ["top", "bottom", "left", "right"]:
+		pad.add_theme_constant_override("margin_" + side, 8)
+	playtest_dialog.add_child(pad)
+
+	var paths := VBoxContainer.new()
+	paths.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	paths.add_theme_constant_override("separation", 5)
+	pad.add_child(paths)
+
+	add_label(paths, "Workspace, Paths & Playtest Settings (Docked — No Modal Popup)")
+	add_label(paths, "Battlezone installation folder")
+	add_folder_field(paths, game_path, game_picker, "Select the Battlezone installation folder")
+	add_label(paths, "VRV source folder (optional 1196 converter and VSR assets)")
+	add_folder_field(paths, vrv_path, vrv_picker, "Select the VRV source folder")
+	add_label(paths, "Autosave folder (empty keeps default user folder; never the map folder)")
+	add_folder_field(paths, autosave_root_field, autosave_picker, "Select the autosave store folder")
+	add_label(paths, "Asset profile for this project (optional)")
+	var profile_row := HBoxContainer.new()
+	paths.add_child(profile_row)
+	asset_profile_path.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	asset_profile_path.editable = false
+	profile_row.add_child(asset_profile_path)
+	asset_profile_browse = add_button(profile_row, "Browse…", asset_profile_picker.popup_centered_ratio.bind(0.72), "Link a JSON asset profile to this project")
+	asset_profile_browse.disabled = true
+
+	engine_editor_mode.text = "Start Playtest in engine editor without mission scripts"
+	paths.add_child(engine_editor_mode)
+
+	var theme_lbl := Label.new()
+	theme_lbl.text = "Wintage Theme (Golden Default preserved)"
+	paths.add_child(theme_lbl)
+	for slug in Wintage.theme_slugs():
+		theme_select.add_item(Wintage.theme_label(slug))
+	theme_select.item_selected.connect(func(idx: int): set_wintage_theme(Wintage.theme_slugs()[idx], compact_check.button_pressed))
+	paths.add_child(theme_select)
+
+	var font_row := HBoxContainer.new()
+	font_row.add_theme_constant_override("separation", 6)
+	paths.add_child(font_row)
+	var flbl := Label.new()
+	flbl.text = "UI Font Size (px)"
+	flbl.custom_minimum_size.x = 120
+	font_row.add_child(flbl)
+	font_size_field.min_value = 10
+	font_size_field.max_value = 24
+	font_size_field.step = 1
+	font_size_field.value = ui_font_size
+	font_size_field.set_unit_suffix("px")
+	font_size_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	font_size_field.value_changed.connect(func(v: float):
+		ui_font_size = clampi(int(round(v)), 10, 24)
+		set_wintage_theme(theme_slug, ui_compact))
+	font_row.add_child(font_size_field)
+
+	compact_check.text = "Compact toolbar & control padding"
+	compact_check.toggled.connect(func(on: bool): set_wintage_theme(theme_slug, on))
+	paths.add_child(compact_check)
+
+	var actions := HFlowContainer.new()
+	actions.add_theme_constant_override("h_separation", 6)
+	actions.add_theme_constant_override("v_separation", 4)
+	paths.add_child(actions)
+	add_button(actions, "Save Settings", save_playtest_setup, "Save game paths, theme and workspace settings")
+	add_button(actions, "Find via Steam", func(): find_steam_game(true), "Find Battlezone in your Steam libraries")
+	add_button(actions, "Game & Mods Manager", func(): open_target_profile(1), "Discover Stock, VSR, VRV and Workshop mods in Attributes")
+	add_button(actions, "Reset Workspace Layout", reset_workspace_layout, "Reset all dock widths, tabs and split ratios to defaults")
+	add_button(actions, "Back to Viewport", func(): set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D), "Return to 3D/2D map editing")
+	setup_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	paths.add_child(setup_status)
+
+
+func _build_right_inspector() -> void:
+	attributes_inspector.bind_state(workspace_state)
+	attributes_inspector.register_panel(WorkspaceState.InspectorContext.TERRAIN_BRUSH, brush_panel)
+	attributes_inspector.register_panel(WorkspaceState.InspectorContext.SLOPE, slope_studio)
+	attributes_inspector.register_panel(WorkspaceState.InspectorContext.SHAPE, terrain_tools)
+	attributes_inspector.register_panel(WorkspaceState.InspectorContext.OBJECT, object_attributes)
+	attributes_inspector.register_panel(WorkspaceState.InspectorContext.OBJECT_BROWSER, object_browser.detail_panel)
+	attributes_inspector.register_panel(WorkspaceState.InspectorContext.PATH, path_inspector)
+	attributes_inspector.register_panel(WorkspaceState.InspectorContext.MISSION, mission_studio)
+	attributes_inspector.register_panel(WorkspaceState.InspectorContext.WATER, water_tools)
+	attributes_inspector.register_panel(WorkspaceState.InspectorContext.ENVIRONMENT, environment_studio)
+	attributes_inspector.register_panel(WorkspaceState.InspectorContext.NODE, studio.attributes_panel)
+	attributes_inspector.register_panel(WorkspaceState.InspectorContext.SOUND, sound_editor)
+	attributes_inspector.register_panel(WorkspaceState.InspectorContext.PROJECT, target_profile_dialog)
+
+
+func _build_bottom_bar(parent: Control, colors: Dictionary) -> void:
+	diagnostics_drawer.custom_minimum_size.y = 88
+	diagnostics_drawer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	diagnostics_drawer.hide()
+	parent.add_child(diagnostics_drawer)
+
+	var bar := HBoxContainer.new()
+	bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bar.add_theme_constant_override("separation", 8)
+	parent.add_child(bar)
+
+	# Compact status bar (never forces horizontal overflow at 1120x690)
+	title.text = "No map loaded"
+	title.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	title.custom_minimum_size.x = 120
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title.size_flags_stretch_ratio = 0.9
+	bar.add_child(title)
+
+	tool_badge.text = "[Terrain Brush]"
+	tool_badge.add_theme_color_override("font_color", colors["borderHighlight"])
+	bar.add_child(tool_badge)
+
+	coordinates.text = "LMB paint · RMB orbit · MMB pan · Wheel zoom"
 	coordinates.add_theme_color_override("font_color", colors["textSecondary"])
 	coordinates.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	layout.add_child(coordinates)
+	coordinates.custom_minimum_size.x = 100
+	coordinates.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	coordinates.size_flags_stretch_ratio = 1.1
+	bar.add_child(coordinates)
+
 	status.text = "Ready"
 	status.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	layout.add_child(status)
+	status.custom_minimum_size.x = 100
+	status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	status.size_flags_stretch_ratio = 1.2
+	bar.add_child(status)
+
+	diagnostics_button.text = "Log"
+	diagnostics_button.toggle_mode = true
+	diagnostics_button.tooltip_text = "Show/hide collapsible Diagnostics & Log drawer"
+	diagnostics_button.toggled.connect(func(on: bool):
+		workspace_state.set_dock_visibility(workspace_state.left_dock_visible, workspace_state.right_dock_visible, on)
+		_save_workspace_layout())
+	bar.add_child(diagnostics_button)
+
+
+func _build_allowed_dialogs() -> void:
 	setup_dialog(open_dialog, FileDialog.FILE_MODE_OPEN_FILE, ["*.bzn ; Battlezone mission", "*.bzmag ; BZMAG project"])
 	open_dialog.file_selected.connect(request_open)
 	setup_dialog(blank_dialog, FileDialog.FILE_MODE_OPEN_FILE, ["*.bzn ; Blank Battlezone mission"])
@@ -335,53 +718,7 @@ func _ready() -> void:
 	save_dialog.file_selected.connect(save_project)
 	setup_dialog(export_dialog, FileDialog.FILE_MODE_OPEN_DIR, [])
 	export_dialog.dir_selected.connect(export_package)
-	confirmation.title = "Open another map"
-	confirmation.dialog_text = "Open another map and discard unsaved edits?"
-	add_child(confirmation)
-	confirmation.confirmed.connect(func(): open_map(pending_path))
-	keys_dialog.title = "Editor Hotkeys"
-	keys_dialog.dialog_text = "F  Fly camera (3D view)\nW/S/A/D  Fly forward / back / strafe\nQ/E  Fly down / up\n\nShift+1–6  Brush size\nShift+Q/W/E/R  Square / Circle / Cone / Bell\nShift+Z/X/C/V  Pressure 10 / 20 / 50 / 100%\nShift+A/S/D/F/G  Paint / Spray / Raise / Blend / Pick\nAlt+H  Height brush\nF5  Playtest\nCtrl+O/S/Z/Y  Open / Save Project / Undo / Redo\n\nMove Points tool\nDrag  Move a point\nShift+click  Append a point\nDelete  Remove selected point\nEsc  Cancel drag\n\nMove Object tool\nDrag  Move an object\nShift+drag  Snap to terrain grid\n[ / ]  Rotate −15° / +15°  (Shift for 1°)\nCtrl+D  Duplicate the selection\nDelete  Remove the selection\nEsc  Cancel drag\n\nEdit Water dialog\nLeft drag  Paint coverage on the chosen layer\nShift+drag  Erase coverage\nApply Elevation  Set the layer water height\nDialog closes  Painting stops"
-	add_child(keys_dialog)
-	studio.hide()
-	add_child(studio)
-	studio.updated.connect(func(value): sync_actions(); report(value))
-	studio.preview_display.connect(show_graph_preview)
-	add_child(terrain_tools)
-	terrain_tools.updated.connect(func(value: String): sync_actions(); report(value))
-	add_child(slope_studio)
-	slope_studio.updated.connect(func(value: String): sync_actions(); report(value))
-	add_child(environment_studio)
-	environment_studio.updated.connect(func(value: String): sync_actions(); report(value))
-	environment_studio.preview_toggled.connect(func(on: bool):
-		if document != null:
-			scene_view.apply_environment_preview(document.effective_environment(), on))
-	add_child(sound_editor)
-	sound_editor.updated.connect(func(value: String): sync_actions(); report(value))
-	sound_editor.sound_point_selected.connect(select_object_view)
-	add_child(object_browser)
-	object_browser.place_requested.connect(start_place_object)
-	object_browser.place_at_cursor_requested.connect(place_object_at_cursor)
-	object_browser.status_message.connect(report)
-	object_label_dialog.title = "Object Label Editor"
-	object_label_dialog.ok_button_text = "Apply Label"
-	object_label_dialog.dialog_hide_on_ok = false
-	var label_box := VBoxContainer.new()
-	label_box.custom_minimum_size.x = 396
-	label_box.add_theme_constant_override("separation", 6)
-	object_label_target.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	object_label_target.custom_minimum_size.x = 396
-	label_box.add_child(object_label_target)
-	object_label_field.placeholder_text = "ASCII label (empty clears custom label)"
-	label_box.add_child(object_label_field)
-	object_label_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	object_label_status.custom_minimum_size.x = 396
-	label_box.add_child(object_label_status)
-	object_label_dialog.add_child(label_box)
-	object_label_dialog.confirmed.connect(apply_object_label_dialog)
-	add_child(object_label_dialog)
-	add_child(water_tools)
-	water_tools.updated.connect(func(value: String): sync_actions(); report(value))
-	water_tools.painting_changed.connect(update_water_painting)
+
 	setup_dialog(game_picker, FileDialog.FILE_MODE_OPEN_DIR, [])
 	setup_dialog(vrv_picker, FileDialog.FILE_MODE_OPEN_DIR, [])
 	setup_dialog(autosave_picker, FileDialog.FILE_MODE_OPEN_DIR, [])
@@ -391,71 +728,503 @@ func _ready() -> void:
 	asset_profile_picker.file_selected.connect(func(path: String): asset_profile_path.text = path)
 	game_picker.use_native_dialog = true
 	vrv_picker.use_native_dialog = true
-	playtest_dialog.title = "Playtest Setup"
-	playtest_dialog.ok_button_text = "Save Settings"
-	playtest_dialog.dialog_hide_on_ok = false
-	playtest_dialog.dialog_autowrap = true
-	var paths := VBoxContainer.new()
-	paths.custom_minimum_size.x = 540
-	paths.add_theme_constant_override("separation", 4)
-	add_label(paths, "Battlezone installation folder")
-	add_folder_field(paths, game_path, game_picker, "Select the Battlezone installation folder")
-	add_label(paths, "VRV source folder (optional engine layout converter and VSR assets)")
-	add_folder_field(paths, vrv_path, vrv_picker, "Select the VRV source folder")
-	add_label(paths, "Autosave folder (empty keeps the default user folder; never the map folder)")
-	add_folder_field(paths, autosave_root_field, autosave_picker, "Select the autosave store folder")
-	add_label(paths, "Asset profile for this project (optional)")
-	var profile_row := HBoxContainer.new()
-	paths.add_child(profile_row)
-	asset_profile_path.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	asset_profile_path.editable = false
-	profile_row.add_child(asset_profile_path)
-	asset_profile_browse = add_button(profile_row, "Browse…", asset_profile_picker.popup_centered_ratio.bind(0.72), "Link a JSON asset profile to this project")
-	asset_profile_browse.disabled = true
-	engine_editor_mode.text = "Start in the engine editor without mission scripts"
-	paths.add_child(engine_editor_mode)
-	var theme_row := VBoxContainer.new()
-	paths.add_child(theme_row)
-	var theme_lbl := Label.new()
-	theme_lbl.text = "Wintage theme"
-	theme_row.add_child(theme_lbl)
-	for slug in Wintage.theme_slugs():
-		theme_select.add_item(Wintage.theme_label(slug))
-	theme_select.item_selected.connect(func(idx: int): set_wintage_theme(Wintage.theme_slugs()[idx], compact_check.button_pressed))
-	theme_row.add_child(theme_select)
-	compact_check.text = "Compact toolbar spacing"
-	compact_check.toggled.connect(func(on: bool): set_wintage_theme(theme_slug, on))
-	paths.add_child(compact_check)
-	add_button(paths, "Find via Steam", func(): find_steam_game(true), "Find Battlezone in your Steam libraries")
-	add_button(paths, "Game & Mods Manager…", func(): open_target_profile(1), "Discover Stock, VSR, VRV and Steam Workshop mods")
-	paths.add_child(setup_status)
-	playtest_dialog.add_child(paths)
-	add_child(playtest_dialog)
-	playtest_dialog.confirmed.connect(save_playtest_setup)
-	game_path.text = settings.get_value("playtest", "game", "")
-	vrv_path.text = settings.get_value("playtest", "vrv", "")
-	autosave_root_field.text = settings.get_value("autosave", "root", "")
-	autosave_custom_root = autosave_root_field.text.strip_edges()
-	engine_editor_mode.button_pressed = settings.get_value("playtest", "engine_editor", false)
-	vrv_configured = settings.has_section_key("playtest", "vrv")
-	default_new_mod_profile = String(settings.get_value("new_map", "default_mod", "stock"))
-	if default_new_mod_profile.is_empty():
-		default_new_mod_profile = "stock"
-	mod_registry.discover_installed(game_path.text.strip_edges(), vrv_path.text.strip_edges())
-	sync_theme_controls()
+
+	confirmation.title = "Open another map"
+	confirmation.dialog_text = "Open another map and discard unsaved edits?"
+	add_child(confirmation)
+	confirmation.confirmed.connect(func(): open_map(pending_path))
+
+	keys_dialog.title = "Editor Hotkeys"
+	keys_dialog.dialog_text = "F  Fly camera (3D view)\nW/S/A/D  Fly forward / back / strafe\nQ/E  Fly down / up\nF11  Fullscreen Viewport toggle\n\nShift+1–6  Brush size\nShift+Q/W/E/R  Square / Circle / Cone / Bell\nShift+Z/X/C/V  Pressure 10 / 20 / 50 / 100%\nShift+A/S/D/F/G  Paint / Spray / Raise / Blend / Pick\nAlt+H  Terrain Brush\nF5  Playtest\nCtrl+O/S/Z/Y  Open / Save Project / Undo / Redo\n\nMMB over Slider  Houdini Value Ladder\nMMB over 3D View  Camera Pan\n\nMove Points tool: Drag point · Shift+click append · Delete remove · Esc cancel\nMove Object tool: Drag object · Shift snap · [ / ] rotate · Ctrl+D duplicate · Delete remove"
+	add_child(keys_dialog)
+
 	recover_dialog.title = "Recover autosave"
 	recover_dialog.min_size = Vector2i(520, 260)
 	recover_dialog.ok_button_text = "Open Selected"
 	recover_dialog.dialog_autowrap = true
 	recover_dialog.add_child(recover_list)
 	recover_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	recover_list.tooltip_text = "Rolling autosave slots, oldest first. Items outside the verified slot naming rule never appear here."
+	recover_list.tooltip_text = "Rolling autosave slots, oldest first."
 	recover_dialog.confirmed.connect(open_recovered_autosave)
 	add_child(recover_dialog)
+
+
+func _wire_workspace_signals() -> void:
+	workspace_state.layout_changed.connect(_apply_workspace_layout)
+	workspace_state.center_mode_changed.connect(_on_center_mode_changed)
+	workspace_state.left_tab_changed.connect(_on_state_left_tab_changed)
+	workspace_state.preset_changed.connect(_on_state_preset_changed)
+	workspace_state.tool_changed.connect(_on_state_tool_changed)
+	workspace_state.inspector_context_changed.connect(_on_state_inspector_changed)
+
+	attributes_inspector.close_requested.connect(func():
+		workspace_state.set_dock_visibility(workspace_state.left_dock_visible, false, workspace_state.bottom_log_visible)
+		_save_workspace_layout())
+
+	tools_panel.tool_action_triggered.connect(_on_tool_panel_action)
+	scene_tree.item_selected_kind.connect(_on_scene_tree_selected)
+	scene_tree.item_activated_kind.connect(_on_scene_tree_activated)
+	scene_tree.visibility_toggled.connect(_on_scene_visibility_toggled)
+
+	layers_panel.layer_selected.connect(_on_layers_panel_selected)
+	layers_panel.edit_graph_requested.connect(_on_layers_edit_graph)
+	layers_panel.preview_requested.connect(func():
+		if document != null:
+			if studio.document != document:
+				_prepare_node_studio(layers_panel.selected_index)
+			studio.preview())
+	layers_panel.bake_requested.connect(func():
+		if document != null and document.has_preview():
+			studio.bake())
+	layers_panel.layers_mutated.connect(func(msg: String):
+		if studio.document == document:
+			studio.sync_from_document(layers_panel.selected_index)
+		scene_tree.rebuild()
+		sync_actions()
+		report(msg))
+
+	brush_panel.brush_changed.connect(update_brush_cursor)
+	new_map_wizard.map_created.connect(_on_wizard_map_created)
+	new_map_wizard.cancel_requested.connect(func(): set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D))
+	target_profile_dialog.profile_applied.connect(func(msg: String): sync_actions(); scene_tree.rebuild(); report(msg))
+	target_profile_dialog.mods_changed.connect(_on_mods_settings_changed)
+	path_inspector.path_created.connect(select_created_path)
+	path_inspector.path_removed.connect(func(label_str: String): scene_tree.rebuild(); report("Removed path %s." % label_str))
+	path_inspector.path_updated.connect(func(_idx: int): scene_tree.rebuild(); sync_actions())
+	mission_studio.paths_selection_changed.connect(set_extra_path_selection)
+	mission_studio.path_focused.connect(select_created_path)
+	mission_studio.snap_toggled.connect(func(on: bool): snap_path_drag = on)
+	mission_studio.status_message.connect(report)
+	studio.updated.connect(func(value: String): layers_panel.refresh(studio.selected); scene_tree.rebuild(); sync_actions(); report(value))
+	studio.preview_display.connect(show_graph_preview)
+	studio.layers_changed.connect(func(sel: int):
+		layers_panel.refresh(sel)
+		scene_tree.rebuild())
+	studio.viewport_requested.connect(func(): set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D))
+	terrain_tools.updated.connect(func(value: String): sync_actions(); scene_tree.rebuild(); report(value))
+	terrain_tools.preview_state_changed.connect(func(on: bool):
+		workspace_state.active_preview_owner = "shape" if on else ""
+		sync_actions())
+	slope_studio.updated.connect(func(value: String): sync_actions(); scene_tree.rebuild(); report(value))
+	slope_studio.preview_state_changed.connect(func(on: bool):
+		workspace_state.active_preview_owner = "slope" if on else ""
+		sync_actions())
+	slope_studio.canceled.connect(func():
+		workspace_state.active_preview_owner = ""
+		sync_actions()
+		report("Slope Studio preview cancelled."))
+	environment_studio.updated.connect(func(value: String): sync_actions(); scene_tree.rebuild(); report(value))
+	environment_studio.preview_toggled.connect(func(on: bool):
+		if document != null:
+			scene_view.apply_environment_preview(document.effective_environment(), on))
+	sound_editor.updated.connect(func(value: String): sync_actions(); scene_tree.rebuild(); report(value))
+	sound_editor.sound_point_selected.connect(select_object_view)
+	object_browser.place_requested.connect(start_place_object)
+	object_browser.place_at_cursor_requested.connect(place_object_at_cursor)
+	object_browser.status_message.connect(report)
+	object_browser.entry_selected.connect(func(_entry: Dictionary):
+		if workspace_state.left_tab == WorkspaceState.LeftTab.ASSETS:
+			workspace_state.set_inspector_context(WorkspaceState.InspectorContext.OBJECT_BROWSER))
+	object_attributes.updated.connect(func(msg: String):
+		scene_tree.rebuild()
+		sync_actions()
+		report(msg))
+	object_attributes.focus_requested.connect(focus_object_view)
+	object_attributes.sound_edit_requested.connect(func(v: int):
+		select_object_view(v)
+		open_sound_editor())
+	object_attributes.selection_cleared.connect(func():
+		object_tool.selected = -1
+		object_tool.refresh_marker()
+		scene_tree.rebuild()
+		sync_actions())
+	water_tools.updated.connect(func(value: String): sync_actions(); scene_tree.rebuild(); report(value))
+	water_tools.painting_changed.connect(update_water_painting)
+
+
+func _on_tool_panel_action(action_id: String) -> void:
+	match action_id:
+		"terrain_brush":
+			activate_terrain_brush()
+		"slope_studio":
+			open_slope_studio()
+		"shape_terrain":
+			open_terrain_tools()
+		"nodes":
+			open_studio()
+		"move_object":
+			_toggle_move_objects(true)
+		"object_browser":
+			open_object_browser()
+		"sound_editor":
+			open_sound_editor()
+		"move_path":
+			_toggle_move_paths(true)
+		"path_inspector":
+			inspect_path()
+		"new_path":
+			start_new_path()
+		"mission_studio":
+			open_mission_studio()
+		"water_editor":
+			toggle_water_edit()
+		"environment":
+			open_environment_studio()
+		"target_profile":
+			open_target_profile(0)
+		"new_map":
+			open_new_map_wizard()
+		"settings":
+			show_playtest_setup()
+
+
+func _on_scene_tree_selected(kind: String, index: int) -> void:
+	if document == null:
+		return
+	match kind:
+		"terrain", "terrain_channel":
+			if index >= 0 and index <= 2:
+				brush_panel.surface.select(index)
+				brush_panel.update_buttons()
+			workspace_state.set_inspector_context(WorkspaceState.InspectorContext.TERRAIN_BRUSH)
+		"layers", "layer":
+			if index >= 0 and index < document.layers.size():
+				workspace_state.select_layer(index)
+				layers_panel.refresh(index)
+				if studio.document == document:
+					studio.load_layer(index)
+			workspace_state.set_inspector_context(WorkspaceState.InspectorContext.NODE)
+		"object":
+			if document.valid_view_object(index):
+				select_object_view(index)
+				object_attributes.refresh(document, index)
+				workspace_state.set_inspector_context(WorkspaceState.InspectorContext.OBJECT)
+		"objects_group":
+			workspace_state.set_left_tab(WorkspaceState.LeftTab.ASSETS, true)
+			open_object_browser()
+		"path":
+			select_created_path(index)
+			path_inspector.show_path(document, index)
+			workspace_state.set_inspector_context(WorkspaceState.InspectorContext.PATH)
+		"mission":
+			mission_studio.begin(document, _world_anchor())
+			workspace_state.set_inspector_context(WorkspaceState.InspectorContext.MISSION)
+		"water":
+			water_tools.begin(document)
+			workspace_state.set_inspector_context(WorkspaceState.InspectorContext.WATER)
+		"environment":
+			environment_studio.begin(document, scene_view.env_preview_enabled)
+			workspace_state.set_inspector_context(WorkspaceState.InspectorContext.ENVIRONMENT)
+		"project":
+			target_profile_dialog.begin(document, mod_registry, game_path.text.strip_edges(), vrv_path.text.strip_edges(), default_new_mod_profile, 0)
+			workspace_state.set_inspector_context(WorkspaceState.InspectorContext.PROJECT)
+
+
+func _on_scene_tree_activated(kind: String, index: int) -> void:
+	if document == null:
+		return
+	match kind:
+		"object":
+			focus_object_view(index)
+		"path":
+			focus_path_index(index)
+		"layer", "layers":
+			_on_layers_edit_graph(maxi(0, index))
+		"terrain", "terrain_channel":
+			set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
+			focus_terrain()
+		"environment":
+			open_environment_studio()
+		"water":
+			toggle_water_edit()
+
+
+func _on_scene_visibility_toggled(channel: String, on: bool) -> void:
+	workspace_state.set_editor_visibility(channel, on)
+	match channel:
+		"objects":
+			if objects_button != null:
+				objects_button.set_pressed_no_signal(on)
+				toggle_objects()
+		"paths":
+			if document != null:
+				if on:
+					draw_path(document.path_at(path_index_for_item(path_list.selected)))
+				else:
+					top.path_overlay = {}
+					top.extra_paths.clear()
+					top.queue_redraw()
+					scene_view.extra_paths.clear()
+					scene_view.show_path({})
+		"water":
+			if water_button != null and document != null and document.package.water != null:
+				water_button.set_pressed_no_signal(on)
+				toggle_water()
+
+
+func _on_layers_panel_selected(index: int) -> void:
+	workspace_state.select_layer(index)
+	if document != null:
+		if studio.document != document:
+			_prepare_node_studio(index)
+		else:
+			studio.load_layer(index)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.NODE)
+
+
+func _on_layers_edit_graph(index: int) -> void:
+	if document == null:
+		return
+	_prepare_node_studio(index)
+	set_center_mode(WorkspaceState.CenterMode.NODES)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.NODE, true)
+
+
+func _prepare_node_studio(layer_idx: int = -1) -> void:
+	if document == null:
+		return
+	clear_incompatible_preview("node")
+	var terrain := document.package.terrain
+	var target := last_cursor if last_cursor.x >= 0 else Vector2(terrain.dimensions) * 0.5
+	studio.begin(document, Vector2i(target.round()), layer_idx)
+
+
+func _on_center_mode_button_pressed(mode_id: int) -> void:
+	if mode_id == WorkspaceState.CenterMode.NODES:
+		open_studio()
+	elif mode_id == WorkspaceState.CenterMode.NEW_MAP:
+		open_new_map_wizard()
+	elif mode_id == WorkspaceState.CenterMode.SETTINGS:
+		show_playtest_setup()
+	else:
+		set_center_mode(mode_id)
+
+
+func set_center_mode(mode_id: int) -> void:
+	workspace_state.set_center_mode(mode_id)
+
+
+func _on_center_mode_changed(mode_id: int) -> void:
+	var is_vp := mode_id in [WorkspaceState.CenterMode.SPLIT_3D_2D, WorkspaceState.CenterMode.VIEW_3D, WorkspaceState.CenterMode.VIEW_2D]
+	views.visible = is_vp
+	viewport_bar.visible = is_vp
+	scene_dock_box.visible = mode_id in [WorkspaceState.CenterMode.SPLIT_3D_2D, WorkspaceState.CenterMode.VIEW_3D]
+	top_dock_box.visible = mode_id in [WorkspaceState.CenterMode.SPLIT_3D_2D, WorkspaceState.CenterMode.VIEW_2D]
+	studio.visible = (mode_id == WorkspaceState.CenterMode.NODES)
+	new_map_wizard.visible = (mode_id == WorkspaceState.CenterMode.NEW_MAP)
+	playtest_dialog.visible = (mode_id == WorkspaceState.CenterMode.SETTINGS)
+	for mid_v in center_mode_buttons:
+		var mid := int(mid_v)
+		(center_mode_buttons[mid] as Button).set_pressed_no_signal(mid == mode_id)
+	_apply_views_split_offset()
 	sync_actions()
-	var args := OS.get_cmdline_user_args()
-	if not args.is_empty():
-		call_deferred("open_command_line", args[0])
+
+
+func _on_left_tab_changed(tab_idx: int) -> void:
+	if _applying_layout:
+		return
+	workspace_state.set_left_tab(tab_idx, false)
+	if tab_idx == WorkspaceState.LeftTab.ASSETS and document != null:
+		var game := game_path.text.strip_edges()
+		var vrv := vrv_path.text.strip_edges()
+		object_browser.begin(document, mod_registry, game, vrv)
+		workspace_state.set_inspector_context(WorkspaceState.InspectorContext.OBJECT_BROWSER)
+	elif tab_idx == WorkspaceState.LeftTab.LAYERS and document != null:
+		layers_panel.refresh()
+	_save_workspace_layout()
+
+
+func _on_state_left_tab_changed(tab_idx: int) -> void:
+	if left_tabs.current_tab != tab_idx and tab_idx >= 0 and tab_idx < left_tabs.get_tab_count():
+		_applying_layout = true
+		left_tabs.current_tab = tab_idx
+		_applying_layout = false
+
+
+func _on_preset_dropdown_selected(idx: int) -> void:
+	if _applying_layout or idx < 0:
+		return
+	var pid := int(preset_select.get_item_metadata(idx))
+	apply_workspace_preset(pid)
+
+
+func apply_workspace_preset(preset_id: int) -> void:
+	workspace_state.apply_preset(preset_id)
+	if preset_id == WorkspaceState.LayoutPreset.NODES and document != null:
+		_prepare_node_studio(layers_panel.selected_index)
+	elif preset_id == WorkspaceState.LayoutPreset.SCULPTING and document != null:
+		slope_studio.begin(document, _world_anchor(), true)
+	elif preset_id == WorkspaceState.LayoutPreset.MISSION and document != null:
+		mission_studio.begin(document, _world_anchor())
+	elif preset_id == WorkspaceState.LayoutPreset.OBJECT_PLACEMENT and document != null:
+		object_browser.begin(document, mod_registry, game_path.text.strip_edges(), vrv_path.text.strip_edges())
+		object_attributes.refresh(document, object_tool.selected)
+	_save_workspace_layout()
+
+
+func _on_state_preset_changed(preset_id: int) -> void:
+	_applying_layout = true
+	for i in preset_select.item_count:
+		if int(preset_select.get_item_metadata(i)) == preset_id:
+			preset_select.select(i)
+			break
+	_applying_layout = false
+
+
+func _on_state_tool_changed(tool_id: int) -> void:
+	_update_tool_badge()
+	var action_map := {
+		WorkspaceState.Tool.TERRAIN_BRUSH: "terrain_brush",
+		WorkspaceState.Tool.SLOPE: "slope_studio",
+		WorkspaceState.Tool.SHAPE: "shape_terrain",
+		WorkspaceState.Tool.OBJECT_MOVE: "move_object",
+		WorkspaceState.Tool.OBJECT_PLACE: "object_browser",
+		WorkspaceState.Tool.PATH_MOVE: "move_path",
+		WorkspaceState.Tool.WATER_PAINT: "water_editor",
+	}
+	tools_panel.set_active_action(String(action_map.get(tool_id, "")))
+
+
+func _on_state_inspector_changed(ctx: int) -> void:
+	if ctx == WorkspaceState.InspectorContext.ENVIRONMENT:
+		tools_panel.set_active_action("environment")
+	elif ctx == WorkspaceState.InspectorContext.MISSION:
+		tools_panel.set_active_action("mission_studio")
+	elif ctx == WorkspaceState.InspectorContext.SOUND:
+		tools_panel.set_active_action("sound_editor")
+	elif ctx == WorkspaceState.InspectorContext.PROJECT:
+		tools_panel.set_active_action("target_profile")
+
+
+func _update_tool_badge() -> void:
+	var tname := String(WorkspaceState.TOOL_LABELS.get(workspace_state.active_tool, "Ready"))
+	var prev_str := " · PREVIEW ACTIVE" if document != null and document.has_preview() else ""
+	tool_badge.text = "[%s%s]" % [tname, prev_str]
+
+
+func toggle_left_dock() -> void:
+	workspace_state.set_dock_visibility(not workspace_state.left_dock_visible, workspace_state.right_dock_visible, workspace_state.bottom_log_visible)
+	_save_workspace_layout()
+
+
+func toggle_right_dock() -> void:
+	workspace_state.set_dock_visibility(workspace_state.left_dock_visible, not workspace_state.right_dock_visible, workspace_state.bottom_log_visible)
+	_save_workspace_layout()
+
+
+func toggle_diagnostics_drawer() -> void:
+	workspace_state.set_dock_visibility(workspace_state.left_dock_visible, workspace_state.right_dock_visible, not workspace_state.bottom_log_visible)
+	_save_workspace_layout()
+
+
+func toggle_fullscreen_viewport() -> void:
+	if workspace_state.active_preset == WorkspaceState.LayoutPreset.FULLSCREEN:
+		workspace_state.exit_fullscreen()
+	else:
+		workspace_state.apply_preset(WorkspaceState.LayoutPreset.FULLSCREEN)
+	_save_workspace_layout()
+
+
+func reset_workspace_layout() -> void:
+	workspace_state.reset_layout(get_viewport_rect().size)
+	_save_workspace_layout()
+	report("Workspace layout reset to Default.")
+
+
+func _on_editor_resized() -> void:
+	workspace_state.clamp_to_viewport(get_viewport_rect().size)
+	_apply_workspace_layout()
+
+
+func _apply_workspace_layout() -> void:
+	_applying_layout = true
+	var vp_sz := get_viewport_rect().size
+	if vp_sz.x < 320.0:
+		vp_sz = Vector2(1280, 720)
+	workspace_state.clamp_to_viewport(vp_sz)
+	left_dock.visible = workspace_state.left_dock_visible
+	attributes_inspector.visible = workspace_state.right_dock_visible
+	diagnostics_drawer.visible = workspace_state.bottom_log_visible
+	diagnostics_button.set_pressed_no_signal(workspace_state.bottom_log_visible)
+	if left_tabs.current_tab != workspace_state.left_tab and workspace_state.left_tab < left_tabs.get_tab_count():
+		left_tabs.current_tab = workspace_state.left_tab
+	if left_dock.visible:
+		left_dock.custom_minimum_size.x = 204
+		left_split.split_offset = maxi(0, workspace_state.left_dock_width - 204)
+	if attributes_inspector.visible:
+		attributes_inspector.custom_minimum_size.x = 240
+		right_split.split_offset = -maxi(0, workspace_state.right_dock_width - 240)
+		right_split.dragger_visibility = SplitContainer.DRAGGER_VISIBLE
+	_on_center_mode_changed(workspace_state.center_mode)
+	_on_state_preset_changed(workspace_state.active_preset)
+	_applying_layout = false
+
+
+func _apply_views_split_offset() -> void:
+	if workspace_state.center_mode != WorkspaceState.CenterMode.SPLIT_3D_2D:
+		return
+	var r := clampf(workspace_state.viewport_split_ratio, 0.25, 0.85)
+	scene_dock_box.size_flags_stretch_ratio = r / maxf(0.15, 1.0 - r)
+	top_dock_box.size_flags_stretch_ratio = 1.0
+
+
+func _on_left_split_dragged(_offset: int) -> void:
+	if _applying_layout or not left_dock.visible:
+		return
+	workspace_state.left_dock_width = clampi(int(round(left_dock.size.x)), 168, 420)
+	_save_workspace_layout()
+
+
+func _on_right_split_dragged(_offset: int) -> void:
+	if _applying_layout or not attributes_inspector.visible:
+		return
+	workspace_state.right_dock_width = clampi(int(round(attributes_inspector.size.x)), 224, 520)
+	_save_workspace_layout()
+
+
+func _on_views_split_dragged(_offset: int) -> void:
+	if _applying_layout or workspace_state.center_mode != WorkspaceState.CenterMode.SPLIT_3D_2D:
+		return
+	var total := maxf(1.0, scene_dock_box.size.x + top_dock_box.size.x)
+	workspace_state.viewport_split_ratio = clampf(scene_dock_box.size.x / total, 0.25, 0.85)
+	_save_workspace_layout()
+
+
+func _save_workspace_layout() -> void:
+	var settings := ConfigFile.new()
+	settings.load(settings_path)
+	workspace_state.save_to_config(settings)
+	settings.save(settings_path)
+
+
+func clear_active_preview(announce_msg: String = "") -> void:
+	if document == null:
+		return
+	if slope_studio.is_preview_active():
+		slope_studio.clear_preview()
+	if document.has_preview():
+		document.clear_preview()
+	workspace_state.active_preview_owner = ""
+	if not announce_msg.is_empty():
+		report(announce_msg)
+	sync_actions()
+
+
+func clear_incompatible_preview(next_owner: String) -> void:
+	if document == null or not document.has_preview():
+		return
+	if workspace_state.active_preview_owner == next_owner and not next_owner.is_empty():
+		return
+	clear_active_preview()
+
+
+func _world_anchor() -> Vector2:
+	if document == null:
+		return Vector2.ZERO
+	var terrain := document.package.terrain
+	var target := last_cursor if last_cursor.x >= 0 else Vector2(terrain.dimensions) * 0.5
+	var world := scene_view.point_world(target)
+	return Vector2(world.x, world.z)
 
 
 func add_label(parent: Node, caption: String) -> void:
@@ -480,32 +1249,51 @@ func add_button(parent: Node, caption: String, action: Callable, tip: String, ke
 
 
 func add_camera_toolbar(parent: Control) -> void:
-	solid_button = add_button(parent, "Solid", show_wire.bind(false), "Preview solid terrain")
-	wire_button = add_button(parent, "Wire", show_wire.bind(true), "Preview the terrain mesh")
+	solid_button = add_button(parent, "Solid", show_wire.bind(false), "Solid terrain view")
+	wire_button = add_button(parent, "Wire", show_wire.bind(true), "Wireframe terrain mesh")
 	for button in [solid_button, wire_button]:
 		button.toggle_mode = true
 	show_wire(false)
 	camera_buttons.append(add_button(parent, "Top", scene_view.set_view.bind(true), "Orthographic top view"))
 	camera_buttons.append(add_button(parent, "Orbit", scene_view.set_view.bind(false), "Perspective orbit view"))
-	focus_button = add_button(parent, "Focus", focus_terrain, "Focus the 3D camera on the last terrain cursor")
-	fly_button = add_button(parent, "Fly", toggle_fly, "Free-flight camera. W/S forward and back, A/D strafe, Q/E down and up, right drag to look, F toggles.")
+	focus_button = add_button(parent, "Focus", focus_terrain, "Focus 3D camera on last cursor")
+	fly_button = add_button(parent, "Fly", toggle_fly, "Free-flight camera (F toggles; WASD/QE move)")
 	fly_button.toggle_mode = true
-	color_button = add_button(parent, "Color", show_vertex_colors, "Preview native TER vertex colors")
+	color_button = add_button(parent, "Col", show_vertex_colors, "Preview native TER vertex colors")
 	color_button.toggle_mode = true
-	texture_button = add_button(parent, "Texture", toggle_textures, "Preview native TRN tile textures with terrain tint and blending")
+	texture_button = add_button(parent, "Tex", toggle_textures, "Preview native TRN tile textures")
 	texture_button.toggle_mode = true
+	objects_button = add_button(parent, "Obj", toggle_objects, "Display native BZCC object models in 3D view (editor-only)")
+	objects_button.toggle_mode = true
+	water_button = add_button(parent, "Wat", toggle_water, "Preview decoded native water layers in both views (editor-only)")
+	water_button.toggle_mode = true
+	move_objects_button = add_button(parent, "Move Obj", object_tool_changed, "Select and drag an object in 2D/3D")
+	move_objects_button.toggle_mode = true
+	move_path_button = add_button(parent, "Move Pt", path_tool_changed, "Drag AI path points in 2D/3D")
+	move_path_button.toggle_mode = true
+	path_list.custom_minimum_size.x = 84
+	path_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	path_list.tooltip_text = "Display a native BZN path in both views"
+	path_list.add_item("Path overlay")
+	path_list.disabled = true
+	path_list.item_selected.connect(select_path)
+	parent.add_child(path_list)
 
 
 func toggle_water() -> void:
+	if document == null or document.package.water == null:
+		return
 	top.water_visible = water_button.button_pressed
 	top.queue_redraw()
 	scene_view.show_water(top.water_visible)
+	workspace_state.set_editor_visibility("water", top.water_visible)
+	scene_tree.sync_visibility_buttons(objects_button.button_pressed, bool(workspace_state.editor_visibility.get("paths", true)), water_button.button_pressed)
 	if top.water_visible:
 		var water := document.package.water
-		var message := "%d WAT layer(s) visible" % document.water_layers_effective().size()
+		var msg := "%d WAT layer(s) visible" % document.water_layers_effective().size()
 		if water.invalid_layer_flags != 0:
-			message += " · skipped invalid layer heights"
-		report(message)
+			msg += " · skipped invalid layer heights"
+		report(msg)
 
 
 func show_wire(enabled: bool) -> void:
@@ -534,6 +1322,20 @@ func setup_dialog(dialog: FileDialog, mode: FileDialog.FileMode, filters: Packed
 	add_child(dialog)
 
 
+func activate_terrain_brush() -> void:
+	clear_incompatible_preview("brush")
+	leave_water_paint()
+	leave_object_tool()
+	cancel_place_object(false)
+	move_path_button.set_pressed_no_signal(false)
+	if workspace_state.center_mode in [WorkspaceState.CenterMode.NODES, WorkspaceState.CenterMode.NEW_MAP, WorkspaceState.CenterMode.SETTINGS]:
+		set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
+	workspace_state.set_tool(WorkspaceState.Tool.TERRAIN_BRUSH)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.TERRAIN_BRUSH, true)
+	set_cursor(cursor)
+	sync_actions()
+
+
 func update_brush_cursor() -> void:
 	var layer := brush_panel.paint_layer()
 	var lane := int(brush_panel.texture_lane.value)
@@ -542,6 +1344,8 @@ func update_brush_cursor() -> void:
 	move_path_button.set_pressed_no_signal(false)
 	if object_tool.active:
 		leave_object_tool()
+	leave_water_paint()
+	workspace_state.set_tool(WorkspaceState.Tool.TERRAIN_BRUSH)
 	top.radius_m = brush_panel.radius_m
 	scene_view.radius_m = brush_panel.radius_m
 	top.square_brush = brush_panel.shape == Document.BrushShape.SQUARE
@@ -570,10 +1374,32 @@ func show_graph_preview(layer: int) -> void:
 
 
 func _shortcut_input(event: InputEvent) -> void:
-	if not event is InputEventKey or not event.pressed or event.echo or document == null or document.stroke_active or document.water_stroke_active:
+	if not event is InputEventKey or not event.pressed or event.echo:
 		return
 	var focused := get_viewport().gui_get_focus_owner()
 	if focused is LineEdit or focused is TextEdit:
+		return
+	if event.keycode == KEY_F11 and not event.ctrl_pressed and not event.alt_pressed:
+		toggle_fullscreen_viewport()
+		get_viewport().set_input_as_handled()
+		return
+	if event.keycode == KEY_ESCAPE and workspace_state.active_preset == WorkspaceState.LayoutPreset.FULLSCREEN:
+		workspace_state.exit_fullscreen()
+		get_viewport().set_input_as_handled()
+		return
+	if event.keycode == KEY_F1:
+		Wintage.popup_fit(keys_dialog, 420)
+		get_viewport().set_input_as_handled()
+		return
+	if document == null or document.stroke_active or document.water_stroke_active:
+		return
+	# When editing inside Nodes/NewMap/Settings, never leak terrain/object viewport shortcuts
+	var in_viewport := workspace_state.center_mode in [WorkspaceState.CenterMode.SPLIT_3D_2D, WorkspaceState.CenterMode.VIEW_3D, WorkspaceState.CenterMode.VIEW_2D]
+	if event.keycode == KEY_F5 and not event.ctrl_pressed and not event.alt_pressed and not event.shift_pressed:
+		playtest()
+		get_viewport().set_input_as_handled()
+		return
+	if not in_viewport:
 		return
 	if event.keycode == KEY_ESCAPE and not pending_place_spec.is_empty():
 		cancel_place_object(true)
@@ -598,6 +1424,7 @@ func _shortcut_input(event: InputEvent) -> void:
 			var step := deg_to_rad(1.0) if event.shift_pressed else deg_to_rad(15.0)
 			var direction := -1.0 if event.keycode == KEY_BRACKETLEFT else 1.0
 			if object_tool.selected >= 0 and document.rotate_object(object_tool.selected, direction * step):
+				object_attributes.refresh(document, object_tool.selected)
 				report(object_tool.description())
 			else:
 				report(document.error)
@@ -612,6 +1439,8 @@ func _shortcut_input(event: InputEvent) -> void:
 					object_tool.set_active(true)
 					object_tool.selected = view
 					object_tool.refresh_marker()
+					object_attributes.refresh(document, view)
+					scene_tree.rebuild()
 					report(object_tool.description() + object_count_notice("Duplicated"))
 				else:
 					report(document.error)
@@ -621,6 +1450,8 @@ func _shortcut_input(event: InputEvent) -> void:
 			if object_tool.selected >= 0 and document.remove_object(object_tool.selected):
 				object_tool.selected = -1
 				object_tool.refresh_marker()
+				object_attributes.refresh(document, -1)
+				scene_tree.rebuild()
 				report("Object removed. Undo restores it." + object_count_notice("Removed"))
 			else:
 				report(document.error)
@@ -631,19 +1462,11 @@ func _shortcut_input(event: InputEvent) -> void:
 		toggle_fly()
 		get_viewport().set_input_as_handled()
 	elif event.alt_pressed and key == KEY_H:
-		leave_object_tool()
-		move_path_button.set_pressed_no_signal(false)
-		path_tool_changed()
+		activate_terrain_brush()
 		get_viewport().set_input_as_handled()
 	elif event.shift_pressed and not event.ctrl_pressed and not event.alt_pressed and brush_panel.shortcut(key):
 		move_path_button.set_pressed_no_signal(false)
 		path_tool_changed(false)
-		get_viewport().set_input_as_handled()
-	elif event.keycode == KEY_F5 and not event.ctrl_pressed and not event.alt_pressed and not event.shift_pressed:
-		playtest()
-		get_viewport().set_input_as_handled()
-	elif event.keycode == KEY_F1:
-		Wintage.popup_fit(keys_dialog, 420)
 		get_viewport().set_input_as_handled()
 
 
@@ -658,26 +1481,20 @@ func sync_actions() -> void:
 	fly_button.disabled = locked
 	for button in camera_buttons:
 		button.disabled = locked
-	nodes_button.disabled = locked
-	terrain_tools_button.disabled = locked
-	slope_studio_button.disabled = locked or document.has_preview()
-	if environment_button != null:
-		environment_button.disabled = locked
-	new_path_button.disabled = locked or not document.package.path_codec.can_resize
-	edit_path_button.disabled = locked or path_list.selected <= 0
-	move_path_button.disabled = locked or path_list.selected <= 0
-	mission_studio_button.disabled = locked
 	var thread_busy := object_thread != null and object_thread.is_started()
-	objects_button.disabled = locked or document.object_count() == 0 or thread_busy
-	if object_browser_button != null:
-		object_browser_button.disabled = locked
-	move_objects_button.disabled = locked or document.object_count() == 0 or document.has_preview()
-	if object_label_button != null:
-		object_label_button.disabled = locked or document.object_count() == 0
-	if sound_button != null:
-		sound_button.disabled = locked or document.object_count() == 0
-	water_button.disabled = locked or document.package.water == null
-	water_edit_button.disabled = water_button.disabled
+	var has_doc := document != null
+	var has_objs := has_doc and document.object_count() > 0
+	var has_wat := has_doc and document.package.water != null
+	var can_resize_paths := has_doc and document.package.path_codec.can_resize
+	tools_panel.set_map_loaded(not locked, has_wat, has_objs, can_resize_paths)
+	if slope_studio_button != null:
+		slope_studio_button.disabled = locked
+	if edit_path_button != null:
+		edit_path_button.disabled = locked or path_list.selected <= 0
+	move_path_button.disabled = locked or path_list.selected <= 0
+	objects_button.disabled = locked or not has_objs or thread_busy
+	move_objects_button.disabled = locked or not has_objs or (has_doc and document.has_preview())
+	water_button.disabled = locked or not has_wat
 	color_button.disabled = locked or texture_button.button_pressed
 	texture_button.disabled = locked or thread_busy
 	if document != null:
@@ -686,8 +1503,12 @@ func sync_actions() -> void:
 		title.text = "%s%s  |  %s · %s  |  BZN %d  |  %d × %d m" % [
 			document.package.mission_name, dirty, document.mod_profile, document.mission_profile,
 			document.package.bzn_version, terrain.dimensions.x * 2, terrain.dimensions.y * 2]
+		title.tooltip_text = title.text
+	else:
+		title.text = "No map loaded"
 	if empty_state_hint != null:
 		empty_state_hint.visible = (document == null)
+	_update_tool_badge()
 
 
 func has_unsaved_changes() -> bool:
@@ -791,6 +1612,7 @@ func open_map(path: String) -> bool:
 		report(next.error)
 		return false
 	if document != null:
+		clear_active_preview()
 		if studio.document != null:
 			studio.close_studio()
 		if document.terrain_changed.is_connected(mark_refresh):
@@ -809,8 +1631,9 @@ func open_map(path: String) -> bool:
 			document.profile_changed.disconnect(on_document_profile_changed)
 		if document.environment_changed.is_connected(on_document_environment_changed):
 			document.environment_changed.disconnect(on_document_environment_changed)
-	water_tools.hide()
-	painting_water = false
+
+	leave_water_paint()
+	cancel_place_object(false)
 	document = next
 	loaded_objects = null
 	objects_button.set_pressed_no_signal(false)
@@ -854,6 +1677,28 @@ func open_map(path: String) -> bool:
 		document.mod_profile = String(document.detected_profile_info.get("recommendedMod", "stock"))
 		document.mission_profile = String(document.detected_profile_info.get("recommendedMission", "blank"))
 		remember_saved_changes()
+
+	# Rebind all docked workspace panels safely (no stale references!)
+	slope_studio.document = null
+	slope_studio._initialized = false
+	terrain_tools.document = document
+	water_tools.begin(document)
+	environment_studio.begin(document, scene_view.env_preview_enabled)
+	object_attributes.refresh(document, -1)
+	scene_tree.bind_document(document)
+	scene_tree.sync_visibility_buttons(false, true, false)
+	layers_panel.bind_document(document, 0)
+	if workspace_state.center_mode in [WorkspaceState.CenterMode.NODES, WorkspaceState.CenterMode.NEW_MAP, WorkspaceState.CenterMode.SETTINGS]:
+		set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
+	if workspace_state.left_tab == WorkspaceState.LeftTab.ASSETS:
+		object_browser.begin(document, mod_registry, cur_game, cur_vrv)
+	if workspace_state.active_inspector_context == WorkspaceState.InspectorContext.SLOPE:
+		slope_studio.begin(document, _world_anchor(), false)
+	elif workspace_state.active_inspector_context == WorkspaceState.InspectorContext.MISSION:
+		mission_studio.begin(document, _world_anchor())
+	elif workspace_state.active_inspector_context == WorkspaceState.InspectorContext.PROJECT:
+		target_profile_dialog.begin(document, mod_registry, cur_game, cur_vrv, default_new_mod_profile, 0)
+
 	sync_actions()
 	var open_compat := CompatibilityEngine.evaluate(document, mod_registry, document.mod_profile, document.mission_profile, document.engine_profile, cur_game, cur_vrv, {}, engine_editor_mode.button_pressed)
 	var open_note := ""
@@ -874,18 +1719,20 @@ func open_new_map_wizard() -> void:
 	var fallback := tool_root().path_join("map_references/blank_map1/duel_map_27_autosave_01.bzn")
 	var parent_dir := document.package.source_path.get_base_dir().get_base_dir() if document != null else tool_root().path_join("build")
 	new_map_wizard.begin(mod_registry, game, default_new_mod_profile, parent_dir, fallback)
+	set_center_mode(WorkspaceState.CenterMode.NEW_MAP)
 
 
 func _on_wizard_map_created(bzn_path: String, engine_id: String, mod_id: String, mission_id: String) -> void:
 	default_new_mod_profile = mod_id
 	_save_new_map_default()
 	if open_map(bzn_path):
-		# Strictly preserve the user's explicit ModProfile selection (never silently override Stock with VSR/VRV).
 		document.engine_profile = engine_id
 		document.mod_profile = mod_id
 		document.mission_profile = mission_id
 		document.profile_explicit = true
 		remember_saved_changes()
+		set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
+		scene_tree.rebuild()
 		sync_actions()
 		var compat := validate_playtest_profile()
 		if not bool(compat["profileCompatible"]):
@@ -898,6 +1745,7 @@ func _on_wizard_map_created(bzn_path: String, engine_id: String, mod_id: String,
 
 func open_target_profile(tab_index: int = 0) -> void:
 	target_profile_dialog.begin(document, mod_registry, game_path.text.strip_edges(), vrv_path.text.strip_edges(), default_new_mod_profile, tab_index)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.PROJECT, true)
 
 
 func _on_mods_settings_changed(new_default: String) -> void:
@@ -925,12 +1773,13 @@ func on_document_profile_changed() -> void:
 	scene_view.show_textures(false)
 	texture_button.set_pressed_no_signal(false)
 	top.queue_redraw()
-	if mission_studio.visible:
+	if mission_studio.document == document:
 		mission_studio.refresh_all()
-	if target_profile_dialog.visible:
+	if target_profile_dialog.document == document:
 		target_profile_dialog.refresh_all()
-	if object_browser.visible:
+	if object_browser.document == document:
 		object_browser.refresh_catalog()
+	scene_tree.rebuild()
 	cancel_place_object(false)
 	sync_actions()
 
@@ -940,8 +1789,8 @@ func on_document_environment_changed() -> void:
 		return
 	if scene_view.env_preview_enabled:
 		scene_view.apply_environment_preview(document.effective_environment(), true)
-	if environment_studio.visible:
-		environment_studio.refresh_all()
+	environment_studio.refresh_all()
+	scene_tree.rebuild()
 	sync_actions()
 
 
@@ -949,9 +1798,12 @@ func open_environment_studio() -> void:
 	if document == null:
 		return
 	environment_studio.begin(document, scene_view.env_preview_enabled)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.ENVIRONMENT, true)
 
 
 func request_save() -> void:
+	if document == null:
+		return
 	save_dialog.current_file = document.package.source_path.get_file().get_basename() + ".bzmag"
 	save_dialog.popup_centered_ratio(0.72)
 
@@ -960,14 +1812,25 @@ func select_path(index: int) -> void:
 	selected_path_point = -1
 	if index <= 0:
 		move_path_button.set_pressed_no_signal(false)
-	var path := document.path_at(path_index_for_item(index))
+	var pidx := path_index_for_item(index)
+	workspace_state.select_path(pidx, -1)
+	var path := document.path_at(pidx)
 	draw_path(path)
 	if index > 0:
+		if workspace_state.active_inspector_context == WorkspaceState.InspectorContext.PATH:
+			path_inspector.show_path(document, pidx)
 		report("%s · %d points · native path type %d" % [path["name"], path["points"].size(), path["type"]])
 	sync_actions()
 
 
 func draw_path(path: Dictionary) -> void:
+	if not bool(workspace_state.editor_visibility.get("paths", true)):
+		top.path_overlay = {}
+		top.extra_paths.clear()
+		top.queue_redraw()
+		scene_view.extra_paths.clear()
+		scene_view.show_path({})
+		return
 	var primary_index := path_index_for_item(path_list.selected)
 	var extras: Array[Dictionary] = []
 	for idx in selected_extra_paths:
@@ -993,10 +1856,8 @@ func set_extra_path_selection(indices: Array[int]) -> void:
 func open_mission_studio() -> void:
 	if document == null:
 		return
-	var terrain := document.package.terrain
-	var target := last_cursor if last_cursor.x >= 0 else Vector2(terrain.dimensions) * 0.5
-	var world := scene_view.point_world(target)
-	mission_studio.begin(document, Vector2(world.x, world.z))
+	mission_studio.begin(document, _world_anchor())
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.MISSION, true)
 
 
 func refresh_path_list(reset := false) -> void:
@@ -1018,8 +1879,9 @@ func refresh_path_list(reset := false) -> void:
 		var path := document.path_at(slot)
 		selected_path_point = mini(point, path["points"].size() - 1)
 		draw_path(path)
-	if mission_studio.visible:
+	if mission_studio.document == document:
 		mission_studio.refresh_all()
+	scene_tree.rebuild()
 
 
 func path_index_for_item(item: int) -> int:
@@ -1027,9 +1889,10 @@ func path_index_for_item(item: int) -> int:
 
 
 func start_new_path() -> void:
-	var sample := last_cursor if last_cursor.x >= 0 else Vector2(document.package.terrain.dimensions) * 0.5
-	var point := scene_view.point_world(sample)
-	path_inspector.show_new_path(document, Vector2(point.x, point.z))
+	if document == null:
+		return
+	path_inspector.show_new_path(document, _world_anchor())
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.PATH, true)
 
 
 func select_created_path(index: int) -> void:
@@ -1041,16 +1904,51 @@ func select_created_path(index: int) -> void:
 
 
 func inspect_path() -> void:
+	if document == null:
+		return
 	if path_list.selected > 0:
 		path_inspector.show_path(document, path_index_for_item(path_list.selected))
+	else:
+		path_inspector.show_path(document, -1)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.PATH, true)
+
+
+func focus_path_index(index: int) -> void:
+	if document == null:
+		return
+	var p := document.path_at(index)
+	if p.is_empty():
+		return
+	var pts: PackedVector2Array = p["points"]
+	if pts.is_empty():
+		return
+	var c := MissionProfiles.centroid(pts)
+	var terrain := document.package.terrain
+	var samp := Vector2(c.x / terrain.SPACING - float(terrain.origin.x), c.y / terrain.SPACING - float(terrain.origin.y))
+	scene_view.center = scene_view.point_world(samp)
+	scene_view.update_camera()
+	set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
+
+
+func _toggle_move_paths(enable: bool) -> void:
+	move_path_button.set_pressed_no_signal(enable)
+	path_tool_changed(true)
 
 
 func path_tool_changed(announce := true) -> void:
 	if move_path_button.button_pressed:
 		leave_object_tool()
+		leave_water_paint()
+		cancel_place_object(false)
+		if workspace_state.center_mode in [WorkspaceState.CenterMode.NODES, WorkspaceState.CenterMode.NEW_MAP, WorkspaceState.CenterMode.SETTINGS]:
+			set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
+		workspace_state.set_tool(WorkspaceState.Tool.PATH_MOVE)
+	else:
+		if workspace_state.active_tool == WorkspaceState.Tool.PATH_MOVE:
+			workspace_state.set_tool(WorkspaceState.Tool.TERRAIN_BRUSH)
 	set_cursor(cursor)
 	if announce:
-		report("Drag a path point. Shift+click appends a point. Delete removes the selected point." if move_path_button.button_pressed else "Height brush ready.")
+		report("Drag a path point. Shift+click appends a point. Delete removes the selected point." if move_path_button.button_pressed else "Terrain brush ready.")
 
 
 func start_point_drag(panel: Control, pixel: Vector2, append: bool) -> void:
@@ -1113,6 +2011,8 @@ func submit_path_points(path: Dictionary, points: PackedVector2Array) -> void:
 
 
 func request_export() -> void:
+	if document == null:
+		return
 	export_dialog.title = "Choose parent folder for a new native snapshot"
 	export_dialog.popup_centered_ratio(0.72)
 
@@ -1140,9 +2040,6 @@ func export_package(folder: String) -> void:
 		report(writer.error)
 
 
-## Engine-compatibility notice for object count edits. Verified 1192/1196 layouts
-## insert before the 640-byte groupTargets boundary with fresh pointer IDs; any
-## layout without verified count edits stays gated before Playtest.
 func object_count_notice(suffix: String) -> String:
 	if document == null or (document.object_additions.is_empty() and document.object_removals.is_empty()):
 		return " | " + suffix
@@ -1154,9 +2051,14 @@ func object_count_notice(suffix: String) -> String:
 		document.object_additions.size(), document.object_removals.size(), status_label, suffix]
 
 
-func report(message: String) -> void:
-	status.text = message
-	status.tooltip_text = message
+func report(msg: String) -> void:
+	status.text = msg
+	status.tooltip_text = msg
+	if not msg.is_empty():
+		diagnostics_lines.append(msg)
+		if diagnostics_lines.size() > 120:
+			diagnostics_lines.remove_at(0)
+		diagnostics_drawer.text = "\n".join(diagnostics_lines)
 
 
 func tool_root() -> String:
@@ -1172,6 +2074,8 @@ func asset_adapter() -> String:
 
 
 func toggle_objects() -> void:
+	workspace_state.set_editor_visibility("objects", objects_button.button_pressed)
+	scene_tree.sync_visibility_buttons(objects_button.button_pressed, bool(workspace_state.editor_visibility.get("paths", true)), water_button.button_pressed)
 	if not objects_button.button_pressed:
 		scene_view.object_models.hide()
 		top.objects_visible = false
@@ -1202,7 +2106,7 @@ func start_asset_scan(kind: String, button: Button) -> void:
 		button.set_pressed_no_signal(false)
 		return
 	if not find_steam_game():
-		report("Choose the game folder in Setup to preview native assets.")
+		report("Choose the game folder in Settings to preview native assets.")
 		button.set_pressed_no_signal(false)
 		return
 	active_object_scan = document
@@ -1318,7 +2222,7 @@ func suggest_vrv() -> void:
 func show_playtest_setup() -> void:
 	find_steam_game()
 	suggest_vrv()
-	Wintage.popup_fit(playtest_dialog, 560)
+	set_center_mode(WorkspaceState.CenterMode.SETTINGS)
 
 
 func save_playtest_setup() -> void:
@@ -1336,7 +2240,8 @@ func save_playtest_setup() -> void:
 		document.asset_profile = profile
 		sync_actions()
 	store_playtest_settings()
-	playtest_dialog.hide()
+	setup_status.text = "[OK] Settings saved."
+	set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
 
 
 func store_playtest_settings() -> void:
@@ -1352,6 +2257,7 @@ func store_playtest_settings() -> void:
 	settings.set_value("ui", "compact", ui_compact)
 	settings.set_value("ui", "font_size", ui_font_size)
 	settings.set_value("new_map", "default_mod", default_new_mod_profile)
+	workspace_state.save_to_config(settings)
 	settings.save(settings_path)
 	mod_registry.discover_installed(game_path.text.strip_edges(), vrv_path.text.strip_edges())
 	vrv_configured = true
@@ -1360,9 +2266,9 @@ func store_playtest_settings() -> void:
 func all_dialogs() -> Array[Window]:
 	return [
 		open_dialog, blank_dialog, flat_template_dialog, flat_output_dialog, save_dialog, export_dialog,
-		confirmation, keys_dialog, playtest_dialog, recover_dialog, game_picker, vrv_picker, autosave_picker,
-		asset_profile_picker, studio, path_inspector, mission_studio, terrain_tools, slope_studio, water_tools,
-		sound_editor, object_label_dialog, new_map_wizard, target_profile_dialog, object_browser, environment_studio,
+		confirmation, keys_dialog, recover_dialog, game_picker, vrv_picker, autosave_picker,
+		asset_profile_picker, new_map_wizard.source_picker, new_map_wizard.ter_picker,
+		new_map_wizard.output_picker, target_profile_dialog.custom_dir_picker,
 	]
 
 
@@ -1371,6 +2277,7 @@ func sync_theme_controls() -> void:
 	if idx >= 0 and theme_select.item_count > idx:
 		theme_select.select(idx)
 	compact_check.set_pressed_no_signal(ui_compact)
+	font_size_field.set_value_no_signal(ui_font_size)
 
 
 func set_wintage_theme(slug: String, compact: bool, persist: bool = true) -> void:
@@ -1380,6 +2287,7 @@ func set_wintage_theme(slug: String, compact: bool, persist: bool = true) -> voi
 	theme = Wintage.make(colors, ui_font_size, ui_compact)
 	backdrop.color = colors["background"]
 	coordinates.add_theme_color_override("font_color", colors["textSecondary"])
+	tool_badge.add_theme_color_override("font_color", colors["borderHighlight"])
 	top.palette = colors
 	scene_view.palette = colors
 	top.queue_redraw()
@@ -1401,46 +2309,46 @@ func filter_toolbar(query: String) -> void:
 		button.visible = needle.is_empty() or button.text.to_lower().contains(needle) or button.tooltip_text.to_lower().contains(needle)
 
 
+func _on_tool_search_submitted(query: String) -> void:
+	var needle := query.strip_edges().to_lower()
+	if needle.is_empty():
+		return
+	for button in toolbar_buttons:
+		if button.visible and not button.disabled and (button.text.to_lower().contains(needle) or button.tooltip_text.to_lower().contains(needle)):
+			button.pressed.emit()
+			tool_search.clear()
+			filter_toolbar("")
+			return
+
+
 func select_object_view(view: int) -> void:
 	if document == null or not document.valid_view_object(view):
 		return
 	object_tool.selected = view
+	workspace_state.select_object(view)
+	object_attributes.refresh(document, view)
+	scene_tree.select_entry("object", view)
 	if object_tool.active:
 		object_tool.refresh_marker()
 		report(object_tool.description())
 
 
+func focus_object_view(view: int) -> void:
+	if document == null or not document.valid_view_object(view):
+		return
+	select_object_view(view)
+	scene_view.center = document.object_position(view)
+	scene_view.update_camera()
+	set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
+
+
 func open_object_label_editor() -> void:
 	if document == null or document.object_count() == 0:
 		return
-	object_label_view = object_tool.selected
-	if not document.valid_view_object(object_label_view):
-		object_label_target.text = "Select an object in Move Object mode first."
-		object_label_field.text = ""
-		object_label_field.editable = false
-		object_label_dialog.get_ok_button().disabled = true
-		object_label_status.text = ""
-		Wintage.popup_fit(object_label_dialog, 420)
-		return
-	object_label_target.text = "Object #%d (%s)" % [object_label_view, document.object_odf(object_label_view)]
-	object_label_field.text = document.object_label(object_label_view)
-	object_label_field.editable = true
-	object_label_dialog.get_ok_button().disabled = false
-	object_label_status.text = ""
-	Wintage.popup_fit(object_label_dialog, 420)
-
-
-func apply_object_label_dialog() -> void:
-	if document == null or not document.valid_view_object(object_label_view):
-		object_label_status.text = "[ERR] Select an object first."
-		return
-	var next_label := object_label_field.text.strip_edges()
-	if not document.set_object_label(object_label_view, next_label):
-		object_label_status.text = "[ERR] " + document.error
-		return
-	sync_actions()
-	report("Updated object #%d label: %s" % [object_label_view, next_label if not next_label.is_empty() else "(cleared)"])
-	object_label_dialog.hide()
+	object_attributes.refresh(document, object_tool.selected)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.OBJECT, true)
+	if document.valid_view_object(object_tool.selected):
+		object_attributes.label_field.grab_focus()
 
 
 func open_sound_editor() -> void:
@@ -1448,6 +2356,7 @@ func open_sound_editor() -> void:
 		return
 	var env := mod_registry.resolve_content_environment(document, game_path.text.strip_edges(), vrv_path.text.strip_edges())
 	sound_editor.begin(document, object_tool.selected, game_path.text.strip_edges(), vrv_path.text.strip_edges(), env["linkedFolders"] + env["modAssetRoots"])
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.SOUND, true)
 
 
 func open_object_browser() -> void:
@@ -1458,12 +2367,16 @@ func open_object_browser() -> void:
 	if mod_registry.last_game_dir != game:
 		mod_registry.discover_installed(game, vrv)
 	object_browser.begin(document, mod_registry, game, vrv)
+	workspace_state.set_left_tab(WorkspaceState.LeftTab.ASSETS, true)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.OBJECT_BROWSER, true)
 
 
 func start_place_object(odf: String, team: int, template_view: int, is_native_new: bool) -> void:
 	if document == null:
 		return
+	clear_incompatible_preview("place")
 	leave_object_tool()
+	leave_water_paint()
 	if path_drag_view != null:
 		finish_point_drag(false)
 	move_path_button.set_pressed_no_signal(false)
@@ -1473,6 +2386,9 @@ func start_place_object(odf: String, team: int, template_view: int, is_native_ne
 		"template_view": template_view,
 		"is_native_new": is_native_new,
 	}
+	if workspace_state.center_mode in [WorkspaceState.CenterMode.NODES, WorkspaceState.CenterMode.NEW_MAP, WorkspaceState.CenterMode.SETTINGS]:
+		set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
+	workspace_state.set_tool(WorkspaceState.Tool.OBJECT_PLACE)
 	report("Place %s (Team %d): click in 2D or 3D view. Shift+click keeps placing. Esc cancels." % [odf, team])
 	sync_actions()
 
@@ -1481,6 +2397,8 @@ func cancel_place_object(announce: bool = false) -> void:
 	if pending_place_spec.is_empty():
 		return
 	pending_place_spec.clear()
+	if workspace_state.active_tool == WorkspaceState.Tool.OBJECT_PLACE:
+		workspace_state.set_tool(WorkspaceState.Tool.TERRAIN_BRUSH)
 	if announce:
 		report("Object placement cancelled.")
 	sync_actions()
@@ -1523,6 +2441,8 @@ func place_object_at_sample(sample: Vector2) -> int:
 	object_tool.selected = view
 	object_tool.refresh_marker()
 	object_tool.update_anchors()
+	object_attributes.refresh(document, view)
+	scene_tree.rebuild()
 	if objects_button.button_pressed and not (object_thread != null and object_thread.is_started()):
 		loaded_objects = null
 		start_asset_scan("objects", objects_button)
@@ -1596,7 +2516,7 @@ func playtest() -> void:
 	if launcher_pid > 0 or game_pid > 0 or document == null:
 		return
 	if not find_steam_game():
-		Wintage.popup_fit(playtest_dialog, 560)
+		show_playtest_setup()
 		return
 	var plan := playtest_route_plan()
 	var compat: Dictionary = plan["compatibility"]
@@ -1605,7 +2525,7 @@ func playtest() -> void:
 		report("[ERR] [%s] %s" % [status_code, String(plan["error"])])
 		if bool(plan["needsConverter"]) and not valid_vrv(vrv_path.text.strip_edges()):
 			setup_status.text = "BZN %d requires a valid conversion adapter folder containing tools/bzn_compat.py." % document.package.bzn_version
-			Wintage.popup_fit(playtest_dialog, 560)
+			show_playtest_setup()
 		elif not bool(compat.get("profileCompatible", true)) or status_code in [CompatibilityEngine.PLAYTEST_MISSING_ASSETS, CompatibilityEngine.PLAYTEST_UNKNOWN]:
 			open_target_profile(0)
 		return
@@ -1703,13 +2623,15 @@ func _process(time: float) -> void:
 	poll_playtest()
 	poll_objects()
 	var fly_moved := false
-	if fly_button != null and fly_button.button_pressed and document != null:
-		var forward: float = (1.0 if Input.is_key_pressed(KEY_W) else 0.0) - (1.0 if Input.is_key_pressed(KEY_S) else 0.0)
-		var side: float = (1.0 if Input.is_key_pressed(KEY_D) else 0.0) - (1.0 if Input.is_key_pressed(KEY_A) else 0.0)
-		var rise: float = (1.0 if Input.is_key_pressed(KEY_E) else 0.0) - (1.0 if Input.is_key_pressed(KEY_Q) else 0.0)
-		if forward != 0.0 or side != 0.0 or rise != 0.0:
-			scene_view.fly_step(forward, side, rise, time)
-			fly_moved = true
+	if fly_button != null and fly_button.button_pressed and document != null and views.visible:
+		var focused := get_viewport().gui_get_focus_owner()
+		if not (focused is LineEdit or focused is TextEdit):
+			var forward: float = (1.0 if Input.is_key_pressed(KEY_W) else 0.0) - (1.0 if Input.is_key_pressed(KEY_S) else 0.0)
+			var side: float = (1.0 if Input.is_key_pressed(KEY_D) else 0.0) - (1.0 if Input.is_key_pressed(KEY_A) else 0.0)
+			var rise: float = (1.0 if Input.is_key_pressed(KEY_E) else 0.0) - (1.0 if Input.is_key_pressed(KEY_Q) else 0.0)
+			if forward != 0.0 or side != 0.0 or rise != 0.0:
+				scene_view.fly_step(forward, side, rise, time)
+				fly_moved = true
 	if paint_view != null:
 		if not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
 			if document.water_stroke_active:
@@ -1765,6 +2687,8 @@ func step_hold_paint(delta: float, fly_moved: bool = false) -> bool:
 
 
 func focus_terrain() -> void:
+	if document == null:
+		return
 	var terrain := document.package.terrain
 	var target := last_cursor if last_cursor.x >= 0 else Vector2(terrain.dimensions) * 0.5
 	scene_view.center = scene_view.point_world(target)
@@ -1773,7 +2697,7 @@ func focus_terrain() -> void:
 
 func toggle_fly() -> void:
 	scene_view.set_fly(fly_button.button_pressed)
-	report("Fly camera on. W/S forward and back, A/D strafe, Q/E down and up, right drag to look." if fly_button.button_pressed else "Fly camera off.")
+	report("Fly camera on. W/S forward/back, A/D strafe, Q/E down/up, right drag look, F toggles." if fly_button.button_pressed else "Fly camera off.")
 	sync_actions()
 
 
@@ -1782,9 +2706,6 @@ func autosave_root(custom := "") -> String:
 	return root if root != "" else AutoSaveStore.DEFAULT_ROOT
 
 
-## publishes the current document through the transactional autosave store.
-## The autosave never writes into the map's own folder; every slot is fully
-## written, verified by re-opening and only then do old slots get pruned.
 func autosave_now(custom_root := "") -> bool:
 	if document == null:
 		return false
@@ -1797,7 +2718,7 @@ func autosave_now(custom_root := "") -> bool:
 		report("Autosave failed. " + store.error)
 		return false
 	last_autosave = published
-	report("Autosaved " + published + " | The source map folder is never touched.")
+	report("Autosaved " + published + " | Source map folder untouched.")
 	return true
 
 
@@ -1821,7 +2742,7 @@ func recover_autosaves() -> void:
 	if found == 0:
 		report("No autosaves found under " + root + ".")
 		return
-	recover_dialog.dialog_text = "Open an autosave project file. Unsaved changes are always confirmed first."
+	recover_dialog.dialog_text = "Open an autosave project file. Unsaved changes are confirmed first."
 	recover_list.select(found - 1)
 	Wintage.popup_fit(recover_dialog, 520, 260)
 
@@ -1839,32 +2760,50 @@ func open_autosave_folder() -> void:
 
 
 func open_studio() -> void:
-	var terrain := document.package.terrain
-	var target := last_cursor if last_cursor.x >= 0 else Vector2(terrain.dimensions) * 0.5
-	studio.begin(document, Vector2i(target.round()))
+	if document == null:
+		return
+	_prepare_node_studio(layers_panel.selected_index)
+	set_center_mode(WorkspaceState.CenterMode.NODES)
+	workspace_state.set_left_tab(WorkspaceState.LeftTab.LAYERS, true)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.NODE, true)
 
 
 func open_terrain_tools() -> void:
+	if document == null:
+		return
+	clear_incompatible_preview("shape")
+	leave_water_paint()
 	var terrain := document.package.terrain
 	var sample := last_cursor if last_cursor.x >= 0 else Vector2(terrain.dimensions) * 0.5
 	var anchor_point := Vector2i(sample.round()).clamp(Vector2i.ZERO, terrain.dimensions - Vector2i.ONE)
 	terrain_tools.begin(document, anchor_point, brush_panel.radius_m)
+	if workspace_state.center_mode in [WorkspaceState.CenterMode.NODES, WorkspaceState.CenterMode.NEW_MAP, WorkspaceState.CenterMode.SETTINGS]:
+		set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
+	workspace_state.set_tool(WorkspaceState.Tool.SHAPE)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.SHAPE, true)
 
 
 func open_slope_studio() -> void:
 	if document == null:
 		return
-	var terrain := document.package.terrain
-	var target := last_cursor if last_cursor.x >= 0 else Vector2(terrain.dimensions) * 0.5
-	var world := scene_view.point_world(Vector2(target.x, target.y))
-	slope_studio.begin(document, Vector2(world.x, world.z))
+	clear_incompatible_preview("slope")
+	leave_water_paint()
+	leave_object_tool()
+	cancel_place_object(false)
+	move_path_button.set_pressed_no_signal(false)
+	slope_studio.begin(document, _world_anchor(), slope_studio.document == document and slope_studio._initialized)
+	if workspace_state.center_mode in [WorkspaceState.CenterMode.NODES, WorkspaceState.CenterMode.NEW_MAP, WorkspaceState.CenterMode.SETTINGS]:
+		set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
+	workspace_state.set_tool(WorkspaceState.Tool.SLOPE)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.SLOPE, true)
+	sync_actions()
 
 
 func set_cursor(point: Vector2) -> void:
 	if document == null:
 		return
 	cursor = point
-	var brush_point := Vector2(-1, -1) if move_path_button.button_pressed or object_tool.active or painting_water_active() else point
+	var brush_point := Vector2(-1, -1) if move_path_button.button_pressed or object_tool.active or painting_water_active() or workspace_state.active_tool in [WorkspaceState.Tool.SLOPE, WorkspaceState.Tool.OBJECT_PLACE] else point
 	top.cursor = brush_point
 	top.queue_redraw()
 	scene_view.show_cursor(brush_point)
@@ -1874,12 +2813,12 @@ func set_cursor(point: Vector2) -> void:
 		var info: Dictionary = scene_view.exact_sample_info(point)
 		if not info.is_empty():
 			var samp: Vector2i = info["sample"]
-			coordinates.text = "X %.1f m   Z %.1f m   Elevation %.2f m   Sample (%d, %d) %.2f m   LOD %d m" % [
-				world.x, world.z, world.y, samp.x, samp.y, float(info["height"]), int(info["resolution_m"])]
+			coordinates.text = "X %.1f  Z %.1f  Y %.2f m  (%d,%d)  LOD %dm" % [
+				world.x, world.z, world.y, samp.x, samp.y, int(info["resolution_m"])]
 		else:
-			coordinates.text = "X %.1f m   Z %.1f m   Elevation %.2f m" % [world.x, world.z, world.y]
+			coordinates.text = "X %.1f m  Z %.1f m  Y %.2f m" % [world.x, world.z, world.y]
 	else:
-		coordinates.text = "Hold or drag left to paint. Orbit with right drag. Pan with middle drag. Zoom with wheel."
+		coordinates.text = "LMB paint · RMB orbit · MMB pan · Wheel zoom"
 
 
 func view_input(event: InputEvent, panel: Control) -> void:
@@ -1914,6 +2853,7 @@ func view_input(event: InputEvent, panel: Control) -> void:
 				if event.pressed and paint_view == null:
 					var water_point: Vector2 = panel.sample_at(event.position)
 					if water_point.x >= 0:
+						clear_incompatible_preview("water")
 						water_add = not event.shift_pressed
 						document.begin_water_stroke()
 						if document.water_stroke_active:
@@ -1934,11 +2874,17 @@ func view_input(event: InputEvent, panel: Control) -> void:
 						place_object_at_sample(place_pt)
 						if not event.shift_pressed:
 							pending_place_spec.clear()
+							workspace_state.set_tool(WorkspaceState.Tool.TERRAIN_BRUSH)
 							sync_actions()
 				return
 			if object_tool.active:
 				if event.pressed and object_tool.drag_view == null:
 					object_tool.start(panel, event.position)
+					if object_tool.selected >= 0:
+						workspace_state.select_object(object_tool.selected)
+						object_attributes.refresh(document, object_tool.selected)
+						workspace_state.set_inspector_context(WorkspaceState.InspectorContext.OBJECT)
+						scene_tree.select_entry("object", object_tool.selected)
 					report(object_tool.description() if object_tool.selected >= 0 else "Select an object in either view.")
 					sync_actions()
 				elif not event.pressed and object_tool.drag_view != null:
@@ -1951,16 +2897,20 @@ func view_input(event: InputEvent, panel: Control) -> void:
 					finish_point_drag(true)
 				return
 			if event.pressed and paint_view == null:
+				if workspace_state.active_tool == WorkspaceState.Tool.SLOPE and slope_studio.is_preview_active():
+					# Keep Slope Studio preview active while inspecting viewport unless explicitly painting
+					return
 				var point: Vector2 = panel.sample_at(event.position)
 				if point.x >= 0:
+					clear_incompatible_preview("brush")
 					var layer := brush_panel.paint_layer()
 					if layer == Terrain.Layer.COLOR and not brush_panel.valid_rgb():
 						report("Enter a native RGB color as #RRGGBB.")
 						return
 					if layer == Terrain.Layer.HEIGHT and brush_panel.mode == BrushPanel.Mode.PICK:
-						var height := scene_view.point_world(point).y
-						brush_panel.use_picked_height(height)
-						report("Picked paint height %.2f m" % height)
+						var h := scene_view.point_world(point).y
+						brush_panel.use_picked_height(h)
+						report("Picked paint height %.2f m" % h)
 						return
 					paint_view = panel
 					anchor = Vector2(-1, -1)
@@ -1987,15 +2937,29 @@ func paint(point: Vector2) -> void:
 	anchor = point
 
 
+func _toggle_move_objects(enable: bool) -> void:
+	move_objects_button.set_pressed_no_signal(enable)
+	object_tool_changed()
+
+
 func object_tool_changed() -> void:
 	if move_objects_button.button_pressed:
+		clear_incompatible_preview("object")
+		leave_water_paint()
+		cancel_place_object(false)
 		if path_drag_view != null:
 			finish_point_drag(false)
 		move_path_button.set_pressed_no_signal(false)
+		if workspace_state.center_mode in [WorkspaceState.CenterMode.NODES, WorkspaceState.CenterMode.NEW_MAP, WorkspaceState.CenterMode.SETTINGS]:
+			set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
 		object_tool.set_active(true)
-		report("Drag an object in either view. Shift snaps to the terrain grid. Esc cancels.")
+		workspace_state.set_tool(WorkspaceState.Tool.OBJECT_MOVE)
+		object_attributes.refresh(document, object_tool.selected)
+		workspace_state.set_inspector_context(WorkspaceState.InspectorContext.OBJECT, true)
+		report("Drag an object in either view. Shift snaps to terrain grid. Esc cancels.")
 	else:
 		leave_object_tool()
+		workspace_state.set_tool(WorkspaceState.Tool.TERRAIN_BRUSH)
 		report("Terrain brush ready.")
 	set_cursor(cursor)
 	sync_actions()
@@ -2011,12 +2975,16 @@ func leave_object_tool() -> void:
 
 func finish_object_drag(commit: bool) -> void:
 	var applied := object_tool.finish(commit)
+	if object_tool.selected >= 0:
+		object_attributes.refresh(document, object_tool.selected)
 	report(object_tool.description() if applied else document.error)
 	sync_actions()
 
 
 func object_position_changed(index: int) -> void:
 	object_tool.position_changed(index)
+	if object_tool.selected == index:
+		object_attributes.refresh(document, index)
 	if object_tool.active and object_tool.selected == index:
 		report(object_tool.description())
 	sync_actions()
@@ -2029,6 +2997,8 @@ func objects_topology_changed() -> void:
 	if object_tool.active and object_tool.selected >= document.object_count():
 		object_tool.selected = -1
 		object_tool.set_active(true)
+	object_attributes.refresh(document, object_tool.selected)
+	scene_tree.rebuild()
 	sync_actions()
 
 
@@ -2070,30 +3040,50 @@ func finish_water_stroke() -> void:
 	var layer := water_tools.current_layer()
 	paint_view = null
 	document.end_water_stroke(layer)
+	water_tools.refresh_layers()
 	report("Water stroke done. Layer %d has %d block edits." % [layer + 1, document.water_edits.get(layer, {}).size()])
 	sync_actions()
 
 
 func painting_water_active() -> bool:
-	return painting_water and document != null and water_tools.document == document
+	return painting_water and workspace_state.active_tool == WorkspaceState.Tool.WATER_PAINT and document != null and water_tools.document == document
+
+
+func leave_water_paint() -> void:
+	if paint_view != null and document != null and document.water_stroke_active:
+		finish_water_stroke()
+	painting_water = false
+	if water_tools != null and water_tools.paint_toggle.button_pressed:
+		water_tools.paint_toggle.set_pressed_no_signal(false)
 
 
 func toggle_water_edit() -> void:
 	if document == null or document.package.water == null:
 		return
+	clear_incompatible_preview("water")
 	water_tools.begin(document)
+	if workspace_state.center_mode in [WorkspaceState.CenterMode.NODES, WorkspaceState.CenterMode.NEW_MAP, WorkspaceState.CenterMode.SETTINGS]:
+		set_center_mode(WorkspaceState.CenterMode.SPLIT_3D_2D)
+	workspace_state.set_inspector_context(WorkspaceState.InspectorContext.WATER, true)
+	if not water_button.button_pressed:
+		water_button.set_pressed_no_signal(true)
+		toggle_water()
 
 
 func update_water_painting() -> void:
-	var paint := water_tools.painting() and document != null and water_tools.document == document
-	if paint and not painting_water:
+	var want_paint := water_tools.painting() and document != null and water_tools.document == document
+	if want_paint and not painting_water:
 		if path_drag_view != null:
 			finish_point_drag(false)
 		move_path_button.set_pressed_no_signal(false)
 		leave_object_tool()
+		cancel_place_object(false)
 		if paint_view != null:
 			finish_stroke()
-	painting_water = paint
+		workspace_state.set_tool(WorkspaceState.Tool.WATER_PAINT)
+	elif not want_paint and workspace_state.active_tool == WorkspaceState.Tool.WATER_PAINT:
+		workspace_state.set_tool(WorkspaceState.Tool.TERRAIN_BRUSH)
+	painting_water = want_paint
 	set_cursor(cursor)
 	sync_actions()
 
@@ -2101,6 +3091,7 @@ func update_water_painting() -> void:
 func refresh_water() -> void:
 	top.queue_redraw()
 	scene_view.rebuild_water()
+	scene_tree.rebuild()
 	sync_actions()
 
 

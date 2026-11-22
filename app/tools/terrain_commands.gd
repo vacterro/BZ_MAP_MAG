@@ -1,12 +1,13 @@
-extends ConfirmationDialog
+extends VBoxContainer
+## Docked Shape Terrain panel (Slope Plane, Mirror Heights, VRV Smooth/Rough/Relief).
+## Hosted directly inside the Right Attributes Inspector without modal popups.
 
 const Document := preload("res://core/map_document.gd")
-const Wintage := preload("res://themes/wintage.gd")
 const ChoiceGroup := preload("res://themes/choice_group.gd")
 const SliderField := preload("res://themes/slider_field.gd")
-const DIALOG_WIDTH := 440
 
 signal updated(message: String)
+signal preview_state_changed(active: bool)
 
 var document: Document
 var center: Vector2i
@@ -29,34 +30,34 @@ var vrv_symmetry := ChoiceGroup.new(4, true)
 var vrv_grain_row: HBoxContainer
 var vrv_noise_rows: Array[Control] = []
 var message := Label.new()
-var preview_button: Button
+var preview_button := Button.new()
+var apply_button := Button.new()
+var cancel_button := Button.new()
 
 
 func _ready() -> void:
-	title = "Shape Terrain"
-	ok_button_text = "Apply"
-	dialog_hide_on_ok = false
-	var layout := VBoxContainer.new()
-	layout.custom_minimum_size.x = DIALOG_WIDTH - 24
-	layout.add_theme_constant_override("separation", 4)
-	add_child(layout)
+	size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	add_theme_constant_override("separation", 4)
 	for op_name in ["Slope plane", "Mirror heights", "VRV Smooth", "VRV Rough +", "VRV Rough -", "VRV Relief +", "VRV Relief -"]:
 		operation.add_item(op_name)
-	layout.add_child(operation)
+	add_child(operation)
 	operation.item_selected.connect(choose_operation)
+
 	slope_fields.add_theme_constant_override("separation", 3)
-	layout.add_child(slope_fields)
-	add_number(slope_fields, "Anchor height (m)", height, 100000.0, 0.1, -100.0, 400.0, "m")
-	add_number(slope_fields, "Grade along X (%)", grade_x, 1000.0, 0.1, -100.0, 100.0, "%")
-	add_number(slope_fields, "Grade along Z (%)", grade_z, 1000.0, 0.1, -100.0, 100.0, "%")
+	add_child(slope_fields)
+	add_number(slope_fields, "Anchor H (m)", height, 100000.0, 0.1, -100.0, 400.0, "m")
+	add_number(slope_fields, "Grade X (%)", grade_x, 1000.0, 0.1, -100.0, 100.0, "%")
+	add_number(slope_fields, "Grade Z (%)", grade_z, 1000.0, 0.1, -100.0, 100.0, "%")
+
 	mirror_fields.add_theme_constant_override("separation", 3)
-	layout.add_child(mirror_fields)
+	add_child(mirror_fields)
 	for dir_name in ["Min X → Max X", "Max X → Min X", "Min Z → Max Z", "Max Z → Min Z"]:
 		direction.add_item(dir_name)
 	mirror_fields.add_child(direction)
+
 	vrv_fields.add_theme_constant_override("separation", 3)
-	layout.add_child(vrv_fields)
-	for scope_label in ["Around cursor (brush radius)", "Whole map"]:
+	add_child(vrv_fields)
+	for scope_label in ["Around cursor", "Whole map"]:
 		vrv_scope.add_item(scope_label)
 	vrv_scope.item_selected.connect(func(_idx): clear_preview())
 	vrv_fields.add_child(vrv_scope)
@@ -67,8 +68,8 @@ func _ready() -> void:
 	vrv_noise_rows.append(add_spin_row(vrv_fields, "Seed", vrv_seed, 1.0, 999999.0, 1.0, 1.0, "", 1.0, 9999.0))
 	var sym_row := HBoxContainer.new()
 	var sym_lbl := Label.new()
-	sym_lbl.text = "Symmetry fold"
-	sym_lbl.custom_minimum_size.x = 125
+	sym_lbl.text = "Symmetry"
+	sym_lbl.custom_minimum_size.x = 84
 	sym_row.add_child(sym_lbl)
 	for sym_name in ["None", "X", "Z", "XZ"]:
 		vrv_symmetry.add_item(sym_name)
@@ -77,22 +78,32 @@ func _ready() -> void:
 	sym_row.add_child(vrv_symmetry)
 	vrv_fields.add_child(sym_row)
 	vrv_noise_rows.append(sym_row)
+
+	var actions := HFlowContainer.new()
+	actions.add_theme_constant_override("h_separation", 4)
+	add_child(actions)
+	preview_button.text = "Preview"
+	preview_button.pressed.connect(preview_plane)
+	actions.add_child(preview_button)
+	apply_button.text = "Apply"
+	apply_button.pressed.connect(apply_terrain)
+	actions.add_child(apply_button)
+	cancel_button.text = "Cancel"
+	cancel_button.pressed.connect(func(): clear_preview(); message.text = "Preview cleared.")
+	actions.add_child(cancel_button)
+
 	message.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	message.custom_minimum_size = Vector2(DIALOG_WIDTH - 24, 0)
-	layout.add_child(message)
-	preview_button = add_button("Preview", true, "preview")
-	custom_action.connect(func(_action: StringName): preview_plane())
-	confirmed.connect(apply_terrain)
-	canceled.connect(clear_preview)
+	add_child(message)
 	choose_operation(0)
 
 
 func add_number(parent: Control, caption: String, field: SliderField, limit: float, step: float, slider_lo: float, slider_hi: float, unit: String = "") -> void:
 	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
 	parent.add_child(row)
 	var label := Label.new()
 	label.text = caption
-	label.custom_minimum_size.x = 125
+	label.custom_minimum_size.x = 84
 	row.add_child(label)
 	field.min_value = -limit
 	field.max_value = limit
@@ -100,6 +111,7 @@ func add_number(parent: Control, caption: String, field: SliderField, limit: flo
 	field.set_slider_range(slider_lo, slider_hi)
 	if not unit.is_empty():
 		field.set_unit_suffix(unit)
+	field.set_readout_width(48.0)
 	field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	field.value_changed.connect(func(_value): clear_preview())
 	row.add_child(field)
@@ -107,10 +119,11 @@ func add_number(parent: Control, caption: String, field: SliderField, limit: flo
 
 func add_spin_row(parent: Control, caption: String, field: SliderField, lo: float, hi: float, step: float, initial: float, unit: String = "", slider_lo: float = NAN, slider_hi: float = NAN) -> HBoxContainer:
 	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
 	parent.add_child(row)
 	var label := Label.new()
 	label.text = caption
-	label.custom_minimum_size.x = 125
+	label.custom_minimum_size.x = 84
 	row.add_child(label)
 	field.min_value = lo
 	field.max_value = hi
@@ -119,6 +132,7 @@ func add_spin_row(parent: Control, caption: String, field: SliderField, lo: floa
 		field.set_slider_range(slider_lo, slider_hi)
 	if not unit.is_empty():
 		field.set_unit_suffix(unit)
+	field.set_readout_width(48.0)
 	field.value = initial
 	field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	field.value_changed.connect(func(_value): clear_preview())
@@ -134,9 +148,8 @@ func begin(value: Document, anchor: Vector2i, radius: float) -> void:
 	height.step = document.package.granularity
 	var current_h := terrain.heights[center.y * terrain.dimensions.x + center.x]
 	height.set_slider_range(terrain.min_height - 50.0, terrain.max_height + 100.0)
-	height.value = current_h
+	height.set_value_no_signal(current_h)
 	choose_operation(operation.selected)
-	Wintage.popup_fit(self, DIALOG_WIDTH)
 
 
 func choose_operation(index: int) -> void:
@@ -150,13 +163,11 @@ func choose_operation(index: int) -> void:
 		node.visible = show_noise
 	preview_button.disabled = index == 1
 	if index == 0:
-		message.text = "Plane at the terrain cursor with a %.0f m brush radius." % radius_m
+		message.text = "Plane at terrain cursor (%.0f m brush radius)." % radius_m
 	elif index == 1:
 		message.text = "Copy one half of the map into the opposite half."
 	else:
 		message.text = "VRV shape filter on cursor region (%.0f m) or whole map." % radius_m
-	if visible:
-		Wintage.shrink_dialog(self, DIALOG_WIDTH)
 
 
 func vrv_op_name(index: int) -> String:
@@ -194,11 +205,14 @@ func vrv_params() -> Dictionary:
 
 
 func preview_plane() -> bool:
+	if document == null:
+		return false
 	if operation.selected == 0:
 		if not document.preview_slope_plane(center, radius_m, height.value, Vector2(grade_x.value, grade_z.value) / 100.0):
 			message.text = document.error
 			return false
-		message.text = "Previewing %d height samples. Apply to keep the plane." % document.preview_after.size()
+		preview_state_changed.emit(true)
+		message.text = "Previewing %d height samples. Apply to keep." % document.preview_after.size()
 		return true
 	var op := vrv_op_name(operation.selected)
 	if op.is_empty():
@@ -206,11 +220,14 @@ func preview_plane() -> bool:
 	if not document.preview_vrv_shape(op, vrv_params(), vrv_region()):
 		message.text = document.error
 		return false
+	preview_state_changed.emit(true)
 	message.text = "Previewing %d height samples (%s). Apply to keep." % [document.preview_after.size(), operation.get_item_text(operation.selected)]
 	return true
 
 
 func apply_terrain() -> void:
+	if document == null:
+		return
 	var count: int
 	if operation.selected == 1:
 		count = document.mirror_heights(direction.selected)
@@ -222,10 +239,13 @@ func apply_terrain() -> void:
 			return
 		count = document.preview_after.size()
 		document.bake_preview()
-	updated.emit("Shaped %d height samples." % count if count else "The terrain already matches the selected shape.")
-	hide()
+		preview_state_changed.emit(false)
+	var text := "Shaped %d height samples." % count if count else "The terrain already matches the selected shape."
+	message.text = text
+	updated.emit(text)
 
 
 func clear_preview() -> void:
-	if document != null:
+	if document != null and document.has_preview():
 		document.clear_preview()
+		preview_state_changed.emit(false)
