@@ -455,3 +455,48 @@ Both runtime checks and all refusal probes ran on clean commit `4b1b494ce3a035c8
     - `bzmag-autosave-bc58583c712d41ce805b667bbb1cfaf1` `1f17e81411b0f68f6f04cec7ad98cd3fe2dd2363b5b3ca6dbaca38907b7eb76f`
     - `bzmag-layout-35f2b58ce638424db8aab9501a13ac4a` `a6ee4fdfe9f42d6af90f8f2da3bcf9d9006aba02abb26fc0dee2984ec960e19b`
     - `bzmag-autosave-4faee7b1145c4ce2a8896226f9700213` `1b26b369a4a5c9a6a3a06ff1022c241bad854c01eaf43217cfff3635fe592019`
+    - `bzmag-layout-b77440c53528440d97c9a922d535a598` `a6ee4fdfe9f42d6af90f8f2da3bcf9d9006aba02abb26fc0dee2984ec960e19b`
+    - `bzmag-autosave-7a5f3ac9d5634ad389d1e7b4832b3bc7` `c39b2216796e2b7238ac646351d9fbc3fea639e8ab30dab443941cf3a77e99ef`
+
+## Unified Cinema 4D / Photoshop Docked DCC Workspace (SAIHANDOFF-15, 2026-11-22)
+
+- **Feature, Test, Docs & Perf Commits (`ebbc5ea..98a938d`)**:
+  - `ebbc5ea`: `feat(ui): implement unified docked DCC workspace and migrate all 11 tools out of modal windows` — added `app/ui/` (`workspace_state.gd`, `collapsible_section.gd`, `attributes_inspector.gd`, `scene_tree.gd`, `layers_panel.gd`, `tools_panel.gd`, `object_attributes_panel.gd`) and `app/tools/slope_studio_panel.gd`; updated `app/themes/wintage.gd` (`Tree`, `MenuButton`, `TabBar`, compact `TabContainer`); migrated all 11 editing tools (`slope_studio`, `terrain_commands`, `water_commands`, `environment_studio`, `sound_editor`, `path_inspector`, `mission_studio`, `object_browser`, `node_studio`, `new_map_wizard`, `target_profile_dialog`, plus embedded `Settings`) out of modal `Window`s into docked `Control`s inside the 5-region `app/editor.gd` shell (`Top MenuBar + Presets + Find tool…`, `Left Dock: Scene|Layers|Assets|Tools`, unobstructed `Center: 3D+2D|3D|2D|Nodes|New Map|Settings`, pinnable `Right AttributesInspector`, `Bottom Status Bar + Log drawer`) with 6 presets and `[workspace]` `user://editor.cfg` persistence/clamping/Reset Layout.
+  - `2210cca`: `test(ui): add workspace_dock acceptance suite and register 12th stage in Test-Acceptance` — added `app/tests/workspace_dock.gd` (23-step docked Slope Studio workflow, zero modal editing Windows across all 12 tools, Scene Tree + double-click camera focus + editor-only visibility, Layers <-> central NodeStudio sync, Pinned Inspector, 6 presets + Fullscreen restore, `[workspace]` persistence + out-of-bounds clamp + Reset, MMB Value Ladder vs 3D pan isolation, LineEdit focus guard, post-resize 3D picking, 4 resolutions `1120×690`/`1280×720`/`1920×1080`/`2560×1440`, 3 scales `12`/`18`/`24` px, 4 Wintage themes, GPU After screenshots); updated `terrain_workflow.gd`, `perf_and_ui_battery.gd`, and `tools/Test-Acceptance.ps1` (now 12 stages).
+  - `d104446`: `docs: document unified docked workspace architecture and editor parity`.
+  - `06d765c`: `chore(godot): commit Godot 4.7 UID companions for new workspace scripts`.
+  - `98a938d`: `perf(ui): coalesce scene_tree rebuilds on burst placement and fix headless workspace_dock sizing` — added coalesced `SceneTree.request_rebuild()` for burst object placement and skipped hidden inspector/browser refreshes on profile switches, eliminating a 57.67 ms UI rebuild regression (`dense_place_200` dropped `57.67 ms -> 0.11 ms` med, `max 199.51 ms -> 0.20 ms` on RTX 3060 GPU; `0.06 ms` med / `max 0.16 ms` CPU headless), and set `root.size` in headless `workspace_dock.gd`.
+- **Full 12-Gate Canonical `RELEASE` Acceptance on Clean `06d765c` (RTX 3060 GPU + Live BZCC 2.0.185)**:
+  - Clean release `06d765c-a0478ad98756-clean` (`gitDirty=false`, `sourceDigest=a0478ad98756903bd0483cac49910b1d443b2dbf626aba6f707259d5c5a7515f`, `pckSha256=81a948f7c7a1b47bcf1b0ef35022455dbf416a7778d3fec350c4265d86890343`, `exeSha256=d34d36f3be1a6c49c56525ae86469b92e4f417ddf0b43cf00dd80c385c4b0562`).
+  - `VERDICT=READY_FOR_RELEASE PASS=12 FAIL=0 BLOCKED=0 SKIPPED=0`:
+    - `bzmag-accept-4aeebf397ae94887a2219c2a28bb03fc` (`godot.log` SHA-256 `aa109da22405d0db07203168f6a8422e74cb9a417e1128e1970e64344bbc075a`)
+    - Live Stock 1192 BZCC 2.0.185 Playtest (without `-VrvSource`): `Battlezone 2026-11-22 13.13.45.5953.log` (SHA-256 `37d8057dc53b5b66b5a725c75b4e333e4e46b03adb5c5f13f6b9d7ef1998da1d`, `reachedRun=True`, `normalExit=True`, 0 `SAVEGAME CORRUPT`).
+- **Clean Final Desktop Release & Post-Perf Verification on `98a938d` (GPU Perf + 100% CPU Headless Integration)**:
+  - Clean release `98a938d-856d3da4507a-clean` (`build/releases/98a938d-856d3da4507a-clean`, `gitDirty=false`, `sourceDigest=856d3da4507a3ba788bb21ee8bc59453b93a0f6d7ce7c15355df3c1fe33ae753`, `importDigest=7b37a4ebc7b61c49da7961832adc52a45eead39c68cb5f535d230b6580416648`, `helpersDigest=01100381d4226726f4be870129d0664d191c770f630a3464ccaa5ced4cf19704`, `pckSha256=655e0b7fda521f89db59b21373fbd5b61c9eb7bfbe2d03610243d80bacf80558`, `exeSha256=d34d36f3be1a6c49c56525ae86469b92e4f417ddf0b43cf00dd80c385c4b0562`).
+  - Canonical `PERFORMANCE` GPU run (`RTX 3060`, `1280×720`, `PASS=2 FAIL=0`):
+    - `bzmag-accept-5adb215724f34f089b4553203123739d` (`godot.log` SHA-256 `5c9032801536899fed7ae53badc2cd605fbaa7b7da028f063b9af684362d5c99`)
+    - Metrics: `4096m_idle` `12.07 ms` med; `4096m_orbit` `11.31 ms` med; `4096m_fly` `48.20 ms` med (`413` chunks); `4096m_brush_hover` `16.46 ms` med; `4096m_brush_stroke` `36.25 ms` med (`cpu_med=20.81 ms`); `4096m_lod_switch` `23.88 ms` med (`pending=0`); `water_preview` `15.43 ms`; `dense_place_200` `0.11 ms` med (`p95=0.14 ms`, `max=0.20 ms`, down from `57.67 ms` med / `199.51 ms` max on `06d765c`); `browser_search` `8.22 ms` med (`1,479` ODFs, 0 rescans); `native_export_203` `299.51 ms`; peak RAM `166.2 MiB`.
+  - Canonical `INTEGRATION` 100% CPU headless run (`GPU=False`, 0 MB VRAM, `PASS=10 FAIL=0 BLOCKED=0`, `bzn-layouts`, `autosave-store`, `playtest-assets`, `run-hygiene`, `terrain-workflow`, `compatibility-truth`, `object-authoring`, `env-and-mission`, `workspace-dock`, `build-integrity`):
+    - `bzmag-accept-dd22b7f0a2044771afaff74245bdfc7a` (`godot.log` SHA-256 `2c162b965626044f75252d2d340e01d0546e7a2bc87ce39ac4f65bf180dc13e9`)
+    - Note: `98a938d` changes only UI `SceneTree.request_rebuild()` coalescing and headless test window sizing (zero native format/writer/playtest changes from `06d765c`'s live BZCC 2.0.185 `READY_FOR_RELEASE` run; re-launching BZCC on `98a938d` was intentionally skipped per user CPU-only/GPU-VRAM conservation request).
+- **Authentic GPU Before / After Visual Evidence (SHA-256)**:
+  - Before (`c65dd91`, modal Slope Studio obstructing 3D viewport at `1120×690`): `before-slope-1120x690.png` (`53,177 B`, SHA-256 `f8eba0abdf4b83dbad93a5ee903e40d547955dd21d7c33a8e7b5ef21e5f1b91b`).
+  - After (`06d765c` & `98a938d`, byte-identical across both clean releases):
+    - `after-slope-1120x690.png` (`45,880 B`, SHA-256 `2e827feeafc6b8c4580eef5b3a5b83a9af2d3966a1aabb1a766fa98d56b1c961`) — docked Slope Studio in Right Inspector with unobstructed 3D live ramp preview & 2D map.
+    - `after-default-1280x720.png` (`226,424 B`, SHA-256 `dbe62b1a0a139a1feae855cb66b36f381ff5d1f1f445b400f0d46c88dc7e3956`)
+    - `after-nodes-1280x720.png` (`47,021 B`, SHA-256 `e85f7c9e8edf12b1b619ce6c1165c119014ed948fe43119564efe7bcb15b1a30`)
+    - `after-mission-1280x720.png` (`279,438 B`, SHA-256 `490b55d582bcf7fc336ae1a7406d0a1bb6ba50737b8c8b4abf49add8da3ac534`)
+    - `after-objects-1280x720.png` (`216,684 B`, SHA-256 `b357c9319591e954b06f874da2c4fca7c239d27d8d2b208e6a8cea5361eaf2cf`)
+    - `after-environment-1280x720.png` (`213,099 B`, SHA-256 `07ccd7e75e9af42900010ad3ed329eef18f4e7485cc37d256cfa630d34e8735d`)
+- **Intermediate Session Runs Recorded for `Clean-TempEvidence.ps1` Audit Retention**:
+  - `bzmag-layout-556cb2579fde4534a5ea7c673605c2a7` `a6ee4fdfe9f42d6af90f8f2da3bcf9d9006aba02abb26fc0dee2984ec960e19b`
+  - `bzmag-autosave-1f74d3a966054fa3812b34311a8308ab` `38edd95722e14cc717ba121f9107029591a5ecaac920fd4859279080f72dfa60`
+  - `bzmag-accept-39edc2b4032941a0b7ff1f7e36fc0c53` `7d6ca8dea21d6da288db98c77867a77ad7e9c3fc24af81c68e81e0cc6165a86c`
+  - `bzmag-terrain-9c189ae5fb7d4529bbcdec27ff39177b` `719f477de0d1bb7328ebb7956ba48f7412ff8a66e2becfe0ced574168fdfd962`
+  - `bzmag-terrain-42a1ea1d00b0440ebf4d4b0556e7112f` `256e06ae2561061cf3fcecb11043e4811c97c88bc4cb59e476804aea7cad53f6`
+  - `bzmag-layout-2358027da22740f08ed2a7969afe0dd4` `a6ee4fdfe9f42d6af90f8f2da3bcf9d9006aba02abb26fc0dee2984ec960e19b`
+  - `bzmag-autosave-ca71389bdce445b687d6bf60f0107d6e` `010675bedecdaee799749a828e7afaa01d0932e5b268b1ae53827964caf01487`
+  - `bzmag-layout-83c96b4039ec4dbbb06cb3ac6cb457d3` `a6ee4fdfe9f42d6af90f8f2da3bcf9d9006aba02abb26fc0dee2984ec960e19b`
+  - `bzmag-autosave-356432a885794d05b1b90fcd31c277c2` `6587a45bd5dee5f4d1cba74ba40247108990d6d1e8b35dcf9924ed6462b95557`
+  - `bzmag-layout-48202c4c901e462aa09d6ffeabba8bc4` `a6ee4fdfe9f42d6af90f8f2da3bcf9d9006aba02abb26fc0dee2984ec960e19b`
+  - `bzmag-autosave-fa4cb48263ef4a2fbcb111bbaf322e56` `bee7d1fea89cbec0d14805f0f9101b9cd8e01cba5b842a8b167b8b20df042e56`
