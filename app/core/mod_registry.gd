@@ -266,12 +266,23 @@ static func derive_workshop_root(game_dir: String) -> String:
 
 
 static func parse_workshop_ini(path: String) -> Dictionary:
-	var out := {"modName": "", "modType": "", "assetDependencies": []}
+	var out := {"modName": "", "modType": "", "assetDependencies": [], "dependencyNotes": {}}
 	var file := FileAccess.open(path, FileAccess.READ)
 	if file == null or file.get_length() > 65536:
 		return out
 	var text := file.get_as_text()
+	var notes := {}
+	var id_re := RegEx.new()
+	id_re.compile("\\((\\d{6,12})\\)")
 	for raw in text.split("\n"):
+		var stripped := raw.strip_edges()
+		if stripped.begins_with(";") or stripped.begins_with("//"):
+			var comment := stripped.trim_prefix(";").trim_prefix("//").strip_edges()
+			for m in id_re.search_all(comment):
+				var wid := m.get_string(1)
+				if not notes.has(wid):
+					notes[wid] = comment
+			continue
 		var line := raw.get_slice(";", 0).get_slice("//", 0).strip_edges()
 		if line.is_empty() or not line.contains("="):
 			continue
@@ -289,6 +300,7 @@ static func parse_workshop_ini(path: String) -> Dictionary:
 					if not clean.is_empty():
 						dep_list.append(clean)
 				out["assetDependencies"] = dep_list
+	out["dependencyNotes"] = notes
 	return out
 
 
@@ -421,6 +433,7 @@ func discover_installed(game_dir: String, vrv_dir: String = "", workshop_overrid
 					"modName": String(meta["modName"]),
 					"modType": String(meta["modType"]),
 					"assetDependencies": meta["assetDependencies"],
+					"dependencyNotes": meta.get("dependencyNotes", {}),
 					"dlls": dlls,
 				}
 
@@ -644,11 +657,11 @@ func resolve_dependency_stack(mod_id: String, game_dir: String = "", vrv_dir: St
 		"visit_state": {},
 	}
 
-	# Check primary profile disabled state
+	# Check primary profile disabled state: do NOT mount disabled mod roots!
 	if disabled_mods.get(eff_mod, false):
 		(state["disabled_deps"] as Array).append(eff_mod)
-
-	_walk_dependency_node(state, eff_mod, true)
+	else:
+		_walk_dependency_node(state, eff_mod, true)
 
 	var mod_roots: Array[String] = state["mod_roots"]
 	var stack: Array[Dictionary] = state["stack"]
@@ -737,8 +750,11 @@ func _walk_dependency_node(state: Dictionary, node_id: String, is_root_mod: bool
 
 	if has_profile(resolved_prof_id):
 		var p: Dictionary = get_profile(resolved_prof_id)
-		if not is_root_mod and disabled_mods.get(resolved_prof_id, false) and not (resolved_prof_id in disabled_deps):
-			disabled_deps.append(resolved_prof_id)
+		if not is_root_mod and disabled_mods.get(resolved_prof_id, false):
+			if not (resolved_prof_id in disabled_deps):
+				disabled_deps.append(resolved_prof_id)
+			visit_state[node_id] = 2
+			return
 		var primary_root := String(p.get("gameRoot", "")).strip_edges()
 		if not primary_root.is_empty():
 			_add_dep_root_entry(state, primary_root, resolved_prof_id, String(p.get("provenance", {}).get("source", resolved_prof_id)), String(p.get("modType", "config")))
@@ -793,6 +809,87 @@ func _walk_dependency_node(state: Dictionary, node_id: String, is_root_mod: bool
 			missing_deps.append(node_id)
 
 	visit_state[node_id] = 2
+
+
+## Produces an actionable Mod Manager diagnostic for any profile (missing/disabled
+## dependencies, dependency cycles, exact unresolved Workshop IDs + notes,
+## impacted capabilities, safe editing operations, Playtest status).
+func get_mod_diagnostic(mod_id: String, game_dir: String = "", vrv_dir: String = "") -> Dictionary:
+	var eff_mod := mod_id.strip_edges().to_lower()
+	var prof := get_profile(eff_mod)
+	var stack := resolve_dependency_stack(eff_mod, game_dir, vrv_dir)
+	var enabled := (eff_mod == "stock") or not bool(disabled_mods.get(eff_mod, false))
+	var installed := bool(stack.get("installed", false))
+	var missing: Array = stack.get("missingDependencies", [])
+	var disabled_deps: Array = stack.get("disabledDependencies", [])
+	var cycles: Array = stack.get("dependencyCycles", [])
+	var unavail: Array = stack.get("unavailableRoots", [])
+
+	var wid := String(prof.get("workshopId", ""))
+	var notes_map: Dictionary = workshop_items.get(wid, {}).get("dependencyNotes", {}) if not wid.is_empty() and workshop_items.has(wid) else {}
+	var unresolved_details: Array[Dictionary] = []
+	for m_v in missing:
+		var mid_str := String(m_v)
+		var note := String(notes_map.get(mid_str, ""))
+		if note.is_empty() and mid_str == "3627212766":
+			note = "SirBrambley's Christmas Holiday Map Pack (3627212766) - seasonal Workshop item declared in VSR 1325933293.ini."
+		unresolved_details.append({
+			"workshopId": mid_str,
+			"status": "MISSING_LOCALLY",
+			"note": note,
+			"workshopUrl": "https://steamcommunity.com/sharedfiles/filedetails/?id=%s" % mid_str if mid_str.is_valid_int() else "",
+		})
+
+	var impacted: Array[String] = []
+	if not installed:
+		impacted.append("Mod assets, ODFs, and Playtest unavailable until installed")
+	if not enabled:
+		impacted.append("Profile disabled — excluded from active catalogs and Playtest")
+	if not missing.is_empty():
+		impacted.append("Full dependency stack incomplete (%s); Playtest and assets from missing pack(s) gated" % ", ".join(missing))
+	if not disabled_deps.is_empty():
+		impacted.append("Disabled dependency profile(s): %s" % ", ".join(disabled_deps))
+	if not cycles.is_empty():
+		impacted.append("Dependency cycle(s): %s" % ", ".join(cycles))
+	if not unavail.is_empty():
+		impacted.append("Unavailable asset root(s): %s" % ", ".join(unavail))
+
+	var safe_ops: Array[String] = [
+		"Inspect map package (read-only)",
+		"Terrain height & material sculpting",
+		"Water layer editing",
+		"AI Path & Mission Studio authoring",
+		"Non-destructive BZMAG save & native export",
+	]
+	if eff_mod == "stock" and installed:
+		safe_ops.append("Full Stock Strategy / Instant Playtest (unaffected by VSR/VRV dependencies)")
+
+	var playtest_status := "READY"
+	if not installed:
+		playtest_status = "NOT_INSTALLED"
+	elif not enabled or not disabled_deps.is_empty():
+		playtest_status = "BLOCKED_DISABLED_DEPENDENCY"
+	elif not cycles.is_empty():
+		playtest_status = "BLOCKED_DEPENDENCY_CYCLE"
+	elif not missing.is_empty() or not unavail.is_empty():
+		playtest_status = "BLOCKED_MISSING_DEPENDENCY"
+
+	return {
+		"modId": eff_mod,
+		"displayName": String(prof.get("displayName", eff_mod)),
+		"installed": installed,
+		"enabled": enabled,
+		"complete": bool(stack.get("complete", false)),
+		"missingDependencies": missing,
+		"disabledDependencies": disabled_deps,
+		"dependencyCycles": cycles,
+		"unavailableRoots": unavail,
+		"unresolvedDetails": unresolved_details,
+		"impactedCapabilities": impacted,
+		"safeEditingOperations": safe_ops,
+		"playtestStatus": playtest_status,
+		"stockUnaffected": true,
+	}
 
 
 const STOCK_KNOWN_DLLS := ["strategy02.dll", "instant.dll", "mpinstant.dll", "deathmatch01.dll", "stratctf.dll", "luamission.dll"]
@@ -1538,48 +1635,128 @@ static func detect_map_profiles(package: Object, registry: Object = null) -> Dic
 				"confidence": "medium",
 				"evidence": ["VSR ODFs + VRV/AIP patrol paths (11Patrol1/11MLay1)"] + mission_evidence,
 			})
+	var ambiguous_collision := false
+	var colliding_mods: Array[String] = []
 	if vrv_odfs.is_empty() and vsr_odfs.is_empty():
 		var matched_custom_mod := ""
 		var matched_custom_reason := ""
+		var matched_confidence := "high"
+		var map_path_norm := String(package.source_path).simplify_path().to_lower() if package != null else ""
+		var map_folder := String(package.source_path).get_base_dir() if package != null else ""
+		var local_dll_sha := ""
+		if not dll.is_empty() and not map_folder.is_empty():
+			var local_dll_path := map_folder.path_join(String(package.mission_dll))
+			if FileAccess.file_exists(local_dll_path):
+				local_dll_sha = FileAccess.get_sha256(local_dll_path).to_lower()
+
 		if registry != null and registry.has_method("all_profile_ids"):
-			if is_custom_dll:
+			# 1. Check package ancestry (map physically inside a registered custom mod's root folder)
+			var ancestry_matches: Array[String] = []
+			if not map_path_norm.is_empty():
 				for mid: String in registry.all_profile_ids():
 					if mid in ["stock", "vsr", "vrv"]:
 						continue
 					var prof: Dictionary = registry.get_profile(mid)
+					var groot := String(prof.get("gameRoot", "")).simplify_path().to_lower()
+					if not groot.is_empty() and map_path_norm.begins_with(groot + "/"):
+						ancestry_matches.append(mid)
+			if ancestry_matches.size() == 1:
+				matched_custom_mod = ancestry_matches[0]
+				matched_custom_reason = "Map resides inside installed mod root %s (verified Workshop/folder ancestry)" % matched_custom_mod
+				matched_confidence = "high"
+
+			# 2. Check custom DLL matches across ALL custom mods (never stop at first basename match!)
+			var dll_matches: Array[String] = []
+			var dll_hash_matches: Array[String] = []
+			if matched_custom_mod.is_empty() and not dll.is_empty():
+				for mid: String in registry.all_profile_ids():
+					if mid in ["stock", "vsr", "vrv"]:
+						continue
+					var prof: Dictionary = registry.get_profile(mid)
+					var has_name := false
 					for mdll_v in prof.get("missionDlls", []):
 						if String(mdll_v).to_lower() == dll:
-							matched_custom_mod = mid
-							matched_custom_reason = "Matched custom mod DLL '%s' in profile %s" % [package.mission_dll, matched_custom_mod]
+							has_name = true
 							break
-					if not matched_custom_mod.is_empty():
-						break
-			# If unverified ODFs exist, try positive ODF resolution in installed custom mods
+					if has_name:
+						dll_matches.append(mid)
+						if not local_dll_sha.is_empty():
+							var groot := String(prof.get("gameRoot", ""))
+							var c_idx := AssetIndex.get_root_index(groot, true, false)
+							var c_files: Dictionary = c_idx.get("files", {})
+							for mp_v in c_files.get(dll, []):
+								var mp := String(mp_v)
+								if not ("::" in mp) and FileAccess.file_exists(mp) and FileAccess.get_sha256(mp).to_lower() == local_dll_sha:
+									dll_hash_matches.append(mid)
+									break
+
+			# 3. Check positive ODF origin across ALL installed custom mods
+			var odf_best_hits := 0
+			var odf_winners: Array[String] = []
 			if matched_custom_mod.is_empty() and not unverified_all.is_empty():
-				var best_hits := 0
 				for mid: String in registry.all_profile_ids():
 					if mid in ["stock", "vsr", "vrv"]:
 						continue
 					var prof: Dictionary = registry.get_profile(mid)
 					if not bool(prof.get("installed", false)):
 						continue
-					var hits := 0
+					var seen_hit := {}
 					for ar_v in prof.get("assetRoots", []):
 						var idx := AssetIndex.get_root_index(String(ar_v), true, false)
 						var odf_map: Dictionary = idx.get("odfs", {})
 						for u_odf in unverified_all:
 							if odf_map.has(u_odf + ".odf"):
-								hits += 1
-					if hits > best_hits:
-						best_hits = hits
-						matched_custom_mod = mid
-						matched_custom_reason = "Resolved %d/%d mod ODF(s) directly in installed profile %s" % [hits, unverified_all.size(), mid]
+								seen_hit[u_odf] = true
+					var hits := seen_hit.size()
+					if hits > odf_best_hits:
+						odf_best_hits = hits
+						odf_winners = [mid]
+					elif hits > 0 and hits == odf_best_hits:
+						odf_winners.append(mid)
 
-		if not matched_custom_mod.is_empty():
+			# Combine DLL hash, ODF origin, and DLL basename collision rules honestly
+			if matched_custom_mod.is_empty():
+				if dll_hash_matches.size() == 1:
+					matched_custom_mod = dll_hash_matches[0]
+					matched_custom_reason = "Matched exact local mission DLL '%s' SHA-256 (%s) in profile %s" % [package.mission_dll, local_dll_sha.left(12), matched_custom_mod]
+					matched_confidence = "high"
+				elif odf_winners.size() == 1 and odf_best_hits > 0 and (not is_custom_dll or dll_matches.size() <= 1 or (odf_winners[0] in dll_matches)):
+					matched_custom_mod = odf_winners[0]
+					matched_custom_reason = "Resolved %d/%d mod ODF(s) uniquely in installed profile %s" % [odf_best_hits, unverified_all.size(), matched_custom_mod]
+					matched_confidence = "high" if odf_best_hits == unverified_all.size() else "medium"
+				elif is_custom_dll and dll_matches.size() > 1:
+					# Multiple mods share the exact same custom DLL basename -> AMBIGUOUS, never pick first as HIGH!
+					ambiguous_collision = true
+					colliding_mods = dll_matches.duplicate()
+				elif odf_winners.size() > 1:
+					ambiguous_collision = true
+					colliding_mods = odf_winners.duplicate()
+				elif is_custom_dll and dll_matches.size() == 1:
+					matched_custom_mod = dll_matches[0]
+					matched_custom_reason = "Unique custom DLL basename '%s' in profile %s (no hash/ODF proof)" % [package.mission_dll, matched_custom_mod]
+					matched_confidence = "medium"
+
+		if ambiguous_collision:
+			var col_reason := "AMBIGUOUS: multiple installed mods match DLL '%s' / assets (%s); choose target profile explicitly." % [
+				package.mission_dll if not dll.is_empty() else "(none)", ", ".join(colliding_mods)]
+			candidates.append({
+				"modProfile": "custom:unknown",
+				"missionProfile": mission_mode,
+				"confidence": "low",
+				"evidence": [col_reason] + mission_evidence,
+			})
+			for cmid in colliding_mods:
+				candidates.append({
+					"modProfile": cmid,
+					"missionProfile": mission_mode,
+					"confidence": "low",
+					"evidence": ["Colliding candidate for '%s' (requires hash/provenance or explicit selection)" % (package.mission_dll if not dll.is_empty() else "assets")],
+				})
+		elif not matched_custom_mod.is_empty():
 			candidates.append({
 				"modProfile": matched_custom_mod,
 				"missionProfile": mission_mode,
-				"confidence": "high",
+				"confidence": matched_confidence,
 				"evidence": [matched_custom_reason] + mission_evidence,
 			})
 		elif is_custom_dll or not unverified_all.is_empty():
@@ -1613,11 +1790,15 @@ static func detect_map_profiles(package: Object, registry: Object = null) -> Dic
 			})
 
 	var recommended_mod := String(candidates[0]["modProfile"]) if not candidates.is_empty() else "stock"
-	var ambiguous := (candidates.size() > 1 and String(candidates[0]["confidence"]) != "high") or recommended_mod == "custom:unknown"
+	var ambiguous := ambiguous_collision or (candidates.size() > 1 and String(candidates[0]["confidence"]) != "high") or recommended_mod == "custom:unknown"
+	var detection_state := "AMBIGUOUS" if ambiguous_collision else ("UNKNOWN" if recommended_mod == "custom:unknown" else ("HIGH" if not candidates.is_empty() and String(candidates[0]["confidence"]) == "high" else "LOW"))
 	return {
 		"recommendedMod": recommended_mod,
 		"recommendedMission": mission_mode,
 		"ambiguous": ambiguous,
+		"ambiguousCollision": ambiguous_collision,
+		"collidingMods": colliding_mods,
+		"detectionState": detection_state,
 		"unknownMod": recommended_mod == "custom:unknown",
 		"missionDll": String(package.mission_dll) if package != null else "",
 		"formatProfile": String(package.layout_id) if package != null else "",

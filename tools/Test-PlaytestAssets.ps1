@@ -90,12 +90,96 @@ if (Test-Path -LiteralPath $plgr -PathType Leaf) {
     if ($null -eq $staleStock.Compatibility -or $staleStock.Compatibility.schema -ne 'bzmag.compatibility-result/1') {
         throw 'Start-Playtest -ValidateOnly did not emit unified bzmag.compatibility-result/1 contract.'
     }
-    if ($null -eq $staleStock.DllIdentity -or $staleStock.DllIdentity.Status -ne 'VERIFIED') {
-        throw 'Stock 1192 LuaMission.dll SHA-256 identity check did not verify.'
+    if ($null -eq $staleStock.DllIdentity -or $staleStock.DllIdentity.Status -ne 'VERIFIED_EXACT') {
+        throw "Stock 1192 LuaMission.dll SHA-256 identity check did not verify as VERIFIED_EXACT (got $($staleStock.DllIdentity.Status))."
+    }
+    # Wave 1 PS checks: renamed Instant.dll -> Strategy02.dll is DLL_NAME_MISMATCH; mismatched -MissionProfile is MISSION_PROFILE_MISMATCH!
+    $psRenamed = Join-Path $root 'ps-renamed-dll'
+    $null = [IO.Directory]::CreateDirectory($psRenamed)
+    Copy-Item -LiteralPath (Join-Path $Game 'Missions/Instant.dll') -Destination (Join-Path $psRenamed 'Strategy02.dll') -Force
+    . (Join-Path $PSScriptRoot 'Playtest-Assets.ps1')
+    $renId = Get-DllIdentityInfo (Join-Path $psRenamed 'Strategy02.dll') 'stock' 'Strategy02.dll' 'strategy' 'Strategy02.dll'
+    if ($renId.Status -ne 'DLL_NAME_MISMATCH' -or $renId.Verified) {
+        throw "Renamed Stock Instant.dll -> Strategy02.dll must be DLL_NAME_MISMATCH, got $($renId.Status)."
+    }
+    $misId = Get-DllIdentityInfo (Join-Path $Game 'Missions/Instant.dll') 'stock' 'Strategy02.dll' 'strategy' 'Instant.dll'
+    if ($misId.Status -ne 'MISSION_PROFILE_MISMATCH' -or $misId.Verified) {
+        throw "Actual Instant.dll with Strategy mission profile must be MISSION_PROFILE_MISMATCH, got $($misId.Status)."
+    }
+    $inhVrv = Get-DllIdentityInfo (Join-Path $Game 'Missions/LuaMission.dll') 'vrv' 'LuaMission.dll' 'lua' 'LuaMission.dll'
+    if ($inhVrv.Status -ne 'VERIFIED_EXPLICIT_INHERITANCE' -or -not $inhVrv.Verified) {
+        throw "Explicit Stock LuaMission.dll inheritance under VRV must be VERIFIED_EXPLICIT_INHERITANCE, got $($inhVrv.Status)."
+    }
+    # Start-Playtest -ValidateOnly with mismatched MissionProfile surfaces MISSION_PROFILE_MISMATCH
+    $misPlan = & $launcher -Game $Game -Godot $Godot -ModProfile 'stock' -MissionProfile 'strategy' -Mission (Join-Path $plgrCopy 'plgr.bzn') -ValidateOnly
+    if ($misPlan.DllIdentity.Status -ne 'MISSION_PROFILE_MISMATCH' -or $misPlan.Compatibility.validationStatus -ne 'MISSION_UNVERIFIED') {
+        throw "Start-Playtest -ValidateOnly failed to detect MISSION_PROFILE_MISMATCH for plgr LuaMission.dll under strategy profile."
     }
 }
-# Cached ODF index reuse + invalidation + ambiguity + packed DOCP .pak support.
+# Cached ODF index reuse + invalidation + same-size loose modification + ambiguity + packed DOCP .pak support.
 . (Join-Path $PSScriptRoot 'Playtest-Assets.ps1')
+# Wave 2 PS checks: same-size loose ODF edit + timestamp collision invalidates Get-AssetRootStamp, and real smtex.pak zlib read works!
+$psStampRoot = [IO.Directory]::CreateDirectory((Join-Path $root 'ps-stamp-inv')).FullName
+$psOdf = Join-Path $psStampRoot 'unit_x.odf'
+[IO.File]::WriteAllText($psOdf, '[GameObjectClass] AAA')
+$fixedTime = [DateTime]::new(2020, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+[IO.File]::SetLastWriteTimeUtc($psOdf, $fixedTime)
+$stampA = Get-AssetRootStamp $psStampRoot $true
+[IO.File]::WriteAllText($psOdf, '[GameObjectClass] BBB')
+[IO.File]::SetLastWriteTimeUtc($psOdf, $fixedTime)
+$stampB = Get-AssetRootStamp $psStampRoot $true
+if ($stampA -eq $stampB) {
+    throw 'Get-AssetRootStamp failed to invalidate on same-size + forced-timestamp-collision ODF edit.'
+}
+# Content hashing must not stop at 512 tracked files: a same-size rewrite with a
+# forced identical timestamp deep in a large root must still invalidate the stamp.
+$largeRoot = [IO.Directory]::CreateDirectory((Join-Path $root 'ps-stamp-large')).FullName
+for ($i = 0; $i -lt 600; $i++) {
+    [IO.File]::WriteAllText((Join-Path $largeRoot ('unit_{0:d4}.odf' -f $i)), '[GameObjectClass] AAA')
+}
+$largeTarget = Join-Path $largeRoot 'unit_0599.odf'
+[IO.File]::SetLastWriteTimeUtc($largeTarget, $fixedTime)
+$largeStampA = Get-AssetRootStamp $largeRoot $true
+[IO.File]::WriteAllText($largeTarget, '[GameObjectClass] BBB')
+[IO.File]::SetLastWriteTimeUtc($largeTarget, $fixedTime)
+$largeStampB = Get-AssetRootStamp $largeRoot $true
+if ($largeStampA -eq $largeStampB) {
+    throw 'Get-AssetRootStamp failed to invalidate on same-size + forced-timestamp-collision ODF edit in a 600-file root.'
+}
+$smtexPath = Join-Path $Game 'smtex.pak'
+if (Test-Path -LiteralPath $smtexPath -PathType Leaf) {
+    $pakRead = Read-DocpPakEntry $smtexPath 'bane2.tga' 65536
+    if (-not $pakRead.Ok -or $pakRead.Bytes.Length -ne 49196) {
+        throw "Read-DocpPakEntry failed to decompress real smtex.pak::bane2.tga (err=$($pakRead.Error))."
+    }
+}
+# A stored DOCP entry can carry a zlib wrapper even when packedSize == unpackedSize.
+$wrappedPak = Join-Path $root 'wrapped-stored.pak'
+$wrappedPayload = [byte[]]@(
+    0x78,0x9C,0x8B,0x76,0x4F,0xCC,0x4D,0xF5,0x4F,0xCA,0x4B,0x4D,0x2E,0x71,0xCE,0x49,
+    0x2C,0x2E,0x8E,0xE5,0x02,0x00,0x3F,0x89,0x06,0x8A
+)
+$wrappedDocp = [IO.MemoryStream]::new()
+$wrappedWriter = [IO.BinaryWriter]::new($wrappedDocp)
+$wrappedWriter.Write([Text.Encoding]::ASCII.GetBytes('DOCP'))
+$wrappedWriter.Write([uint32]2); $wrappedWriter.Write([uint32]0); $wrappedWriter.Write([uint32]0)
+$wrappedWriter.Write([uint32]1); $wrappedWriter.Write([uint32]0)
+for ($pad = 0; $pad -lt 8; $pad++) { $wrappedWriter.Write([byte]0) }
+$wrappedWriter.Write($wrappedPayload)
+$wrappedDir = [uint32]$wrappedDocp.Position
+$wrappedWriter.BaseStream.Position = 20
+$wrappedWriter.Write([uint32]$wrappedDir)
+$wrappedWriter.BaseStream.Position = $wrappedDir
+$wrappedName = [Text.Encoding]::ASCII.GetBytes('wrapped.odf')
+$wrappedWriter.Write([uint32]0); $wrappedWriter.Write([byte]$wrappedName.Length); $wrappedWriter.Write($wrappedName)
+$wrappedWriter.Write([uint32]32); $wrappedWriter.Write([uint32]26); $wrappedWriter.Write([uint32]26)
+$wrappedWriter.Flush()
+[IO.File]::WriteAllBytes($wrappedPak, $wrappedDocp.ToArray())
+$wrappedWriter.Dispose(); $wrappedDocp.Dispose()
+$wrappedRead = Read-DocpPakEntry $wrappedPak 'wrapped.odf' 65536
+if ($wrappedRead.Ok -or $wrappedRead.Status -ne 'ENTRY_CORRUPT') {
+    throw "Read-DocpPakEntry reported a zlib-wrapped, size-mismatched stored entry as readable (status=$($wrappedRead.Status))."
+}
 # Wave 2 & 6: Recursive Workshop dependency graph & real installed custom Workshop mods + DLL SHA-256 mismatch detection.
 $wrongDll = Join-Path $root 'Strategy02.dll'
 [IO.File]::WriteAllText($wrongDll, 'WRONG_HASH_DLL_BODY')
@@ -236,6 +320,14 @@ if ([IO.Directory]::Exists((Join-Path $run 'game')) -or (Get-Content -LiteralPat
     throw 'The editor launch path failed to return a dependency error and clear its private snapshot.'
 }
 
+# A non-ValidateOnly launch must be refused when the compatibility contract is
+# not READY, even when the embedded DLL identity verifies exactly.
+$unverifiedMission = Join-Path $root 'plgr-stock/plgr.bzn'
+if (Test-Path -LiteralPath $unverifiedMission -PathType Leaf) {
+    Expect-Refusal 'compatibility validation [MISSION_UNVERIFIED' {
+        & $launcher @common -Mission $unverifiedMission -ModProfile stock -MissionProfile custom-dll
+    }
+}
 # Exercise the real preparation path and stop at the process boundary.
 function Get-Process {
     [CmdletBinding()]

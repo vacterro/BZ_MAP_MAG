@@ -127,44 +127,154 @@ function Get-VrvAssetFolders([string] $Game, [string] $VrvSource) {
 }
 
 $script:KnownDllSignatures = @{
-    '415ad6ca656c02972ff5b88c574d51cb508f6574001b848b84c30b776d9b1bc2' = @{ Mod = 'stock'; Name = 'Strategy02.dll' }
-    'c3dc76d348ef8a31cfade7b3928e0f650d4bfb62348942177e1bc364470c65ce' = @{ Mod = 'stock'; Name = 'Instant.dll' }
-    '62f296053c99bb5b871e17b5140ac3b53f75ce6442721219c581611fad9439fc' = @{ Mod = 'stock'; Name = 'mpinstant.dll' }
-    '20344ce75d291e68e95692d8b6202b7f7d3ae08c93a3664907d65ec987071046' = @{ Mod = 'stock'; Name = 'deathmatch01.dll' }
-    '687c1ed92f6eaee882a688f78f75eb7be8972e3f7590db0fc9b0b53e8c56eec6' = @{ Mod = 'stock'; Name = 'StratCTF.dll' }
-    'b197f15b12901c9d87a0b80a7b775860a15302320cd33f1b09fa2b8683da57db' = @{ Mod = 'stock'; Name = 'LuaMission.dll' }
-    'a4b3ce223fc305df88507b07d1e0790ced781df5147ccce4886d776c45c0b6bb' = @{ Mod = 'vsr';   Name = 'Strategy02.dll' }
-    'c17c7d1c7fa7a75b87f3350f3b66599e207e9ece580d555b5c7c5051bd7e407d' = @{ Mod = 'vsr';   Name = 'Instant.dll' }
-    'b982c41694aba3e7d48fe4bc2d145d6d4f0261d529dea17d644212478c5e6020' = @{ Mod = 'vsr';   Name = 'deathmatch01.dll' }
-    'a7097e937761f2ef81d84693ef537c0102cc359ad3d6a7aa1d7d01a6b98a5a2a' = @{ Mod = 'vsr';   Name = 'LuaMission.dll' }
-    'afc99de3250ab37dccfbaf099b4983a7a402c0f8ae8d535f63fac7f91297a989' = @{ Mod = 'vrv';   Name = 'Strategy02.dll' }
-    '8879f1e83d507720774d48c196a0f750b40044ad3c80c279ff348436edb79c0d' = @{ Mod = 'vrv';   Name = 'Instant.dll' }
-    'f7759194b4798120ed87525cd27c4e6574454fdb2eb67d58cc33cd47a9e79834' = @{ Mod = 'vrv';   Name = 'mpinstant.dll' }
-    'd09c8bfc1e4a71723185e0ebf5f2cb1f4c88821e726396eaa43d45a7743dcd4a' = @{ Mod = 'vrv';   Name = 'deathmatch01.dll' }
-    'e3f6e4b5062cfced01f70f81809b83d7bbed1fb9f4ab563b33257fc015fa0130' = @{ Mod = 'vrv';   Name = 'StratCTF.dll' }
-    '65e575b840c5840ebc7df8b21ee35c116c1fd88abe63528be9483f0dbf115d11' = @{ Mod = 'vrv';   Name = 'VrvPrepare.dll' }
+    '415ad6ca656c02972ff5b88c574d51cb508f6574001b848b84c30b776d9b1bc2' = @{ Mod = 'stock'; Name = 'Strategy02.dll'; Mission = 'strategy' }
+    'c3dc76d348ef8a31cfade7b3928e0f650d4bfb62348942177e1bc364470c65ce' = @{ Mod = 'stock'; Name = 'Instant.dll'; Mission = 'instant' }
+    '62f296053c99bb5b871e17b5140ac3b53f75ce6442721219c581611fad9439fc' = @{ Mod = 'stock'; Name = 'mpinstant.dll'; Mission = 'mpi' }
+    '20344ce75d291e68e95692d8b6202b7f7d3ae08c93a3664907d65ec987071046' = @{ Mod = 'stock'; Name = 'deathmatch01.dll'; Mission = 'duel' }
+    '687c1ed92f6eaee882a688f78f75eb7be8972e3f7590db0fc9b0b53e8c56eec6' = @{ Mod = 'stock'; Name = 'StratCTF.dll'; Mission = 'strategy' }
+    'b197f15b12901c9d87a0b80a7b775860a15302320cd33f1b09fa2b8683da57db' = @{ Mod = 'stock'; Name = 'LuaMission.dll'; Mission = 'lua' }
+    'a4b3ce223fc305df88507b07d1e0790ced781df5147ccce4886d776c45c0b6bb' = @{ Mod = 'vsr';   Name = 'Strategy02.dll'; Mission = 'strategy' }
+    'c17c7d1c7fa7a75b87f3350f3b66599e207e9ece580d555b5c7c5051bd7e407d' = @{ Mod = 'vsr';   Name = 'Instant.dll'; Mission = 'instant' }
+    'b982c41694aba3e7d48fe4bc2d145d6d4f0261d529dea17d644212478c5e6020' = @{ Mod = 'vsr';   Name = 'deathmatch01.dll'; Mission = 'duel' }
+    'a7097e937761f2ef81d84693ef537c0102cc359ad3d6a7aa1d7d01a6b98a5a2a' = @{ Mod = 'vsr';   Name = 'LuaMission.dll'; Mission = 'lua' }
+    'afc99de3250ab37dccfbaf099b4983a7a402c0f8ae8d535f63fac7f91297a989' = @{ Mod = 'vrv';   Name = 'Strategy02.dll'; Mission = 'strategy' }
+    '8879f1e83d507720774d48c196a0f750b40044ad3c80c279ff348436edb79c0d' = @{ Mod = 'vrv';   Name = 'Instant.dll'; Mission = 'instant' }
+    'f7759194b4798120ed87525cd27c4e6574454fdb2eb67d58cc33cd47a9e79834' = @{ Mod = 'vrv';   Name = 'mpinstant.dll'; Mission = 'mpi' }
+    'd09c8bfc1e4a71723185e0ebf5f2cb1f4c88821e726396eaa43d45a7743dcd4a' = @{ Mod = 'vrv';   Name = 'deathmatch01.dll'; Mission = 'duel' }
+    'e3f6e4b5062cfced01f70f81809b83d7bbed1fb9f4ab563b33257fc015fa0130' = @{ Mod = 'vrv';   Name = 'StratCTF.dll'; Mission = 'strategy' }
+    '65e575b840c5840ebc7df8b21ee35c116c1fd88abe63528be9483f0dbf115d11' = @{ Mod = 'vrv';   Name = 'VrvPrepare.dll'; Mission = 'custom-dll' }
 }
 
-function Get-DllIdentityInfo([string] $DllPath, [string] $ModProfile = '') {
-    if (-not $DllPath -or -not (Test-Path -LiteralPath $DllPath -PathType Leaf)) {
-        return [pscustomobject]@{ Path = ''; Sha256 = ''; SizeBytes = 0; MatchedMod = ''; Status = 'MISSING' }
+$script:ExplicitDllInheritance = @{
+    'vsr' = @{ 'mpinstant.dll' = 'stock'; 'stratctf.dll' = 'stock' }
+    'vrv' = @{ 'luamission.dll' = 'stock' }
+}
+
+$script:MissionCanonicalDll = @{
+    'strategy' = 'Strategy02.dll'
+    'instant'  = 'Instant.dll'
+    'mpi'      = 'mpinstant.dll'
+    'duel'     = 'deathmatch01.dll'
+    'lua'      = 'LuaMission.dll'
+}
+
+function Get-ExpectedMissionDll([string] $MissionProfile = '', [string] $ModProfile = '') {
+    $mis = if ($MissionProfile) { $MissionProfile.Trim().ToLowerInvariant() } else { '' }
+    if ($script:MissionCanonicalDll.ContainsKey($mis)) {
+        return $script:MissionCanonicalDll[$mis]
     }
+    return ''
+}
+
+function Get-DllIdentityInfo([string] $DllPath, [string] $ModProfile = '', [string] $ExpectedDll = '', [string] $MissionProfile = '', [string] $ActualBznDll = '__UNSET__') {
+    $tgt = if ($ModProfile) { $ModProfile.Trim().ToLowerInvariant() } else { '' }
+    $mis = if ($MissionProfile) { $MissionProfile.Trim().ToLowerInvariant() } else { '' }
+    $exp = if ($ExpectedDll) { $ExpectedDll.Trim() } elseif ($mis -and $script:MissionCanonicalDll.ContainsKey($mis)) { $script:MissionCanonicalDll[$mis] } else { '' }
+    $leaf = if ($DllPath) { Split-Path -Leaf $DllPath } else { '' }
+    $actualRef = if ($ActualBznDll -eq '__UNSET__') { $leaf } else { $ActualBznDll.Trim() }
+
+    $missionMismatch = $false
+    $missionMismatchReason = ''
+    if ($exp) {
+        if (-not $actualRef) {
+            $missionMismatch = $true
+            $missionMismatchReason = "BZN embeds no mission DLL, but mission profile '$mis' requires '$exp'."
+        } elseif ($actualRef -ine $exp) {
+            $missionMismatch = $true
+            $missionMismatchReason = "BZN embeds mission DLL '$actualRef', contradicting mission profile '$mis' which expects '$exp'."
+        }
+    } elseif ($mis -eq 'blank' -and $actualRef) {
+        $missionMismatch = $true
+        $missionMismatchReason = "BZN embeds mission DLL '$actualRef', contradicting 'blank' mission profile."
+    }
+
+    if (-not $DllPath -or -not (Test-Path -LiteralPath $DllPath -PathType Leaf)) {
+        $st = if ($missionMismatch -and -not $actualRef) { 'MISSION_PROFILE_MISMATCH' } else { 'MISSING' }
+        $det = if ($missionMismatch -and -not $actualRef) { $missionMismatchReason } else { "Mission DLL was not found." }
+        return [pscustomobject]@{
+            Path = ''; Requested = $leaf; ActualBznDll = $actualRef; Expected = $exp; MissionProfile = $mis; TargetMod = $tgt
+            CanonicalName = ''; Sha256 = ''; SizeBytes = 0; MatchedMod = ''; Verified = $false; KnownSignature = $false
+            SemanticState = 'UNKNOWN'; Status = $st; Detail = $det
+        }
+    }
+    # Always hash live bytes on disk; never rely on cached DLL identity.
     $sha = (Get-FileHash -LiteralPath $DllPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $size = (Get-Item -LiteralPath $DllPath).Length
     $sig = $script:KnownDllSignatures[$sha]
     $matched = if ($sig) { $sig.Mod } else { 'unknown' }
-    $tgt = if ($ModProfile) { $ModProfile.ToLowerInvariant() } else { '' }
-    $status = if (-not $tgt) {
-        if ($sig) { 'VERIFIED' } else { 'CUSTOM_PRESENT' }
+    $canonical = if ($sig) { $sig.Name } else { '' }
+    $known = [bool]($null -ne $sig)
+
+    $status = 'HASH_UNVERIFIED'
+    $verified = $false
+    $sem = 'UNKNOWN'
+    $detail = ''
+
+    if (-not $known) {
+        if ($missionMismatch) {
+            $status = 'MISSION_PROFILE_MISMATCH'
+            $sem = 'MISMATCH'
+            $detail = "$missionMismatchReason (resolved '$leaf', unverified SHA-256 $($sha.Substring(0,12)))."
+        } else {
+            $status = 'HASH_UNVERIFIED'
+            $sem = 'UNKNOWN'
+            $detail = "Mission DLL '$leaf' ($($sha.Substring(0,12))) does not match any verified signature; semantics are UNKNOWN."
+        }
+    } elseif ($canonical -ine $leaf) {
+        $status = 'DLL_NAME_MISMATCH'
+        $sem = 'MISMATCH'
+        $detail = "DLL name mismatch: '$leaf' carries the SHA-256 of $($matched.ToUpperInvariant()) '$canonical' ($($sha.Substring(0,12)))."
+    } elseif ($missionMismatch) {
+        $status = 'MISSION_PROFILE_MISMATCH'
+        $sem = 'MISMATCH'
+        $detail = "$missionMismatchReason (file '$leaf' is $($matched.ToUpperInvariant()) '$canonical')."
+    } elseif ($exp -and $canonical -ine $exp) {
+        $status = 'MISSION_PROFILE_MISMATCH'
+        $sem = 'MISMATCH'
+        $detail = "Mission contract mismatch: resolved '$canonical', expected '$exp'."
+    } elseif (-not $tgt) {
+        $status = 'VERIFIED_EXACT'
+        $verified = $true
+        $sem = 'VERIFIED'
+        $detail = "Exact $($matched.ToUpperInvariant()) '$canonical' SHA-256 verified ($($sha.Substring(0,12)))."
     } elseif ($tgt -in 'stock','vsr','vrv') {
-        if ($matched -eq $tgt) { 'VERIFIED' }
-        elseif ($matched -eq 'stock' -and $tgt -in 'vsr','vrv' -and ((Split-Path -Leaf $DllPath).ToLowerInvariant() -in 'mpinstant.dll','stratctf.dll','luamission.dll')) { 'VERIFIED_INHERITED_STOCK' }
-        elseif ($matched -eq 'unknown') { 'HASH_UNVERIFIED' }
-        else { 'HASH_MISMATCH' }
+        if ($matched -eq $tgt) {
+            $status = 'VERIFIED_EXACT'
+            $verified = $true
+            $sem = 'VERIFIED'
+            $detail = "Exact $($tgt.ToUpperInvariant()) '$canonical' SHA-256 verified ($($sha.Substring(0,12)))."
+        } else {
+            $inhMap = $script:ExplicitDllInheritance[$tgt]
+            $allowedParent = if ($inhMap) { $inhMap[$canonical.ToLowerInvariant()] } else { '' }
+            if ($allowedParent -and $matched -eq $allowedParent) {
+                $status = 'VERIFIED_EXPLICIT_INHERITANCE'
+                $verified = $true
+                $sem = 'VERIFIED'
+                $detail = "Explicitly inherited $($allowedParent.ToUpperInvariant()) '$canonical' for $($tgt.ToUpperInvariant()) verified ($($sha.Substring(0,12)))."
+            } else {
+                $status = 'HASH_MISMATCH'
+                $sem = 'MISMATCH'
+                $detail = "Mod DLL hash mismatch: '$canonical' belongs to $($matched.ToUpperInvariant()) ($($sha.Substring(0,12))), not target mod $($tgt.ToUpperInvariant())."
+            }
+        }
     } else {
-        if ($sig) { 'VERIFIED_KNOWN_BASE' } else { 'CUSTOM_PRESENT' }
+        if ($matched -eq 'stock') {
+            $status = 'VERIFIED_EXPLICIT_INHERITANCE'
+            $verified = $true
+            $sem = 'VERIFIED'
+            $detail = "Custom mod '$tgt' explicitly inherits verified Stock '$canonical' ($($sha.Substring(0,12)))."
+        } else {
+            $status = 'HASH_MISMATCH'
+            $sem = 'MISMATCH'
+            $detail = "Custom mod '$tgt' resolved $($matched.ToUpperInvariant()) '$canonical' without verified inheritance."
+        }
     }
-    return [pscustomobject]@{ Path = $DllPath; Sha256 = $sha; SizeBytes = $size; MatchedMod = $matched; Status = $status }
+
+    return [pscustomobject]@{
+        Path = $DllPath; Requested = $leaf; ActualBznDll = $actualRef; Expected = $exp; MissionProfile = $mis; TargetMod = $tgt
+        CanonicalName = $canonical; Sha256 = $sha; SizeBytes = $size; MatchedMod = $matched; Verified = $verified
+        KnownSignature = $known; SemanticState = $sem; Status = $status; Detail = $detail
+    }
 }
 
 function Get-WorkshopDependencyGraph([string] $Game, [string] $ModProfile) {
@@ -364,55 +474,197 @@ function Get-StringSha256([string] $Text) {
     }
 }
 
+$script:TrackedStampExtensions = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($e in '.odf','.msh','.fbx','.xsi','.material','.dds','.tga','.png','.wav','.ogg','.dll','.lua','.aip','.pak') { [void]$script:TrackedStampExtensions.Add($e) }
+$script:TargetedHashExtensions = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($e in '.odf','.material','.dll','.lua','.pak') { [void]$script:TargetedHashExtensions.Add($e) }
+
 function Get-AssetRootStamp([string] $Root, [bool] $Recurse = $true) {
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return 'missing' }
+    $resolvedRoot = (Resolve-Path -LiteralPath $Root).Path
     $parts = [System.Collections.Generic.List[string]]::new()
-    $rootItem = [IO.DirectoryInfo]::new($Root)
-    $parts.Add("root:$($rootItem.LastWriteTimeUtc.Ticks)")
+    $rootItem = [IO.DirectoryInfo]::new($resolvedRoot)
+    $parts.Add("root:$($resolvedRoot.ToLowerInvariant()):$($rootItem.LastWriteTimeUtc.Ticks)")
     if ($Recurse) {
-        foreach ($dirPath in ([IO.Directory]::EnumerateDirectories($Root, '*', [IO.SearchOption]::AllDirectories) | Sort-Object)) {
+        foreach ($dirPath in ([IO.Directory]::EnumerateDirectories($resolvedRoot, '*', [IO.SearchOption]::AllDirectories) | Sort-Object)) {
             $dirInfo = [IO.DirectoryInfo]::new($dirPath)
-            $parts.Add("d:$($dirPath.Substring($Root.Length)):$($dirInfo.LastWriteTimeUtc.Ticks)")
+            $parts.Add("d:$($dirPath.Substring($resolvedRoot.Length).Replace('\','/').ToLowerInvariant()):$($dirInfo.LastWriteTimeUtc.Ticks)")
         }
     }
-    $archOption = if ($Recurse) { [IO.SearchOption]::AllDirectories } else { [IO.SearchOption]::TopDirectoryOnly }
-    foreach ($pakPath in ([IO.Directory]::EnumerateFiles($Root, '*.pak', $archOption) | Sort-Object)) {
-        $arch = [IO.FileInfo]::new($pakPath)
-        $parts.Add("p:$($pakPath.Substring($Root.Length)):$($arch.Length):$($arch.LastWriteTimeUtc.Ticks)")
+    $searchOption = if ($Recurse) { [IO.SearchOption]::AllDirectories } else { [IO.SearchOption]::TopDirectoryOnly }
+    $smallCandidates = [System.Collections.Generic.List[object]]::new()
+    foreach ($filePath in ([IO.Directory]::EnumerateFiles($resolvedRoot, '*', $searchOption) | Sort-Object)) {
+        $ext = [IO.Path]::GetExtension($filePath)
+        if (-not $script:TrackedStampExtensions.Contains($ext)) { continue }
+        $fi = [IO.FileInfo]::new($filePath)
+        $rel = $filePath.Substring($resolvedRoot.Length).Replace('\','/').TrimStart('/').ToLowerInvariant()
+        $entry = "f:${rel}:$($fi.Length):$($fi.LastWriteTimeUtc.Ticks)"
+        if (($script:TargetedHashExtensions.Contains($ext) -and $fi.Length -le 262144) -or ($ext -ieq '.msh' -and $fi.Length -le 65536)) {
+            $smallCandidates.Add([pscustomobject]@{ Path = $filePath; Rel = $rel })
+        }
+        $parts.Add($entry)
+    }
+    foreach ($cand in $smallCandidates) {
+        $h = (Get-FileHash -LiteralPath $cand.Path -Algorithm SHA256).Hash.Substring(0, 16).ToLowerInvariant()
+        $parts.Add("ch:$($cand.Rel)=$h")
     }
     return Get-StringSha256 ($parts -join '|')
 }
 
-function Get-DocpPakOdfEntries([string] $PakPath) {
-    $entries = [System.Collections.Generic.List[string]]::new()
+function Get-DocpPakDirectory([string] $PakPath) {
+    $res = [pscustomobject]@{
+        Ok = $false; PakPath = $PakPath; Entries = @{}; EntryList = @()
+        DuplicateEntries = @(); CorruptEntries = @(); Truncated = $false; Corrupt = $false; Error = ''
+    }
+    if (-not $PakPath -or -not (Test-Path -LiteralPath $PakPath -PathType Leaf)) {
+        $res.Error = 'PAK missing.'; return $res
+    }
     $stream = [IO.File]::OpenRead($PakPath)
     $reader = [IO.BinaryReader]::new($stream, [Text.Encoding]::ASCII)
     try {
-        if ($stream.Length -lt 32) { return $entries }
-        $magic = $reader.ReadBytes(4)
-        if ([Text.Encoding]::ASCII.GetString($magic) -ne 'DOCP') { return $entries }
+        $total = $stream.Length
+        if ($total -lt 32) { $res.Truncated = $true; $res.Corrupt = $true; $res.Error = 'Truncated DOCP header.'; return $res }
+        $magic = [Text.Encoding]::ASCII.GetString($reader.ReadBytes(4))
+        if ($magic -ne 'DOCP') { $res.Corrupt = $true; $res.Error = 'Not a DOCP archive.'; return $res }
         $ver = $reader.ReadUInt32()
         $null = $reader.ReadUInt32()
         $null = $reader.ReadUInt32()
         $count = $reader.ReadUInt32()
         $dirOffset = $reader.ReadUInt32()
-        if ($ver -ne 2 -or $count -gt 65536 -or $dirOffset -ge $stream.Length) { return $entries }
+        if ($ver -ne 2 -or $count -gt 65536) { $res.Corrupt = $true; $res.Error = "Unsupported DOCP version/count ($ver/$count)."; return $res }
+        if ($count -eq 0) { $res.Ok = $true; return $res }
+        if ($dirOffset -lt 32 -or $dirOffset -ge $total) { $res.Truncated = $true; $res.Corrupt = $true; $res.Error = 'DOCP dirOffset out of bounds.'; return $res }
         $stream.Position = [long]$dirOffset
-        for ($i = 0; $i -lt $count -and $stream.Position + 5 -le $stream.Length; $i++) {
-            $null = $reader.ReadUInt32()
+        $entries = @{}
+        $list = [System.Collections.Generic.List[object]]::new()
+        $dups = [System.Collections.Generic.List[string]]::new()
+        $corrupts = [System.Collections.Generic.List[object]]::new()
+        for ($i = 0; $i -lt $count; $i++) {
+            if ($stream.Position + 5 -gt $total) { $res.Truncated = $true; $res.Corrupt = $true; $res.Error = "Truncated directory at $i/$count."; break }
+            $flags = $reader.ReadUInt32()
             $nameLen = [int]$reader.ReadByte()
-            if ($stream.Position + $nameLen + 12 -gt $stream.Length) { break }
+            if ($nameLen -le 0 -or $stream.Position + $nameLen + 12 -gt $total) { $res.Truncated = $true; $res.Corrupt = $true; $res.Error = "Truncated entry $i."; break }
             $name = [Text.Encoding]::ASCII.GetString($reader.ReadBytes($nameLen))
-            $null = $reader.ReadBytes(12)
-            if ($name.EndsWith('.odf', [StringComparison]::OrdinalIgnoreCase)) {
-                $entries.Add("${PakPath}::${name}")
+            $offset = [long]$reader.ReadUInt32()
+            $packedSize = [long]$reader.ReadUInt32()
+            $unpackedSize = [long]$reader.ReadUInt32()
+            $eCorrupt = $false; $eErr = ''
+            $emptyStub = ($offset -eq 0 -and $packedSize -eq 0 -and $unpackedSize -eq 0)
+            if ($name.Contains('..') -or $name.Contains(':') -or $name.StartsWith('/') -or $name.StartsWith('\')) {
+                $eCorrupt = $true; $eErr = 'Unsafe entry name.'
+            } elseif (-not $emptyStub) {
+                if ($offset -lt 32 -or $offset -ge $total -or ($offset + $packedSize) -gt $total) { $eCorrupt = $true; $eErr = 'Entry offset/size out of bounds.' }
+                elseif ($dirOffset -gt $offset -and ($offset + $packedSize) -gt $dirOffset) { $eCorrupt = $true; $eErr = 'Entry overlaps directory.' }
+                elseif (($packedSize -eq 0 -and $unpackedSize -gt 0) -or ($unpackedSize -gt 0 -and $packedSize -gt ($unpackedSize + 1024 + [long]($unpackedSize / 16)))) { $eCorrupt = $true; $eErr = 'Invalid packed/unpacked sizes.' }
+            }
+            $leaf = [IO.Path]::GetFileName($name.Replace('\','/')).ToLowerInvariant()
+            $meta = [pscustomobject]@{
+                Name = $name; Leaf = $leaf; Flags = $flags; Offset = $offset; PackedSize = $packedSize; UnpackedSize = $unpackedSize
+                Compressed = ((-not $emptyStub) -and ($packedSize -gt 0) -and ($packedSize -ne $unpackedSize))
+                EmptyStub = $emptyStub; Oversized = ($unpackedSize -gt 4194304); Corrupt = $eCorrupt; Error = $eErr
+                Provenance = "${PakPath}::${name}"
+            }
+            $list.Add($meta)
+            if ($eCorrupt) { $corrupts.Add($meta) }
+            if ($entries.ContainsKey($leaf)) {
+                if (-not $dups.Contains($leaf)) { $dups.Add($leaf) }
+                if ($entries[$leaf].Corrupt -and -not $eCorrupt) { $entries[$leaf] = $meta }
+            } else {
+                $entries[$leaf] = $meta
             }
         }
+        $res.Entries = $entries
+        $res.EntryList = @($list.ToArray())
+        $res.DuplicateEntries = @($dups.ToArray())
+        $res.CorruptEntries = @($corrupts.ToArray())
+        $res.Ok = (-not $res.Truncated) -and ($list.Count -eq $count)
     } catch {
-        # Corrupt or non-DOCP pak is treated as having no readable ODF directory.
+        $res.Corrupt = $true; $res.Error = $_.Exception.Message
     } finally {
         $reader.Dispose()
         $stream.Dispose()
+    }
+    return $res
+}
+
+function Read-DocpPakEntry([string] $PakPath, [string] $EntryName, [int] $MaxUnpacked = 262144) {
+    $dir = Get-DocpPakDirectory $PakPath
+    $leaf = [IO.Path]::GetFileName($EntryName.Replace('\','/')).ToLowerInvariant()
+    if (-not $dir.Entries.ContainsKey($leaf)) {
+        return [pscustomobject]@{ Ok = $false; Status = $(if ($dir.Corrupt) { 'ENTRY_CORRUPT' } else { 'MISSING' }); Bytes = [byte[]]@(); Error = $dir.Error }
+    }
+    $m = $dir.Entries[$leaf]
+    if ($m.Corrupt) { return [pscustomobject]@{ Ok = $false; Status = 'ENTRY_CORRUPT'; Bytes = [byte[]]@(); Error = $m.Error } }
+    if ($m.EmptyStub) { return [pscustomobject]@{ Ok = $false; Status = 'ENTRY_INDEXED'; Bytes = [byte[]]@(); Error = 'Metadata-only / empty entry.' } }
+    if ($m.UnpackedSize -gt [Math]::Min($MaxUnpacked, 4194304)) { return [pscustomobject]@{ Ok = $false; Status = 'ENTRY_INDEXED'; Bytes = [byte[]]@(); Error = 'Oversized entry.' } }
+    $stream = [IO.File]::OpenRead($PakPath)
+    try {
+        if ($m.Offset + $m.PackedSize -gt $stream.Length) { return [pscustomobject]@{ Ok = $false; Status = 'ENTRY_CORRUPT'; Bytes = [byte[]]@(); Error = 'Entry exceeds archive length.' } }
+        $stream.Position = $m.Offset
+        $raw = [byte[]]::new([int]$m.PackedSize)
+        $read = $stream.Read($raw, 0, $raw.Length)
+        if ($read -ne $raw.Length) { return [pscustomobject]@{ Ok = $false; Status = 'ENTRY_CORRUPT'; Bytes = [byte[]]@(); Error = 'Short read.' } }
+        if (-not $m.Compressed) {
+            # A stored entry may still carry a zlib wrapper when packedSize equals
+            # unpackedSize; probe the RFC 1950 header like app/core/asset_index.gd
+            # before trusting the raw bytes as readable content.
+            if ($raw.Length -ge 6) {
+                $zCmf = [int]$raw[0]
+                $zFlg = [int]$raw[1]
+                if ((($zCmf -band 0x0F) -eq 8) -and (((($zCmf -shl 8) -bor $zFlg) % 31) -eq 0)) {
+                    $zIn = [IO.MemoryStream]::new($raw, 2, $raw.Length - 2)
+                    $zDef = [IO.Compression.DeflateStream]::new($zIn, [IO.Compression.CompressionMode]::Decompress)
+                    $zOut = [IO.MemoryStream]::new()
+                    try {
+                        $zDef.CopyTo($zOut)
+                        $zBytes = $zOut.ToArray()
+                        if ($zBytes.Length -eq $m.UnpackedSize) {
+                            return [pscustomobject]@{ Ok = $true; Status = 'CONTENT_READABLE'; Bytes = $zBytes; Error = '' }
+                        }
+                        # A zlib-looking payload that does not decompress to the
+                        # declared size is corrupt content, not readable raw bytes.
+                        return [pscustomobject]@{ Ok = $false; Status = 'ENTRY_CORRUPT'; Bytes = [byte[]]@(); Error = 'Decompressed size mismatch.' }
+                    } catch {
+                        return [pscustomobject]@{ Ok = $false; Status = 'ENTRY_CORRUPT'; Bytes = [byte[]]@(); Error = $_.Exception.Message }
+                    } finally {
+                        $zDef.Dispose(); $zIn.Dispose(); $zOut.Dispose()
+                    }
+                }
+            }
+            return [pscustomobject]@{ Ok = $true; Status = 'CONTENT_READABLE'; Bytes = $raw; Error = '' }
+        }
+        $cmf = [int]$raw[0]
+        $flg = [int]$raw[1]
+        if ($raw.Length -lt 6 -or (($cmf -band 0x0F) -ne 8) -or (((($cmf -shl 8) -bor $flg) % 31) -ne 0)) {
+            return [pscustomobject]@{ Ok = $false; Status = 'ENTRY_INDEXED'; Bytes = [byte[]]@(); Error = 'Unsupported compression method.' }
+        }
+        $inMs = [IO.MemoryStream]::new($raw, 2, $raw.Length - 2)
+        $def = [IO.Compression.DeflateStream]::new($inMs, [IO.Compression.CompressionMode]::Decompress)
+        $outMs = [IO.MemoryStream]::new()
+        try {
+            $def.CopyTo($outMs)
+            $outBytes = $outMs.ToArray()
+            if ($outBytes.Length -ne $m.UnpackedSize) {
+                return [pscustomobject]@{ Ok = $false; Status = 'ENTRY_CORRUPT'; Bytes = [byte[]]@(); Error = 'Decompressed size mismatch.' }
+            }
+            return [pscustomobject]@{ Ok = $true; Status = 'CONTENT_READABLE'; Bytes = $outBytes; Error = '' }
+        } catch {
+            return [pscustomobject]@{ Ok = $false; Status = 'ENTRY_CORRUPT'; Bytes = [byte[]]@(); Error = $_.Exception.Message }
+        } finally {
+            $def.Dispose(); $inMs.Dispose(); $outMs.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Get-DocpPakOdfEntries([string] $PakPath) {
+    $entries = [System.Collections.Generic.List[string]]::new()
+    $dir = Get-DocpPakDirectory $PakPath
+    foreach ($m in $dir.EntryList) {
+        if ($m.Name.EndsWith('.odf', [StringComparison]::OrdinalIgnoreCase)) {
+            $entries.Add($m.Provenance)
+        }
     }
     return $entries
 }
@@ -555,10 +807,11 @@ function Resolve-PlaytestOdfDependencies([string[]] $Odfs, [psobject] $Config, [
     }
 }
 
-function Get-PlaytestAssetPlan([string] $Game, [string] $Mission, [string] $AssetProfile, [string] $VrvSource, [bool] $SkipScripts, [string[]] $AssetRoots = @(), [string[]] $Odfs = @(), [string] $CacheRoot = '', [string] $ModProfile = '', [string] $Converter = '') {
+function Get-PlaytestAssetPlan([string] $Game, [string] $Mission, [string] $AssetProfile, [string] $VrvSource, [bool] $SkipScripts, [string[]] $AssetRoots = @(), [string[]] $Odfs = @(), [string] $CacheRoot = '', [string] $ModProfile = '', [string] $Converter = '', [string] $MissionProfile = '') {
     $config = Get-PlaytestAssetConfiguration $Game $Mission $AssetProfile $VrvSource $AssetRoots $ModProfile $Converter
     $plan = [pscustomobject]@{
         ModProfile = $config.ModProfile
+        MissionProfile = $MissionProfile
         ConverterRoot = $config.ConverterRoot
         LinkedFolders = $config.LinkedFolders
         ExplicitAssetRoots = $config.ExplicitAssetRoots
@@ -569,6 +822,8 @@ function Get-PlaytestAssetPlan([string] $Game, [string] $Mission, [string] $Asse
         DependencyCycles = $config.DependencyCycles
         ScriptCheck = 'disabled'
         MissionDll = ''
+        ActualBznDll = ''
+        ExpectedMissionDll = ''
         DllIdentity = $null
         LuaScript = ''
         RequiredOdfs = @()
@@ -580,18 +835,23 @@ function Get-PlaytestAssetPlan([string] $Game, [string] $Mission, [string] $Asse
     }
     if (-not $SkipScripts) {
         $dll = Get-NativeMissionDll $Mission
+        $expectedDll = Get-ExpectedMissionDll $MissionProfile $ModProfile
+        $plan.ActualBznDll = if ($dll) { $dll } else { '' }
+        $plan.ExpectedMissionDll = $expectedDll
         $plan.ScriptCheck = 'unidentified'
         if ($dll) {
             $roots = @($config.MissionFolder) + @($config.AssetRoots) + @((Join-Path $Game 'Missions')) + @($config.NativeRoots)
             $plan.MissionDll = Find-PlaytestAsset $dll $roots
             if (-not $plan.MissionDll) { throw "Missing mission DLL $dll. Put it beside the map or link its folder in the asset profile." }
-            $plan.DllIdentity = Get-DllIdentityInfo $plan.MissionDll $ModProfile
+            $plan.DllIdentity = Get-DllIdentityInfo $plan.MissionDll $ModProfile $expectedDll $MissionProfile $plan.ActualBznDll
             if ($dll -ieq 'LuaMission.dll') {
                 $name = [IO.Path]::GetFileNameWithoutExtension($Mission) + '.lua'
                 $plan.LuaScript = Find-PlaytestAsset $name $roots
                 if (-not $plan.LuaScript) { throw "Missing Lua mission script $name. Put it beside the map or link its folder in the asset profile." }
             }
             $plan.ScriptCheck = 'resolved'
+        } elseif ($expectedDll) {
+            $plan.DllIdentity = Get-DllIdentityInfo '' $ModProfile $expectedDll $MissionProfile ''
         }
     }
     if ($Odfs -and $Odfs.Count -gt 0) {

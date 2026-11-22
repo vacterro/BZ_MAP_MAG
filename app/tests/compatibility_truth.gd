@@ -32,6 +32,16 @@ func check(cond: bool, desc: String) -> void:
 		printerr("FAIL: " + desc)
 
 
+func _first_dll_dir(profile_root: String, mod_folder: String) -> String:
+	if profile_root.is_empty():
+		return ""
+	var candidates := [profile_root.path_join(mod_folder + "/Missions"), profile_root.path_join("Missions")]
+	for dir_path in candidates:
+		if DirAccess.dir_exists_absolute(dir_path) and FileAccess.file_exists(dir_path.path_join("Strategy02.dll")):
+			return dir_path
+	return ""
+
+
 func write_text(path: String, text: String) -> void:
 	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
 	var f := FileAccess.open(path, FileAccess.WRITE)
@@ -96,14 +106,14 @@ func patch_map_odf_and_dll(src_bzn: String, dst_dir: String, new_odf: String, ne
 
 func run() -> void:
 	var args := OS.get_cmdline_user_args()
-	if args.size() < 3:
-		printerr("Pass brave_bzn blank_bzn scratch_dir [optional_game_dir] [optional_vrv_dir]")
+	if args.size() < 4:
+		printerr("Pass brave_bzn blank_bzn scratch_dir real_game_dir [optional_vrv_dir]")
 		quit(2)
 		return
 	var brave_bzn := args[0]
 	var blank_bzn := args[1]
 	var scratch := args[2]
-	var real_game := args[3] if args.size() >= 4 else ""
+	var real_game := args[3]
 	var real_vrv := args[4] if args.size() >= 5 else ""
 
 	AssetIndex.clear_cache()
@@ -282,8 +292,8 @@ func run() -> void:
 		check(bool(plan_empty["ok"]) and String(plan_empty["route"]) == "native"
 			and not bool(plan_empty["needsConverter"]) and String(plan_empty["converterArg"]).is_empty()
 			and String(plan_empty["compatibility"]["validationStatus"]) == CompatibilityEngine.PLAYTEST_READY
-			and String(plan_empty["compatibility"]["dllIdentity"]["status"]) == "VERIFIED",
-			"Stock 1192 with empty VRV path is READY with verified Stock Strategy02.dll hash")
+			and String(plan_empty["compatibility"]["dllIdentity"]["status"]) == AssetIndex.DLL_STATUS_VERIFIED_EXACT,
+			"Stock 1192 with empty VRV path is READY with VERIFIED_EXACT Stock Strategy02.dll hash")
 
 		# Case 2: Stock 1192, VRV path STALE/INVALID -> STILL READY with non-blocking warning!
 		editor.vrv_path.text = "Z:/nonexistent_stale_vrv_checkout"
@@ -350,7 +360,453 @@ func run() -> void:
 		check(not bool(plan_unk["ok"]) and String(plan_unk["compatibility"]["validationStatus"]) == CompatibilityEngine.PLAYTEST_UNKNOWN,
 			"unknown Workshop mod (custom:unknown) refuses unverified Playtest with status UNKNOWN")
 
+		# =====================================================================
+		# 5. WAVE 1 (P0): Mission DLL Truth — ALL 10 Regression Cases
+		# =====================================================================
+		var stock_missions_dir := real_game.path_join("Missions")
+		var stock_strat_dll := stock_missions_dir.path_join("Strategy02.dll")
+		var stock_inst_dll := stock_missions_dir.path_join("Instant.dll")
+		var stock_lua_dll := stock_missions_dir.path_join("LuaMission.dll")
+		var stock_mpi_dll := stock_missions_dir.path_join("mpinstant.dll")
+
+		# 1) Correct Stock Strategy02 -> PASS (VERIFIED_EXACT)
+		var id1 := AssetIndex.inspect_dll_identity("Strategy02.dll", [stock_missions_dir], "stock", "Strategy02.dll", "strategy", "Strategy02.dll")
+		check(String(id1["status"]) == AssetIndex.DLL_STATUS_VERIFIED_EXACT and bool(id1["verified"]),
+			"W1.1 Correct Stock Strategy02.dll -> VERIFIED_EXACT")
+
+		# 2) Correct Stock Instant -> PASS (VERIFIED_EXACT) + full CompatibilityEngine READY
+		var stock_inst_dir := scratch.path_join("w1-stock-instant")
+		check(writer.create_native_flat_map(blank_bzn, stock_inst_dir, 1024, 100.0, "", {
+			"mod_profile": "stock",
+			"mission_profile": "instant",
+			"configure_mission": true,
+			"sync_mission_dll": true,
+			"sanitize_stock_objects": true,
+		}), "W1.2 stage Stock Instant 1192 map")
+		var stock_inst_bzn := stock_inst_dir.path_join(blank_bzn.get_file())
+		var inst_doc := Document.new()
+		check(inst_doc.open(stock_inst_bzn), "W1.2 open Stock Instant map")
+		var inst_eval := CompatibilityEngine.evaluate(inst_doc, real_reg, "stock", "instant", "bzcc-2.0.185", real_game, "")
+		check(bool(inst_eval["ok"]) and String(inst_eval["dllIdentity"]["status"]) == AssetIndex.DLL_STATUS_VERIFIED_EXACT,
+			"W1.2 Correct Stock Instant -> VERIFIED_EXACT + PLAYTEST_READY")
+
+		# 3) Instant bytes renamed Strategy02.dll -> DLL_NAME_MISMATCH (REFUSE!)
+		var renamed_root := scratch.path_join("w1-renamed-dll")
+		DirAccess.make_dir_recursive_absolute(renamed_root)
+		write_bytes(renamed_root.path_join("Strategy02.dll"), FileAccess.get_file_as_bytes(stock_inst_dll))
+		var id3 := AssetIndex.inspect_dll_identity("Strategy02.dll", [renamed_root], "stock", "Strategy02.dll", "strategy", "Strategy02.dll")
+		check(String(id3["status"]) == AssetIndex.DLL_STATUS_DLL_NAME_MISMATCH and not bool(id3["verified"]),
+			"W1.3 Stock Instant.dll bytes renamed Strategy02.dll -> DLL_NAME_MISMATCH (no false VERIFIED!)")
+		# Also verify full CompatibilityEngine refuses when renamed DLL sits beside map!
+		var renamed_map_dir := scratch.path_join("w1-renamed-map")
+		check(writer.create_native_flat_map(blank_bzn, renamed_map_dir, 1024, 100.0, "", {
+			"mod_profile": "stock", "mission_profile": "strategy", "configure_mission": true, "sanitize_stock_objects": true,
+		}), "W1.3 stage map with renamed DLL beside it")
+		write_bytes(renamed_map_dir.path_join("Strategy02.dll"), FileAccess.get_file_as_bytes(stock_inst_dll))
+		var renamed_doc := Document.new()
+		check(renamed_doc.open(renamed_map_dir.path_join(blank_bzn.get_file())), "W1.3 open renamed-DLL map")
+		var renamed_eval := CompatibilityEngine.evaluate(renamed_doc, real_reg, "stock", "strategy", "bzcc-2.0.185", real_game, "")
+		check(not bool(renamed_eval["ok"])
+			and String(renamed_eval["dllIdentity"]["status"]) == AssetIndex.DLL_STATUS_DLL_NAME_MISMATCH
+			and String(renamed_eval["validationStatus"]) == CompatibilityEngine.PLAYTEST_MISSION_UNVERIFIED,
+			"W1.3 CompatibilityEngine refuses Playtest for Instant.dll bytes disguised as Strategy02.dll")
+
+		# 4) Actual Instant.dll + selected Strategy -> MISSION_PROFILE_MISMATCH (REFUSE!)
+		var mis_eval := CompatibilityEngine.evaluate(inst_doc, real_reg, "stock", "strategy", "bzcc-2.0.185", real_game, "")
+		check(not bool(mis_eval["ok"])
+			and String(mis_eval["dllIdentity"]["status"]) == AssetIndex.DLL_STATUS_MISSION_PROFILE_MISMATCH
+			and String(mis_eval["validationStatus"]) == CompatibilityEngine.PLAYTEST_MISSION_UNVERIFIED,
+			"W1.4 Actual Instant.dll + selected Strategy -> MISSION_PROFILE_MISMATCH refusal")
+
+		# 5) VSR DLL under Stock profile -> HASH_MISMATCH (REFUSE!)
+		var vsr_root := String(real_reg.get_profile("vsr").get("gameRoot", ""))
+		var vsr_dll_dir := _first_dll_dir(vsr_root, "VSR")
+		if not vsr_dll_dir.is_empty():
+			var id5 := AssetIndex.inspect_dll_identity("Strategy02.dll", [vsr_dll_dir], "stock", "Strategy02.dll", "strategy", "Strategy02.dll")
+			check(String(id5["status"]) == AssetIndex.DLL_STATUS_HASH_MISMATCH and not bool(id5["verified"]),
+				"W1.5 VSR Strategy02.dll under Stock profile -> HASH_MISMATCH refusal")
+
+		# 6) VRV DLL under VSR profile -> HASH_MISMATCH (REFUSE!)
+		var vrv_root := String(real_reg.get_profile("vrv").get("gameRoot", ""))
+		var vrv_dll_dir := _first_dll_dir(vrv_root, "VRV")
+		if not vrv_dll_dir.is_empty():
+			var id6 := AssetIndex.inspect_dll_identity("Strategy02.dll", [vrv_dll_dir], "vsr", "Strategy02.dll", "strategy", "Strategy02.dll")
+			check(String(id6["status"]) in [AssetIndex.DLL_STATUS_HASH_MISMATCH, AssetIndex.DLL_STATUS_HASH_UNVERIFIED] and not bool(id6["verified"]),
+				"W1.6 VRV Strategy02.dll under VSR profile -> unverified refusal")
+
+		# 7) Unknown custom DLL -> HASH_UNVERIFIED + UNKNOWN, NOT verified!
+		var custom_dll_root := scratch.path_join("w1-unknown-custom-dll")
+		write_bytes(custom_dll_root.path_join("MyCustomMode.dll"), "UNKNOWN_CUSTOM_DLL_BYTES_12345".to_utf8_buffer())
+		var id7 := AssetIndex.inspect_dll_identity("MyCustomMode.dll", [custom_dll_root], "custom:my_mod", "", "custom-dll", "MyCustomMode.dll")
+		check(String(id7["status"]) == AssetIndex.DLL_STATUS_HASH_UNVERIFIED
+			and String(id7["semanticState"]) == "UNKNOWN" and not bool(id7["verified"]),
+			"W1.7 Unknown custom DLL -> HASH_UNVERIFIED / semanticState=UNKNOWN, not verified")
+
+		# 8) Valid explicit inherited Stock DLL -> VERIFIED_EXPLICIT_INHERITANCE (PASS!)
+		var id8_vrv := AssetIndex.inspect_dll_identity("LuaMission.dll", [stock_missions_dir], "vrv", "LuaMission.dll", "lua", "LuaMission.dll")
+		check(String(id8_vrv["status"]) == AssetIndex.DLL_STATUS_VERIFIED_EXPLICIT_INHERITANCE and bool(id8_vrv["verified"]),
+			"W1.8 Stock LuaMission.dll under VRV -> VERIFIED_EXPLICIT_INHERITANCE")
+		var id8_vsr := AssetIndex.inspect_dll_identity("mpinstant.dll", [stock_missions_dir], "vsr", "mpinstant.dll", "mpi", "mpinstant.dll")
+		check(String(id8_vsr["status"]) == AssetIndex.DLL_STATUS_VERIFIED_EXPLICIT_INHERITANCE and bool(id8_vsr["verified"]),
+			"W1.8 Stock mpinstant.dll under VSR -> VERIFIED_EXPLICIT_INHERITANCE")
+		# Verify Stock LuaMission.dll is NOT allowed as inherited under VSR (VSR ships its own!)
+		var id8_vsr_lua := AssetIndex.inspect_dll_identity("LuaMission.dll", [stock_missions_dir], "vsr", "LuaMission.dll", "lua", "LuaMission.dll")
+		check(String(id8_vsr_lua["status"]) == AssetIndex.DLL_STATUS_HASH_MISMATCH and not bool(id8_vsr_lua["verified"]),
+			"W1.8 Stock LuaMission.dll under VSR is refused (VSR ships its own LuaMission.dll)")
+
+		# 9) Correct Strategy02.dll file, but wrong mission contract ('instant' / 'blank') -> MISSION_PROFILE_MISMATCH
+		var id9_inst := AssetIndex.inspect_dll_identity("Strategy02.dll", [stock_missions_dir], "stock", "Instant.dll", "instant", "Strategy02.dll")
+		check(String(id9_inst["status"]) == AssetIndex.DLL_STATUS_MISSION_PROFILE_MISMATCH and not bool(id9_inst["verified"]),
+			"W1.9 Valid Stock Strategy02.dll under Instant mission contract -> MISSION_PROFILE_MISMATCH")
+		var id9_blank := AssetIndex.inspect_dll_identity("Strategy02.dll", [stock_missions_dir], "stock", "", "blank", "Strategy02.dll")
+		check(String(id9_blank["status"]) == AssetIndex.DLL_STATUS_MISSION_PROFILE_MISMATCH and not bool(id9_blank["verified"]),
+			"W1.9 Valid Stock Strategy02.dll under Blank mission contract -> MISSION_PROFILE_MISMATCH")
+
+		# 10) New Map Wizard / profile switch cannot silently preserve stale mission DLL
+		var blank_from_strat_dir := scratch.path_join("w1-blank-no-stale-dll")
+		check(writer.create_native_flat_map(blank_bzn, blank_from_strat_dir, 1024, 100.0, "", {
+			"mod_profile": "stock",
+			"mission_profile": "blank",
+			"configure_mission": false,
+			"sync_mission_dll": true,
+			"sanitize_stock_objects": true,
+		}), "W1.10 create blank Stock map with sync_mission_dll=true")
+		var blank_clean_doc := Document.new()
+		check(blank_clean_doc.open(blank_from_strat_dir.path_join(blank_bzn.get_file())), "W1.10 open blank Stock map")
+		check(blank_clean_doc.package.mission_dll.is_empty(),
+			"W1.10 New Map Wizard blank mode clears template stale Strategy02.dll instead of silently preserving it")
+		# Non-destructive switch from Strategy -> Instant surfaces MISSION_PROFILE_MISMATCH; explicit convert aligns DLL + exports natively!
+		var switch_doc := Document.new()
+		check(switch_doc.open(stock_strat_bzn), "W1.10 open Stock Strategy map for profile switch test")
+		check(switch_doc.set_target_profile("stock", "instant"), "W1.10 switch target profile strategy -> instant")
+		var sw_eval := CompatibilityEngine.evaluate(switch_doc, real_reg, "stock", "instant", "bzcc-2.0.185", real_game, "")
+		check(not bool(sw_eval["ok"]) and String(sw_eval["dllIdentity"]["status"]) == AssetIndex.DLL_STATUS_MISSION_PROFILE_MISMATCH,
+			"W1.10 non-destructive profile switch exposes stale Strategy02.dll as MISSION_PROFILE_MISMATCH")
+		var conv_res := switch_doc.convert_objects_to_profile("stock", "instant")
+		check(bool(conv_res["ok"]) and switch_doc.effective_mission_dll() == "Instant.dll",
+			"W1.10 explicit convert_objects_to_profile aligns mission_dll_override to Instant.dll")
+		switch_doc.undo()
+		check(switch_doc.effective_mission_dll() == "Strategy02.dll", "W1.10 Undo reverts mission DLL override")
+		switch_doc.redo()
+		check(switch_doc.effective_mission_dll() == "Instant.dll", "W1.10 Redo reapplies mission DLL override")
+		var dll_bzmag := scratch.path_join("w1-dll-override.bzmag")
+		check(writer.save_project(switch_doc, dll_bzmag), "W1.10 save .bzmag with missionDllOverride")
+		var dll_reopen := Document.new()
+		check(dll_reopen.open(dll_bzmag) and dll_reopen.effective_mission_dll() == "Instant.dll",
+			"W1.10 .bzmag preserves missionDllOverride")
+		var dll_exp_dir := scratch.path_join("w1-dll-exported")
+		check(writer.export_native(dll_reopen, dll_exp_dir), "W1.10 export native with patched Instant.dll: " + writer.error)
+		var dll_reimp := Document.new()
+		check(dll_reimp.open(dll_exp_dir.path_join(blank_bzn.get_file())) and dll_reimp.package.mission_dll == "Instant.dll",
+			"W1.10 exported native BZN reimports with Instant.dll")
+
+		# Real DOCP v2 zlib decompression proof on installed BZ2R smtex.pak!
+		var smtex_pak := real_game.path_join("smtex.pak")
+		if FileAccess.file_exists(smtex_pak):
+			var sm_dir := AssetIndex.read_docp_pak_directory(smtex_pak)
+			check(bool(sm_dir["ok"]) and (sm_dir["entries"] as Dictionary).size() > 100,
+				"W2 real BZ2R smtex.pak directory parses cleanly (%d entries)" % (sm_dir["entries"] as Dictionary).size())
+			var bane_stored := AssetIndex.read_docp_pak_entry(smtex_pak, "bane.tga")
+			var bane_zlib := AssetIndex.read_docp_pak_entry(smtex_pak, "bane2.tga")
+			check(bool(bane_stored["ok"]) and String(bane_stored["compression"]) == "stored" and (bane_stored["bytes"] as PackedByteArray).size() == 49196,
+				"W2 real BZ2R smtex.pak stored entry bane.tga reads 49196 bytes")
+			check(bool(bane_zlib["ok"]) and String(bane_zlib["compression"]) == "zlib" and (bane_zlib["bytes"] as PackedByteArray).size() == 49196,
+				"W2 real BZ2R smtex.pak zlib-compressed entry bane2.tga decompresses cleanly to 49196 bytes")
+
+		# Wave 5: Actionable Mod Manager diagnostic for VSR missing dep 3627212766 (Stock unaffected)
+		var vsr_diag := real_reg.get_mod_diagnostic("vsr", real_game, real_vrv)
+		var stock_diag := real_reg.get_mod_diagnostic("stock", real_game, real_vrv)
+		check(String(stock_diag["playtestStatus"]) == "READY" and bool(stock_diag["complete"]),
+			"W5 Stock diagnostic stays READY regardless of VSR missing dependency")
+		if "3627212766" in (vsr_diag["missingDependencies"] as Array):
+			check(String(vsr_diag["playtestStatus"]) == "BLOCKED_MISSING_DEPENDENCY"
+				and not (vsr_diag["unresolvedDetails"] as Array).is_empty()
+				and not String((vsr_diag["unresolvedDetails"] as Array)[0].get("note", "")).is_empty()
+				and bool(vsr_diag["stockUnaffected"]),
+				"W5 VSR diagnostic surfaces exact unresolved Workshop ID 3627212766 with seasonal note and safe editing ops")
+
+	# =========================================================================
+	# 6. WAVE 2 (P0): Packed ODF Dependency Inspection & DOCP v2 Safety Matrix
+	# =========================================================================
+	var pak_test_root := scratch.path_join("w2-pak-matrix")
+	DirAccess.make_dir_recursive_absolute(pak_test_root)
+
+	# Helper closure via local arrays: build real DOCP v2 archives with payloads (stored & zlib)
+	var parent_odf_txt := "[GameObjectClass]\ngeometryName = \"parent_mesh.fbx\"\nunitName = \"Packed Parent\"\nfireSound = \"pew.wav\"\n"
+	var child_odf_txt := "[GameObjectClass]\nclassLabel = \"packed_parent\"\nunitName = \"Packed Child\"\n"
+	var miss_mesh_txt := "[GameObjectClass]\nclassLabel = \"wingman\"\ngeometryName = \"absent_mesh.fbx\"\n"
+	var miss_snd_txt := "[GameObjectClass]\nclassLabel = \"wingman\"\ngeometryName = \"ok_mesh.fbx\"\nfireSound = \"absent_snd.wav\"\n"
+	var miss_tex_odf_txt := "[GameObjectClass]\nclassLabel = \"wingman\"\ngeometryName = \"tex_mesh.fbx\"\n"
+	var miss_tex_mat_txt := "[Texture]\ndiffuse = \"absent_tex.dds\"\n"
+	var loose_vs_pak_packed := "[GameObjectClass]\nclassLabel = \"wingman\"\nunitName = \"FROM_PAK\"\ngeometryName = \"ok_mesh.fbx\"\n"
+	var loose_vs_pak_loose := "[GameObjectClass]\nclassLabel = \"wingman\"\nunitName = \"FROM_LOOSE\"\ngeometryName = \"ok_mesh.fbx\"\n"
+
+	var good_pak := pak_test_root.path_join("good_assets.pak")
+	_write_docp_v2_pak(good_pak, [
+		{"name": "packed_parent.odf", "bytes": parent_odf_txt.to_ascii_buffer(), "compress": true},
+		{"name": "packed_child.odf", "bytes": child_odf_txt.to_ascii_buffer(), "compress": false},
+		{"name": "parent_mesh.msh", "bytes": PackedByteArray([1, 2, 3, 4]), "compress": false},
+		{"name": "pew.wav", "bytes": PackedByteArray([82, 73, 70, 70]), "compress": false},
+		{"name": "ok_mesh.msh", "bytes": PackedByteArray([5, 6, 7, 8]), "compress": false},
+		{"name": "miss_mesh.odf", "bytes": miss_mesh_txt.to_ascii_buffer(), "compress": false},
+		{"name": "miss_snd.odf", "bytes": miss_snd_txt.to_ascii_buffer(), "compress": true},
+		{"name": "tex_mesh.msh", "bytes": PackedByteArray([9, 10, 11, 12]), "compress": false},
+		{"name": "tex_mesh.material", "bytes": miss_tex_mat_txt.to_ascii_buffer(), "compress": true},
+		{"name": "miss_tex.odf", "bytes": miss_tex_odf_txt.to_ascii_buffer(), "compress": false},
+		{"name": "both_odf.odf", "bytes": loose_vs_pak_packed.to_ascii_buffer(), "compress": false},
+		{"name": "dup_unit.odf", "bytes": loose_vs_pak_packed.to_ascii_buffer(), "compress": false},
+		{"name": "dup_unit.odf", "bytes": loose_vs_pak_loose.to_ascii_buffer(), "compress": false},
+	])
+	write_text(pak_test_root.path_join("both_odf.odf"), loose_vs_pak_loose)
+	write_text(pak_test_root.path_join("wingman.odf"), "[GameObjectClass]\ngeometryName = \"ok_mesh.fbx\"\nunitName = \"Wingman Base\"\n")
+	write_text(pak_test_root.path_join("loose_unit.odf"), "[GameObjectClass]\nclassLabel = \"packed_parent\"\nunitName = \"Loose Child Of Packed Parent\"\n")
+
+	var override_top := scratch.path_join("w2-override-top")
+	write_text(override_top.path_join("packed_child.odf"), "[GameObjectClass]\nclassLabel = \"wingman\"\nunitName = \"TOP_ROOT_WINNER\"\ngeometryName = \"ok_mesh.fbx\"\n")
+
+	var w2_layered := AssetIndex.index_layered_roots([
+		{"path": pak_test_root, "source": "base", "recurse": true, "volatile": false},
+	])
+	# Loose ODF inheriting packed parent ODF
+	var d_loose := AssetIndex.inspect_odf_dependencies("loose_unit.odf", w2_layered)
+	check(String(d_loose["inspectionStatus"]) == AssetIndex.INSPECT_DEPENDENCIES_RESOLVED
+		and String(d_loose["geometryName"]) == "parent_mesh.fbx"
+		and (d_loose["parentChain"] as Array) == ["loose_unit.odf", "packed_parent.odf"],
+		"W2 loose ODF inheriting zlib-packed parent resolves chain & geometry -> DEPENDENCIES_RESOLVED")
+	# Packed ODF + packed parent chain
+	var d_packed := AssetIndex.inspect_odf_dependencies("packed_child.odf", w2_layered)
+	check(bool(d_packed["packed"]) and String(d_packed["inspectionStatus"]) == AssetIndex.INSPECT_DEPENDENCIES_RESOLVED
+		and String(d_packed["geometryName"]) == "parent_mesh.fbx"
+		and String(d_packed["meshPath"]).ends_with("::parent_mesh.msh"),
+		"W2 packed child -> zlib-packed parent -> packed mesh/sound resolves -> DEPENDENCIES_RESOLVED")
+	# Missing mesh, missing sound, missing texture (via packed .material!)
+	var d_mmesh := AssetIndex.inspect_odf_dependencies("miss_mesh.odf", w2_layered)
+	check(String(d_mmesh["inspectionStatus"]) == AssetIndex.INSPECT_DEPENDENCIES_UNVERIFIED and bool(d_mmesh["meshMissing"]),
+		"W2 packed ODF with missing mesh -> DEPENDENCIES_UNVERIFIED + meshMissing=true")
+	var d_msnd := AssetIndex.inspect_odf_dependencies("miss_snd.odf", w2_layered)
+	check(String(d_msnd["inspectionStatus"]) == AssetIndex.INSPECT_DEPENDENCIES_UNVERIFIED and "absent_snd.wav" in (d_msnd["missingSounds"] as Array),
+		"W2 packed ODF with missing sound -> DEPENDENCIES_UNVERIFIED + missingSounds")
+	var d_mtex := AssetIndex.inspect_odf_dependencies("miss_tex.odf", w2_layered)
+	check(String(d_mtex["inspectionStatus"]) == AssetIndex.INSPECT_DEPENDENCIES_UNVERIFIED and "absent_tex.dds" in (d_mtex["missingTextures"] as Array),
+		"W2 packed ODF + zlib-packed .material with missing diffuse texture -> DEPENDENCIES_UNVERIFIED + missingTextures")
+	# Loose vs packed precedence inside same root
+	var d_both := AssetIndex.inspect_odf_dependencies("both_odf.odf", w2_layered)
+	check(not bool(d_both["packed"]) and String(d_both["unitName"]) == "FROM_LOOSE",
+		"W2 same ODF loose and packed in same root: loose takes precedence over packed")
+	# Cross-root override precedence
+	var w2_ovr_layered := AssetIndex.index_layered_roots([
+		{"path": override_top, "source": "mod_top", "recurse": true, "volatile": false},
+		{"path": pak_test_root, "source": "base", "recurse": true, "volatile": false},
+	])
+	var d_ovr := AssetIndex.inspect_odf_dependencies("packed_child.odf", w2_ovr_layered)
+	check(String(d_ovr["source"]) == "mod_top" and String(d_ovr["unitName"]) == "TOP_ROOT_WINNER",
+		"W2 higher root overrides lower packed ODF cleanly")
+	# Duplicate entry inside PAK detected
+	var good_dir_info := AssetIndex.read_docp_pak_directory(good_pak)
+	check("dup_unit.odf" in (good_dir_info["duplicateEntries"] as Array),
+		"W2 duplicate entry inside DOCP .pak is detected and recorded")
+
+	# Corrupt offset, truncated archive, unsupported compression, oversized entry
+	var bad_pak_dir := scratch.path_join("w2-bad-paks")
+	DirAccess.make_dir_recursive_absolute(bad_pak_dir)
+	var corrupt_off_pak := bad_pak_dir.path_join("corrupt_offset.pak")
+	_write_docp_v2_raw_entry(corrupt_off_pak, "bad_off.odf", 999999, 64, 64, PackedByteArray())
+	var r_corrupt := AssetIndex.read_docp_pak_entry(corrupt_off_pak, "bad_off.odf")
+	check(not bool(r_corrupt["ok"]) and String(r_corrupt["status"]) == AssetIndex.INSPECT_ENTRY_CORRUPT,
+		"W2 corrupt DOCP entry offset -> ENTRY_CORRUPT")
+
+	var trunc_pak := bad_pak_dir.path_join("truncated.pak")
+	var full_good := FileAccess.get_file_as_bytes(good_pak)
+	write_bytes(trunc_pak, full_good.slice(0, full_good.size() - 24))
+	var trunc_dir := AssetIndex.read_docp_pak_directory(trunc_pak)
+	check(bool(trunc_dir["truncated"]) and bool(trunc_dir["corrupt"]),
+		"W2 truncated DOCP archive is flagged truncated & corrupt")
+
+	var unsup_pak := bad_pak_dir.path_join("unsup_comp.pak")
+	var fake_comp := PackedByteArray([0x04, 0x22, 0x4d, 0x18, 0x00, 0x00, 0x00, 0x00]) # LZ4 magic, not zlib!
+	_write_docp_v2_raw_entry(unsup_pak, "lz4_unit.odf", 32, fake_comp.size(), 128, fake_comp)
+	var r_unsup := AssetIndex.read_docp_pak_entry(unsup_pak, "lz4_unit.odf")
+	check(not bool(r_unsup["ok"]) and String(r_unsup["status"]) == AssetIndex.INSPECT_ENTRY_INDEXED and String(r_unsup["compression"]) == "unsupported",
+		"W2 unsupported PAK compression -> ENTRY_INDEXED (not false verified, no crash)")
+
+	var over_pak := bad_pak_dir.path_join("oversized.pak")
+	var tiny_payload := PackedByteArray([0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01])
+	_write_docp_v2_raw_entry(over_pak, "huge_unit.odf", 32, tiny_payload.size(), 16 * 1024 * 1024, tiny_payload)
+	var r_over := AssetIndex.read_docp_pak_entry(over_pak, "huge_unit.odf")
+	check(not bool(r_over["ok"]) and String(r_over["status"]) == AssetIndex.INSPECT_ENTRY_INDEXED,
+		"W2 oversized PAK entry (>4 MiB) refused safely -> ENTRY_INDEXED")
+
+	# =========================================================================
+	# 7. WAVE 2 (P0): Asset Cache Invalidation Matrix (13 scenarios)
+	# =========================================================================
+	var cinv_root := scratch.path_join("w2-cache-inv")
+	DirAccess.make_dir_recursive_absolute(cinv_root)
+	write_text(cinv_root.path_join("u1.odf"), "[GameObjectClass]\nunitName = \"AAA\"\n")
+	write_text(cinv_root.path_join("u1.material"), "[Texture]\ndiffuse = \"a.dds\"\n")
+	write_bytes(cinv_root.path_join("u1.msh"), PackedByteArray([1, 2, 3, 4]))
+	write_bytes(cinv_root.path_join("CustomMode.dll"), "DLL_BODY_V1".to_utf8_buffer())
+	_write_docp_v2_pak(cinv_root.path_join("pack.pak"), [{"name": "p1.odf", "bytes": "[GameObjectClass]\nunitName = \"P1\"\n".to_ascii_buffer(), "compress": false}])
+
+	var st0 := AssetIndex.compute_root_stamp(cinv_root, true)
+	var _ci0 := AssetIndex.get_root_index(cinv_root, true, false)
+	# 1) Same-size modified ODF (including same-second timestamp collision!)
+	write_text(cinv_root.path_join("u1.odf"), "[GameObjectClass]\nunitName = \"BBB\"\n")
+	var st1 := AssetIndex.compute_root_stamp(cinv_root, true)
+	check(st1 != st0, "W2.cache same-size + same-second modified ODF invalidates root stamp immediately")
+	# 2) Existing MATERIAL changed (same size)
+	write_text(cinv_root.path_join("u1.material"), "[Texture]\ndiffuse = \"b.dds\"\n")
+	var st2 := AssetIndex.compute_root_stamp(cinv_root, true)
+	check(st2 != st1, "W2.cache existing .material same-size change invalidates root stamp")
+	# 3) Existing DLL replaced (same size) + live SHA-256 verification
+	var dll_before := AssetIndex.inspect_dll_identity("CustomMode.dll", [cinv_root], "custom:test", "", "custom-dll", "CustomMode.dll")
+	write_bytes(cinv_root.path_join("CustomMode.dll"), "DLL_BODY_V2".to_utf8_buffer())
+	var st3 := AssetIndex.compute_root_stamp(cinv_root, true)
+	var dll_after := AssetIndex.inspect_dll_identity("CustomMode.dll", [cinv_root], "custom:test", "", "custom-dll", "CustomMode.dll")
+	check(st3 != st2 and String(dll_before["sha256"]) != String(dll_after["sha256"]),
+		"W2.cache existing DLL same-size replacement invalidates stamp and re-hashes live bytes")
+	# 4) Existing mesh replaced (same size)
+	write_bytes(cinv_root.path_join("u1.msh"), PackedByteArray([9, 8, 7, 6]))
+	var st4 := AssetIndex.compute_root_stamp(cinv_root, true)
+	check(st4 != st3, "W2.cache existing .msh same-size replacement invalidates stamp")
+	# 5) File renamed
+	DirAccess.rename_absolute(cinv_root.path_join("u1.msh"), cinv_root.path_join("u2.msh"))
+	var st5 := AssetIndex.compute_root_stamp(cinv_root, true)
+	check(st5 != st4 and (AssetIndex.get_root_index(cinv_root, true, false)["files"] as Dictionary).has("u2.msh"),
+		"W2.cache file rename invalidates stamp and updates index")
+	# 6) File deleted
+	DirAccess.remove_absolute(cinv_root.path_join("u2.msh"))
+	var st6 := AssetIndex.compute_root_stamp(cinv_root, true)
+	check(st6 != st5 and not (AssetIndex.get_root_index(cinv_root, true, false)["files"] as Dictionary).has("u2.msh"),
+		"W2.cache file deletion invalidates stamp and removes entry")
+	# 7) File added
+	write_text(cinv_root.path_join("added.odf"), "[GameObjectClass]\n")
+	var st7 := AssetIndex.compute_root_stamp(cinv_root, true)
+	check(st7 != st6 and (AssetIndex.get_root_index(cinv_root, true, false)["odfs"] as Dictionary).has("added.odf"),
+		"W2.cache file addition invalidates stamp")
+	# 8) PAK replaced with same filename (same size)
+	_write_docp_v2_pak(cinv_root.path_join("pack.pak"), [{"name": "p2.odf", "bytes": "[GameObjectClass]\nunitName = \"P2\"\n".to_ascii_buffer(), "compress": false}])
+	var st8 := AssetIndex.compute_root_stamp(cinv_root, true)
+	check(st8 != st7 and (AssetIndex.get_root_index(cinv_root, true, false)["odfs"] as Dictionary).has("p2.odf"),
+		"W2.cache PAK replaced with same filename invalidates stamp and reflects p2.odf")
+	# 9) Explicit invalidate_root + map-local override
+	AssetIndex.invalidate_root(cinv_root)
+	var misses_before := int(AssetIndex.cache_stats()["misses"])
+	var _rebuilt := AssetIndex.get_root_index(cinv_root, true, false)
+	check(int(AssetIndex.cache_stats()["misses"]) == misses_before + 1,
+		"W2.cache invalidate_root forces fresh rebuild (superseded worker safety)")
+
+	# =========================================================================
+	# 8. WAVE 5 (P1): Custom DLL Basename Collision -> AMBIGUOUS (Section 7)
+	# =========================================================================
+	var col_ws := scratch.path_join("w5-dll-collision")
+	write_text(col_ws.path_join("700001/700001.ini"), "[WORKSHOP]\nmodName = \"Alpha Mod\"\nmodType = \"config\"\n")
+	write_bytes(col_ws.path_join("700001/SharedCustom.dll"), "ALPHA_SHARED_DLL_BYTES".to_utf8_buffer())
+	write_text(col_ws.path_join("700001/alpha_only.odf"), "[GameObjectClass]\nclassLabel = \"wingman\"\n")
+	write_text(col_ws.path_join("700002/700002.ini"), "[WORKSHOP]\nmodName = \"Beta Mod\"\nmodType = \"config\"\n")
+	write_bytes(col_ws.path_join("700002/SharedCustom.dll"), "BETA_SHARED_DLL_BYTES!".to_utf8_buffer())
+	write_text(col_ws.path_join("700002/beta_only.odf"), "[GameObjectClass]\nclassLabel = \"wingman\"\n")
+	var col_reg := ModRegistry.new()
+	col_reg.discover_installed(synth_game, "", col_ws)
+
+	var col_map_path := patch_map_odf_and_dll(blank_bzn, scratch.path_join("w5-col-map"), "ivtank", "SharedCustom.dll")
+	var col_pkg := Document.new()
+	check(col_pkg.open(col_map_path), "W5 open map referencing colliding SharedCustom.dll")
+	var col_det := ModRegistry.detect_map_profiles(col_pkg.package, col_reg)
+	check(String(col_det["detectionState"]) == "AMBIGUOUS"
+		and bool(col_det["ambiguousCollision"])
+		and String(col_det["recommendedMod"]) == "custom:unknown"
+		and (col_det["collidingMods"] as Array).size() == 2,
+		"W5 two custom mods sharing SharedCustom.dll basename -> AMBIGUOUS (never first mod with HIGH confidence)")
+
+	# Disambiguate via map-local DLL SHA-256 matching Beta Mod!
+	write_bytes(col_map_path.get_base_dir().path_join("SharedCustom.dll"), "BETA_SHARED_DLL_BYTES!".to_utf8_buffer())
+	var col_det_hash := ModRegistry.detect_map_profiles(col_pkg.package, col_reg)
+	check(String(col_det_hash["recommendedMod"]) == "custom:ws-700002" and not bool(col_det_hash["ambiguousCollision"]),
+		"W5 map-local DLL SHA-256 uniquely disambiguates colliding SharedCustom.dll to Beta Mod")
+	DirAccess.remove_absolute(col_map_path.get_base_dir().path_join("SharedCustom.dll"))
+
+	# Disambiguate via unique ODF origin matching Alpha Mod!
+	var col_alpha_path := patch_map_odf_and_dll(blank_bzn, scratch.path_join("w5-col-alpha-map"), "alpha_only", "SharedCustom.dll")
+	var col_alpha_doc := Document.new()
+	check(col_alpha_doc.open(col_alpha_path), "W5 open map with alpha_only + SharedCustom.dll")
+	var col_det_odf := ModRegistry.detect_map_profiles(col_alpha_doc.package, col_reg)
+	check(String(col_det_odf["recommendedMod"]) == "custom:ws-700001" and not bool(col_det_odf["ambiguousCollision"]),
+		"W5 positive ODF origin uniquely disambiguates colliding SharedCustom.dll to Alpha Mod")
+
 	editor.free()
-	print("Compatibility truth, dependency stack & Playtest decoupling checks complete.")
+	print("Compatibility truth, DLL identity, DOCP v2 inspection, cache invalidation & collision checks complete.")
 	print("FAILURES: %d" % failures)
 	quit(0 if failures == 0 else 1)
+
+
+func _write_docp_v2_pak(path: String, items: Array) -> void:
+	var data_buf := PackedByteArray()
+	data_buf.resize(56)
+	var metas: Array[Dictionary] = []
+	for item_v in items:
+		var item: Dictionary = item_v
+		var raw: PackedByteArray = item["bytes"]
+		var payload := raw.compress(FileAccess.COMPRESSION_DEFLATE) if bool(item.get("compress", false)) else raw
+		var offset := data_buf.size()
+		data_buf.append_array(payload)
+		metas.append({
+			"name": String(item["name"]),
+			"flags": 1 if bool(item.get("compress", false)) else 0,
+			"offset": offset,
+			"packed": payload.size(),
+			"unpacked": raw.size(),
+		})
+	var dir_offset := data_buf.size()
+	var dir_buf := PackedByteArray()
+	for m in metas:
+		var nb := String(m["name"]).to_ascii_buffer()
+		var hdr := PackedByteArray()
+		hdr.resize(5)
+		hdr.encode_u32(0, int(m.get("flags", 0)))
+		hdr[4] = nb.size()
+		dir_buf.append_array(hdr)
+		dir_buf.append_array(nb)
+		var tail := PackedByteArray()
+		tail.resize(12)
+		tail.encode_u32(0, int(m["offset"]))
+		tail.encode_u32(4, int(m["packed"]))
+		tail.encode_u32(8, int(m["unpacked"]))
+		dir_buf.append_array(tail)
+	var full := PackedByteArray()
+	full.append_array(data_buf)
+	full.append_array(dir_buf)
+	var magic := "DOCP".to_ascii_buffer()
+	for i in 4:
+		full[i] = magic[i]
+	full.encode_u32(4, 2)
+	full.encode_u32(12, dir_offset)
+	full.encode_u32(16, metas.size())
+	full.encode_u32(20, dir_offset)
+	write_bytes(path, full)
+
+
+func _write_docp_v2_raw_entry(path: String, entry_name: String, offset: int, packed: int, unpacked: int, payload: PackedByteArray) -> void:
+	var full := PackedByteArray()
+	full.resize(32)
+	full.append_array(payload)
+	var dir_offset := full.size()
+	var nb := entry_name.to_ascii_buffer()
+	var hdr := PackedByteArray()
+	hdr.resize(5)
+	hdr.encode_u32(0, 0)
+	hdr[4] = nb.size()
+	full.append_array(hdr)
+	full.append_array(nb)
+	var tail := PackedByteArray()
+	tail.resize(12)
+	tail.encode_u32(0, offset)
+	tail.encode_u32(4, packed)
+	tail.encode_u32(8, unpacked)
+	full.append_array(tail)
+	var magic := "DOCP".to_ascii_buffer()
+	for i in 4:
+		full[i] = magic[i]
+	full.encode_u32(4, 2)
+	full.encode_u32(16, 1)
+	full.encode_u32(20, dir_offset)
+	write_bytes(path, full)

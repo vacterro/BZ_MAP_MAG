@@ -103,7 +103,7 @@ static func evaluate(subject: Object, registry: ModRegistry, target_mod: String 
 	var writer_caps := Layouts.capabilities(layout_id)
 	var map_path := String(pkg.source_path) if pkg != null and "source_path" in pkg else ""
 	var map_folder := String(env.get("mapFolder", ""))
-	var current_dll := String(pkg.mission_dll) if pkg != null and "mission_dll" in pkg else ""
+	var current_dll := String(subject.effective_mission_dll()) if is_doc and subject.has_method("effective_mission_dll") else (String(pkg.mission_dll) if pkg != null and "mission_dll" in pkg else "")
 	var obj_count := int(subject.object_count()) if is_doc else ((pkg.objects as Array).size() if pkg != null and "objects" in pkg else 0)
 	var path_count := (subject.path_indices() as Array).size() if is_doc else ((pkg.paths as Array).size() if pkg != null and "paths" in pkg else 0)
 
@@ -284,13 +284,23 @@ static func evaluate(subject: Object, registry: ModRegistry, target_mod: String 
 		# Real asset dependency inspection against active target environment
 		var dep_info := AssetIndex.inspect_odf_dependencies(clean, layered_index)
 		if bool(dep_info["found"]):
+			var insp_st := String(dep_info.get("inspectionStatus", AssetIndex.INSPECT_ENTRY_INDEXED))
 			resolved_odfs[odf_key] = {
 				"path": String(dep_info["path"]),
 				"source": String(dep_info["source"]),
 				"packed": bool(dep_info["packed"]),
+				"inspectionStatus": insp_st,
+				"entryIndexed": bool(dep_info.get("entryIndexed", true)),
+				"contentReadable": bool(dep_info.get("contentReadable", false)),
+				"contentParsed": bool(dep_info.get("contentParsed", false)),
+				"dependenciesResolved": bool(dep_info.get("dependenciesResolved", false)),
+				"readError": String(dep_info.get("readError", "")),
+				"unverifiedReasons": dep_info.get("unverifiedReasons", []),
+				"provenance": dep_info.get("provenance", {}),
 				"classLabel": String(dep_info["classLabel"]),
 				"geometryName": String(dep_info["geometryName"]),
 				"meshPath": String(dep_info["meshPath"]),
+				"parentChain": dep_info.get("parentChain", []),
 			}
 			if not String(dep_info["meshPath"]).is_empty():
 				resolved_meshes[odf_key] = String(dep_info["meshPath"])
@@ -330,11 +340,12 @@ static func evaluate(subject: Object, registry: ModRegistry, target_mod: String 
 	var dll_roots: Array[String] = []
 	for dr_v in env.get("missionDllRoots", []):
 		dll_roots.append(String(dr_v))
-	var dll_identity := AssetIndex.inspect_dll_identity(effective_dll, dll_roots, eff_mod)
-	dll_identity["expected"] = expected_dll
+	var dll_identity := AssetIndex.inspect_dll_identity(effective_dll, dll_roots, eff_mod, expected_dll, eff_mission, current_dll)
 	var dll_change := ""
 	if not expected_dll.is_empty() and current_dll.nocasecmp_to(expected_dll) != 0:
 		dll_change = "%s -> %s" % [current_dll if not current_dll.is_empty() else "(none)", expected_dll]
+	elif eff_mission == "blank" and not current_dll.is_empty():
+		dll_change = "%s -> (none)" % current_dll
 
 	var lua_resolved := ""
 	var lua_missing := ""
@@ -514,17 +525,45 @@ static func evaluate(subject: Object, registry: ModRegistry, target_mod: String 
 	if not missing_textures.is_empty():
 		warnings.append("Missing material texture(s): %s." % ", ".join(missing_textures.slice(0, 6)))
 
+	# Summarize ODF inspection depth honestly (never equate ENTRY_INDEXED with full verification)
+	var partial_odfs: Array[String] = []
+	var corrupt_odfs: Array[String] = []
+	var resolved_full_count := 0
+	for rk: String in resolved_odfs:
+		var rrec: Dictionary = resolved_odfs[rk]
+		var ist := String(rrec.get("inspectionStatus", AssetIndex.INSPECT_ENTRY_INDEXED))
+		if ist == AssetIndex.INSPECT_DEPENDENCIES_RESOLVED:
+			resolved_full_count += 1
+		elif ist == AssetIndex.INSPECT_ENTRY_CORRUPT:
+			corrupt_odfs.append(rk)
+			warnings.append("Corrupt packed/loose ODF entry '%s': %s" % [rk, String(rrec.get("readError", "corrupt entry"))])
+		else:
+			partial_odfs.append(rk)
+			warnings.append("Partial ODF inspection for '%s' [%s]: %s" % [rk, ist, "; ".join(rrec.get("unverifiedReasons", []))])
+	if not corrupt_odfs.is_empty():
+		if validation_status == PLAYTEST_READY:
+			validation_status = PLAYTEST_MISSING_ASSETS
+		refusal_reasons.append("Corrupt asset entry detected for placed ODF(s): %s." % ", ".join(corrupt_odfs))
+
 	# Check mission DLL identity & Lua companion (unless /noscript)
 	if not without_mission_script:
 		var dll_st := String(dll_identity["status"])
-		if dll_st == "MISSING":
+		if dll_st == AssetIndex.DLL_STATUS_MISSING:
 			if validation_status == PLAYTEST_READY:
 				validation_status = PLAYTEST_MISSING_DLL
 			refusal_reasons.append(String(dll_identity["detail"]))
-		elif dll_st in ["HASH_MISMATCH", "HASH_UNVERIFIED"]:
+		elif dll_st in [AssetIndex.DLL_STATUS_HASH_MISMATCH, AssetIndex.DLL_STATUS_DLL_NAME_MISMATCH, AssetIndex.DLL_STATUS_MISSION_PROFILE_MISMATCH]:
 			if validation_status == PLAYTEST_READY:
 				validation_status = PLAYTEST_MISSION_UNVERIFIED
 			refusal_reasons.append(String(dll_identity["detail"]))
+		elif dll_st == AssetIndex.DLL_STATUS_HASH_UNVERIFIED:
+			if validation_status == PLAYTEST_READY:
+				validation_status = PLAYTEST_MISSION_UNVERIFIED if eff_mod in ["stock", "vsr", "vrv"] else PLAYTEST_UNKNOWN
+			refusal_reasons.append(String(dll_identity["detail"]))
+		elif not dll_change.is_empty():
+			if validation_status == PLAYTEST_READY:
+				validation_status = PLAYTEST_MISSION_UNVERIFIED
+			refusal_reasons.append("Mission DLL mismatch (%s): BZN mission DLL does not match selected mission profile '%s'." % [dll_change, eff_mission])
 		if not lua_missing.is_empty():
 			if validation_status == PLAYTEST_READY:
 				validation_status = PLAYTEST_MISSING_ASSETS
@@ -538,6 +577,18 @@ static func evaluate(subject: Object, registry: ModRegistry, target_mod: String 
 			if validation_status == PLAYTEST_READY:
 				validation_status = PLAYTEST_MISSION_UNVERIFIED
 			refusal_reasons.append("Custom mission DLL '%s' has unverified runtime semantics." % effective_dll)
+
+	var full_deps_verified := missing_odfs.is_empty() and partial_odfs.is_empty() and corrupt_odfs.is_empty() and missing_meshes.is_empty() and missing_textures.is_empty() and missing_sounds.is_empty() and (not resolved_odfs.is_empty() or entries.is_empty())
+	var inspection_summary := {
+		"status": "FULL_DEPENDENCIES_VERIFIED" if full_deps_verified else ("ENTRY_CORRUPT" if not corrupt_odfs.is_empty() else ("PARTIAL_UNVERIFIED" if not partial_odfs.is_empty() or not missing_meshes.is_empty() or not missing_textures.is_empty() or not missing_sounds.is_empty() else "MISSING_ASSETS")),
+		"fullDependenciesVerified": full_deps_verified,
+		"resolvedCount": resolved_full_count,
+		"partialCount": partial_odfs.size(),
+		"corruptCount": corrupt_odfs.size(),
+		"partialOdfs": partial_odfs,
+		"corruptOdfs": corrupt_odfs,
+		"pakDiagnostics": layered_index.get("pakDiagnostics", []),
+	}
 
 	# Determine detected/suggested mod honestly
 	var detected_mod := "vrv" if not vrv_odfs.is_empty() else ("vsr" if not vsr_odfs.is_empty() else ("custom:unknown" if not unknown_odfs.is_empty() else "stock"))
@@ -592,6 +643,7 @@ static func evaluate(subject: Object, registry: ModRegistry, target_mod: String 
 			"meshes": resolved_meshes,
 			"sounds": resolved_sounds,
 			"luaScript": lua_resolved,
+			"inspectionSummary": inspection_summary,
 		},
 		"missingDependencies": missing_deps_block,
 		"ambiguousOverrides": {

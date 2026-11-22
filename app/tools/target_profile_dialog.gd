@@ -377,20 +377,39 @@ func show_selected_mod_detail() -> void:
 		mod_detail.text = ""
 		return
 	var p := registry.get_profile(mid)
+	var diag := registry.get_mod_diagnostic(mid, game_dir, vrv_dir)
 	var url := String(p.get("homepage", ""))
 	workshop_btn.disabled = not url.begins_with("https://steamcommunity.com/")
 	toggle_mod_btn.disabled = (mid == "stock")
 	var lines: Array[String] = [
-		"ID: %s" % mid,
+		"ID: %s  |  Playtest: %s" % [mid, String(diag["playtestStatus"])],
 		"Name: %s" % String(p.get("displayName", mid)),
-		"Type: %s | Installed: %s" % [String(p.get("modType", "")), "yes" if bool(p.get("installed", false)) else "no"],
+		"Type: %s | Installed: %s | Enabled: %s" % [
+			String(p.get("modType", "")),
+			"yes" if bool(diag["installed"]) else "no",
+			"yes" if bool(diag["enabled"]) else "NO"],
 		"Workshop ID: %s" % (String(p.get("workshopId", "")) if not String(p.get("workshopId", "")).is_empty() else "(none)"),
 		"Root: %s" % (String(p.get("gameRoot", "")) if not String(p.get("gameRoot", "")).is_empty() else "(game install)"),
 		"Asset roots (%d): %s" % [(p.get("assetRoots", []) as Array).size(), ", ".join(p.get("assetRoots", []))],
 		"Mission DLLs (%d): %s" % [(p.get("missionDlls", []) as Array).size(), ", ".join(p.get("missionDlls", []))],
 		"Dependencies: %s" % (", ".join(p.get("dependencies", [])) if not (p.get("dependencies", []) as Array).is_empty() else "(none)"),
-		"Missing deps: %s" % (", ".join(p.get("missingDependencies", [])) if not (p.get("missingDependencies", []) as Array).is_empty() else "(none)"),
 	]
+	var missing_d: Array = diag.get("missingDependencies", [])
+	var disabled_d: Array = diag.get("disabledDependencies", [])
+	var cycles_d: Array = diag.get("dependencyCycles", [])
+	if not missing_d.is_empty():
+		lines.append("[WARN] Missing dependency ID(s): " + ", ".join(missing_d))
+		for ud_v in diag.get("unresolvedDetails", []):
+			var ud: Dictionary = ud_v
+			var note := String(ud.get("note", ""))
+			lines.append("  • %s%s" % [String(ud["workshopId"]), (" — " + note) if not note.is_empty() else ""])
+	if not disabled_d.is_empty():
+		lines.append("[WARN] Disabled dependency: " + ", ".join(disabled_d))
+	if not cycles_d.is_empty():
+		lines.append("[ERR] Dependency cycle: " + ", ".join(cycles_d))
+	for imp_v in diag.get("impactedCapabilities", []):
+		lines.append("Impact: " + String(imp_v))
+	lines.append("Safe editing: " + ", ".join(diag.get("safeEditingOperations", [])))
 	mod_detail.text = "\n".join(lines)
 
 

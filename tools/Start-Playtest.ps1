@@ -181,15 +181,41 @@ if ($launchRoute -eq 'convert') {
 
 $odfs = if ($package.PSObject.Properties.Name -contains 'odfs') { @($package.odfs) } else { @() }
 $compatResult = if ($package.PSObject.Properties.Name -contains 'compatibility') { $package.compatibility } else { $null }
-$assetPlan = Get-PlaytestAssetPlan $Game $Mission $AssetProfile $VrvSource ([bool]$WithoutMissionScript) $AssetRoots $odfs '' $ModProfile $Converter
+$assetPlan = Get-PlaytestAssetPlan $Game $Mission $AssetProfile $VrvSource ([bool]$WithoutMissionScript) $AssetRoots $odfs '' $ModProfile $Converter $MissionProfile
 if ($ValidateOnly) {
-    return $assetPlan | Add-Member -PassThru -NotePropertyMembers @{
+    return $assetPlan | Add-Member -Force -PassThru -NotePropertyMembers @{
         LaunchRoute = $launchRoute
         BznVersion = $bznVersion
         MissionProfile = $MissionProfile
         KeepRequested = [bool]$KeepBznLayout
         VrvConverterRequired = ($launchRoute -eq 'convert')
         Compatibility = $compatResult
+    }
+}
+if ($null -ne $compatResult) {
+    $compatStatus = if ($compatResult.PSObject.Properties.Name -contains 'validationStatus') { [string]$compatResult.validationStatus } else { '' }
+    # Trust the contract's terminal refusal states. MISSING_ASSETS/UNKNOWN are
+    # intentionally not gated here: the PowerShell asset plan resolves those
+    # from the live install (a prepared run may legitimately supply them).
+    if ($compatStatus -in 'MISSION_UNVERIFIED','MISSING_DLL','FORMAT_UNSUPPORTED','ENGINE_UNVERIFIED') {
+        $reasons = if ($compatResult.PSObject.Properties.Name -contains 'refusalReasons') { (@($compatResult.refusalReasons) -join '; ') } else { '' }
+        throw "Refusing Playtest due to compatibility validation [$compatStatus]: $reasons"
+    }
+}
+if (-not $WithoutMissionScript) {
+    if ($null -ne $assetPlan.DllIdentity) {
+        $dllStatus = $assetPlan.DllIdentity.Status
+        if ($dllStatus -in 'DLL_NAME_MISMATCH','MISSION_PROFILE_MISMATCH','HASH_MISMATCH','MISSING' -or
+            ($dllStatus -eq 'HASH_UNVERIFIED' -and $ModProfile -in 'stock','vsr','vrv')) {
+            throw "Refusing Playtest due to mission DLL identity failure [$dllStatus]: $($assetPlan.DllIdentity.Detail)"
+        }
+    }
+    if ($null -ne $compatResult -and ($compatResult.PSObject.Properties.Name -contains 'dllIdentity') -and $null -ne $compatResult.dllIdentity) {
+        $cDllStatus = $compatResult.dllIdentity.status
+        if ($cDllStatus -in 'DLL_NAME_MISMATCH','MISSION_PROFILE_MISMATCH','HASH_MISMATCH','MISSING' -or
+            ($cDllStatus -eq 'HASH_UNVERIFIED' -and $ModProfile -in 'stock','vsr','vrv')) {
+            throw "Refusing Playtest due to compatibility DLL identity failure [$cDllStatus]: $($compatResult.dllIdentity.detail)"
+        }
     }
 }
 if (Get-Process battlezone2 -ErrorAction SilentlyContinue) { throw 'Close your current Battlezone session before Playtest.' }
