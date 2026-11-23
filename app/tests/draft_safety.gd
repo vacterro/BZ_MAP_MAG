@@ -32,6 +32,13 @@ func check(condition: bool, label: String) -> void:
 		printerr("FAIL: " + label)
 
 
+func _sculpt_snapshot_for_test(doc: Document) -> Array:
+	var state: Array = []
+	for layer in doc.sculpt_layers:
+		state.append((layer as Dictionary).duplicate(true))
+	return state
+
+
 func delta_at(doc: Document, index: int) -> float:
 	for layer_v in doc.sculpt_layers:
 		var layer: Dictionary = layer_v
@@ -142,6 +149,9 @@ func run() -> void:
 	test_sculpt_mask_strict_dab_validation(args[0])
 	test_empty_foreign_preview_admission(args[0])
 	test_sculpt_stroke_reentrancy(args[0])
+	test_empty_sculpt_color_preview_refusal(args[0])
+	test_empty_color_sculpt_opacity_refusal(args[0])
+	test_empty_sculpt_color_opacity_refusal(args[0])
 	print("FAILURES: %d" % failures)
 	quit(0 if failures == 0 else 1)
 
@@ -2183,3 +2193,133 @@ func test_sculpt_mask_two_region_continuity(fixture: String) -> void:
 	doc.redo()
 	check(absf(terrain.heights[sample_b] - expected_b) < 0.01, "dual: redo restores region B")
 	check(absf(terrain.heights[sample_a] - expected_a) < 0.01, "dual: region A survives redo")
+
+
+## T-56 P0: an empty but active Sculpt composition owns the preview. Color
+## Preview must not read has_preview() as permission to take that owner; refusal
+## must leave every bit of state alone, and an explicit clear is the safe path.
+func test_empty_sculpt_color_preview_refusal(fixture: String) -> void:
+	var doc := fresh_document(fixture, "empty-sculpt-color-preview")
+	var terrain: Terrain = doc.package.terrain
+	var sample := 200 * terrain.dimensions.x + 200
+	check(doc.add_sculpt_layer() == 0, "empty-sculpt: add sculpt layer")
+	check(doc.sculpt_dab(Vector2(220.0, 220.0), 8.0, 20.0, Document.BrushShape.CIRCLE),
+		"empty-sculpt: keep a real sculpt delta elsewhere")
+	check(doc.add_sculpt_mask(0, 0.0), "empty-sculpt: default-zero mask hides the delta")
+	check(doc.sculpt_preview(), "empty-sculpt: compose masked sculpt preview")
+	check(doc.has_active_preview_context() and not doc.has_preview(),
+		"empty-sculpt: active composition has no pixel buffer")
+	check(doc.preview_owner == "sculpt", "empty-sculpt: sculpt owns the empty context")
+	check(doc.add_color_layer() == 0, "empty-sculpt: add color layer")
+	(doc.color_layers[0] as Dictionary)["samples"] = {sample: {"rgb": 0xff8080, "coverage": 1.0}}
+	var history_before := doc.undo_stack.size()
+	var revision_before := doc.edit_revision
+	var terrain_before := terrain.encode(doc.edits)
+	var before_preview: Dictionary = terrain.material_previews.duplicate(true)
+	check(not doc.color_preview(), "empty-sculpt: color preview refuses the empty foreign sculpt context")
+	check(doc.preview_owner == "sculpt" and doc._sculpt_composition_active,
+		"empty-sculpt: refusal keeps sculpt owner and active composition")
+	check(terrain.material_previews == before_preview, "empty-sculpt: refusal adds no color buffer")
+	check(doc.undo_stack.size() == history_before and doc.edit_revision == revision_before,
+		"empty-sculpt: refusal adds no history or edit revision")
+	check(terrain.encode(doc.edits) == terrain_before, "empty-sculpt: native terrain untouched")
+	check(not doc.show_color_preview({sample: 0xff0000}), "empty-sculpt: direct show also refuses")
+	check(doc.preview_owner == "sculpt", "empty-sculpt: direct refusal keeps owner")
+	doc.clear_preview()
+	check(doc.color_preview(), "empty-sculpt: explicit transition admits color preview")
+	check(doc.preview_owner == "color" and terrain.material_previews.has(Terrain.Layer.COLOR),
+		"empty-sculpt: transition publishes the color sample")
+	unwatch_material_refresh(doc)
+
+
+## T-56 P0: the mirror gap. An empty active Color composition must not be
+## silently consumed when a Sculpt Opacity gesture arms and stages a preview.
+## Refusal must leave the owner, layer, preview, gesture UID and history intact.
+func test_empty_color_sculpt_opacity_refusal(fixture: String) -> void:
+	var doc := fresh_document(fixture, "empty-color-sculpt-opacity")
+	var terrain: Terrain = doc.package.terrain
+	var sample := 200 * terrain.dimensions.x + 200
+	check(doc.add_sculpt_layer() == 0, "empty-color: add sculpt layer")
+	var sample_sculpt := 220 * terrain.dimensions.x + 220
+	var sculpt_state := _sculpt_snapshot_for_test(doc)
+	(sculpt_state[0] as Dictionary)["deltas"] = {sample_sculpt: 20.0}
+	check(doc._commit_sculpt_layers(sculpt_state, doc.active_sculpt_uid), "empty-color: stage sculpt delta")
+	var uid := int((doc.sculpt_layers[0] as Dictionary)["uid"])
+	check(doc.add_color_layer() == 0, "empty-color: add color layer")
+	check(doc.color_preview(), "empty-color: compose empty color layer")
+	# Stage the sculpt delta through the layer API: a real sculpt_dab would
+	# leave its own nonempty preview and mask the ownership defect under test.
+	check(doc.has_active_preview_context() and not doc.has_preview(),
+		"empty-color: active color composition has no pixel buffer")
+	check(doc.preview_owner == "color" and doc._color_composition_active,
+		"empty-color: color owns the empty context")
+	var history_before := doc.undo_stack.size()
+	var revision_before := doc.edit_revision
+	var terrain_before := terrain.encode(doc.edits)
+	var opacity_before := float((doc.sculpt_layers[0] as Dictionary)["opacity"])
+	check(not doc.begin_sculpt_opacity_preview(0), "empty-color: opacity gesture refuses the foreign empty context")
+	check(doc._sculpt_opacity_preview_uid == -1, "empty-color: refusal leaves no armed gesture UID")
+	check(doc.preview_owner == "color" and doc._color_composition_active,
+		"empty-color: refusal preserves color owner and composition")
+	check(not doc.preview_sculpt_layer_opacity(uid, 0.4),
+		"empty-color: staging without a gesture is refused")
+	check(doc.undo_stack.size() == history_before and doc.edit_revision == revision_before,
+		"empty-color: refusal adds no history or edit revision")
+	check(terrain.encode(doc.edits) == terrain_before, "empty-color: native terrain untouched")
+	check(is_equal_approx(float((doc.sculpt_layers[0] as Dictionary)["opacity"]), opacity_before),
+		"empty-color: committed layer opacity untouched")
+	doc.cancel_sculpt_opacity_preview()
+	check(doc.preview_owner == "color", "empty-color: cancel on a refused gesture changes nothing")
+	doc.clear_preview()
+	check(doc.begin_sculpt_opacity_preview(0), "empty-color: explicit transition arms the gesture")
+	check(doc.preview_sculpt_layer_opacity(uid, 0.4), "empty-color: staging after transition works")
+	check(doc.preview_owner == "sculpt" and doc.has_preview(), "empty-color: transition owns sculpt preview")
+	check(doc.commit_sculpt_opacity_preview(uid, 0.4), "empty-color: gesture commits")
+	check(is_equal_approx(float((doc.sculpt_layers[0] as Dictionary)["opacity"]), 0.4),
+		"empty-color: committed opacity applied")
+	check(doc.undo_stack.size() == history_before + 1, "empty-color: commit is one Undo")
+	unwatch_material_refresh(doc)
+
+
+## T-55: the last empty-composition ownership gap. An empty but active Sculpt
+## composition must not let a Color Opacity gesture arm or stage; refusal leaves
+## the gesture UID, owner, history and native state untouched until the context
+## is explicitly cleared.
+func test_empty_sculpt_color_opacity_refusal(fixture: String) -> void:
+	var doc := fresh_document(fixture, "empty-sculpt-color-opacity")
+	var terrain: Terrain = doc.package.terrain
+	var sample := 200 * terrain.dimensions.x + 200
+	check(doc.add_sculpt_layer() == 0, "empty-sculpt-op: add sculpt layer")
+	check(doc.sculpt_dab(Vector2(220.0, 220.0), 8.0, 20.0, Document.BrushShape.CIRCLE),
+		"empty-sculpt-op: keep a real sculpt delta elsewhere")
+	check(doc.add_sculpt_mask(0, 0.0), "empty-sculpt-op: default-zero mask hides the delta")
+	check(doc.sculpt_preview(), "empty-sculpt-op: compose masked sculpt preview")
+	check(doc.has_active_preview_context() and not doc.has_preview(),
+		"empty-sculpt-op: active sculpt composition has no pixel buffer")
+	check(doc.add_color_layer() == 0, "empty-sculpt-op: add color layer")
+	var uid := int((doc.color_layers[0] as Dictionary)["uid"])
+	var history_before := doc.undo_stack.size()
+	var revision_before := doc.edit_revision
+	var terrain_before := terrain.encode(doc.edits)
+	var mats_before: Dictionary = terrain.material_previews.duplicate(true)
+	check(not doc.begin_color_opacity_preview(0),
+		"empty-sculpt-op: begin refuses the foreign empty sculpt context")
+	check(doc._color_opacity_preview_uid == -1, "empty-sculpt-op: refusal leaves no armed gesture UID")
+	check(doc.preview_owner == "sculpt" and doc._sculpt_composition_active,
+		"empty-sculpt-op: refusal preserves sculpt owner and composition")
+	check(not doc.preview_color_layer_opacity(uid, 0.4), "empty-sculpt-op: staging without a gesture is refused")
+	check(doc.preview_owner == "sculpt" and terrain.material_previews == mats_before,
+		"empty-sculpt-op: refusal adds no color buffer")
+	check(doc.undo_stack.size() == history_before and doc.edit_revision == revision_before,
+		"empty-sculpt-op: refusal adds no history or edit revision")
+	check(terrain.encode(doc.edits) == terrain_before, "empty-sculpt-op: native terrain untouched")
+	doc.cancel_color_opacity_preview()
+	check(doc.preview_owner == "sculpt", "empty-sculpt-op: cancel on a refused gesture changes nothing")
+	doc.clear_preview()
+	check(doc.begin_color_opacity_preview(0), "empty-sculpt-op: explicit transition arms the gesture")
+	check(doc.preview_color_layer_opacity(uid, 0.4), "empty-sculpt-op: staging after transition works")
+	check(doc.commit_color_opacity_preview(uid, 0.4), "empty-sculpt-op: gesture commits")
+	check(is_equal_approx(float((doc.color_layers[0] as Dictionary)["opacity"]), 0.4),
+		"empty-sculpt-op: committed opacity applied")
+	check(doc.undo_stack.size() == history_before + 1, "empty-sculpt-op: commit is one Undo")
+	unwatch_material_refresh(doc)

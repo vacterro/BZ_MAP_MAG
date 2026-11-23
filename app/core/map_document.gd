@@ -1022,7 +1022,7 @@ func begin_color_opacity_preview(index: int) -> bool:
 		return fail("Finish the current stroke before editing color opacity.")
 	if _color_opacity_preview_uid >= 0:
 		return fail("Finish the current color opacity gesture first.")
-	if has_preview() and preview_owner != "color":
+	if has_active_preview_context() and preview_owner != "color":
 		return fail("Cancel the foreign preview before editing color opacity.")
 	_color_opacity_preview_uid = int((color_layers[index] as Dictionary)["uid"])
 	_color_opacity_preview_value = float((color_layers[index] as Dictionary)["opacity"])
@@ -1036,7 +1036,7 @@ func preview_color_layer_opacity(uid: int, value: float) -> bool:
 		return false
 	if not is_finite(value) or value < 0.0 or value > 1.0:
 		return false
-	if has_preview() and preview_owner != "color":
+	if has_active_preview_context() and preview_owner != "color":
 		return false
 	var index := color_index_by_uid(uid)
 	if index < 0:
@@ -1236,15 +1236,15 @@ func _update_color_live_preview(changed_indices: Array[int]) -> void:
 	show_color_preview(preview, repaint)
 
 
-## A Color preview is allowed only when no live stroke or foreign-tool preview
-## owns the document. An empty color dictionary is a valid composition result,
-## so this admission is independent of has_preview().
+## A Color preview is allowed only when no live stroke or foreign-tool context
+## owns the document. An empty composition still owns the preview, so admission
+## checks the semantic context instead of the presence of changed samples.
 func _admit_color_preview() -> bool:
 	if package == null or stroke_active:
 		return false
 	if color_stroke_active or _color_live_preview:
 		return true
-	return not has_preview() or preview_owner == "color"
+	return not has_active_preview_context() or preview_owner == "color"
 
 
 func show_color_preview(values: Dictionary, repaint: Dictionary = {}) -> bool:
@@ -1448,6 +1448,8 @@ func begin_sculpt_opacity_preview(index: int) -> bool:
 		return fail("Invalid sculpt layer opacity gesture.")
 	if has_active_edit_transaction():
 		return fail("Finish the current stroke before editing sculpt opacity.")
+	if has_active_preview_context() and preview_owner != "sculpt":
+		return fail("Cancel the foreign preview before editing sculpt opacity.")
 	_sculpt_opacity_preview_uid = int((sculpt_layers[index] as Dictionary)["uid"])
 	_sculpt_opacity_preview_value = float((sculpt_layers[index] as Dictionary)["opacity"])
 	_sculpt_opacity_restore_preview = has_preview() and preview_owner == "sculpt"
@@ -1464,7 +1466,7 @@ func preview_sculpt_layer_opacity(uid: int, value: float) -> bool:
 	var index := sculpt_index_by_uid(uid)
 	if index < 0:
 		return false
-	if has_preview() and preview_owner != "sculpt":
+	if has_active_preview_context() and preview_owner != "sculpt":
 		return false
 	_sculpt_opacity_preview_value = clampf(value, 0.0, 1.0)
 	var staged := _sculpt_snapshot()
