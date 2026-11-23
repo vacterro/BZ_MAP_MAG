@@ -186,6 +186,7 @@ var pending_path := ""
 var saved_edits := {}
 var saved_layers: Array = []
 var saved_sculpt_layers: Array = []
+var saved_color_layers: Array = []
 var saved_path_edits := {}
 var saved_object_edits := {}
 var saved_object_label_edits := {}
@@ -810,6 +811,7 @@ func _wire_workspace_signals() -> void:
 			workspace_state.active_preview_owner = "sculpt"
 			layers_panel.refresh()
 			report("Sculpt preview composed from %d layer(s). Native TER untouched until Bake." % document.sculpt_layers.size()))
+	layers_panel.color_layers_mutated.connect(func(msg: String): report(msg); sync_actions())
 	layers_panel.sculpt_bake_requested.connect(func():
 		if document != null and document.bake_sculpt_layers():
 			workspace_state.active_preview_owner = ""
@@ -1297,12 +1299,16 @@ func clear_incompatible_preview(next_owner: String) -> void:
 	if document == null:
 		return
 	var live_sculpt := document.sculpt_stroke_active and document.has_preview()
-	var active_preview := document.has_preview() or (studio.document == document and studio.worker.is_started())
+	var live_color := document.color_stroke_active and document.has_preview()
+	var active_preview := document.has_active_preview_context() or (studio.document == document and studio.worker.is_started())
 	if not active_preview:
 		return
-	if live_sculpt and next_owner == "brush":
+	if (live_sculpt or live_color) and next_owner == "brush":
 		return
-	if workspace_state.active_preview_owner == next_owner and not next_owner.is_empty():
+	# The document preview itself knows its true owner even when the workspace
+	# mirror has drifted: a compatible next owner must never clear it.
+	if (workspace_state.active_preview_owner == next_owner or document.preview_owner == next_owner) \
+			and not next_owner.is_empty():
 		return
 	clear_active_preview()
 
@@ -1416,6 +1422,15 @@ func activate_terrain_brush() -> void:
 	if document != null and document.sculpt_stroke_active:
 		document.cancel_sculpt_stroke()
 		paint_view = null
+	if document != null and document.sculpt_mask_stroke_active:
+		document.cancel_sculpt_mask_stroke()
+		paint_view = null
+	if document != null and document.color_stroke_active:
+		document.cancel_color_stroke()
+		paint_view = null
+	if document != null and document.color_mask_stroke_active:
+		document.cancel_color_mask_stroke()
+		paint_view = null
 	clear_incompatible_preview("brush")
 	leave_water_paint()
 	leave_object_tool()
@@ -1493,6 +1508,33 @@ func _shortcut_input(event: InputEvent) -> void:
 		paint_hold_elapsed = 0.0
 		layers_panel.refresh()
 		report("Sculpt stroke cancelled.")
+		get_viewport().set_input_as_handled()
+		return
+	if event.keycode == KEY_ESCAPE and document.sculpt_mask_stroke_active:
+		document.cancel_sculpt_mask_stroke()
+		paint_view = null
+		anchor = Vector2(-1, -1)
+		paint_hold_elapsed = 0.0
+		layers_panel.refresh()
+		report("Sculpt stroke cancelled.")
+		get_viewport().set_input_as_handled()
+		return
+	if event.keycode == KEY_ESCAPE and document.color_stroke_active:
+		document.cancel_color_stroke()
+		paint_view = null
+		anchor = Vector2(-1, -1)
+		paint_hold_elapsed = 0.0
+		layers_panel.refresh()
+		report("Color stroke cancelled.")
+		get_viewport().set_input_as_handled()
+		return
+	if event.keycode == KEY_ESCAPE and document.color_mask_stroke_active:
+		document.cancel_color_mask_stroke()
+		paint_view = null
+		anchor = Vector2(-1, -1)
+		paint_hold_elapsed = 0.0
+		layers_panel.refresh()
+		report("Color mask stroke cancelled.")
 		get_viewport().set_input_as_handled()
 		return
 	# When editing inside Nodes/NewMap/Settings, never leak terrain/object viewport shortcuts
@@ -1616,6 +1658,7 @@ func sync_actions() -> void:
 func has_unsaved_changes() -> bool:
 	return document != null and (document.edits != saved_edits or document.layers != saved_layers
 		or document.sculpt_layers != saved_sculpt_layers
+		or document.color_layers != saved_color_layers
 		or (studio.document == document and studio.has_uncommitted_draft())
 		or document.path_edits != saved_path_edits or document.asset_profile != saved_asset_profile
 		or document.engine_profile != saved_engine_profile or document.mod_profile != saved_mod_profile
@@ -1634,6 +1677,7 @@ func remember_saved_changes() -> void:
 	saved_edits = document.edits.duplicate()
 	saved_layers = document.layers.duplicate(true)
 	saved_sculpt_layers = document.sculpt_layers.duplicate(true)
+	saved_color_layers = document.color_layers.duplicate(true)
 	saved_path_edits = document.path_edits.duplicate(true)
 	saved_object_edits = document.object_edits.duplicate(true)
 	saved_object_label_edits = document.object_label_edits.duplicate()
@@ -1656,6 +1700,15 @@ func remember_saved_changes() -> void:
 func request_open(path: String) -> void:
 	if document != null and document.sculpt_stroke_active:
 		document.cancel_sculpt_stroke()
+		paint_view = null
+	if document != null and document.sculpt_mask_stroke_active:
+		document.cancel_sculpt_mask_stroke()
+		paint_view = null
+	if document != null and document.color_stroke_active:
+		document.cancel_color_stroke()
+		paint_view = null
+	if document != null and document.color_mask_stroke_active:
+		document.cancel_color_mask_stroke()
 		paint_view = null
 	finish_stroke()
 	if has_unsaved_changes():
@@ -1747,6 +1800,8 @@ func open_map(path: String, draft_payload: Dictionary = {}) -> bool:
 			document.layers_changed.disconnect(on_document_layers_changed)
 		if document.sculpt_layers_changed.is_connected(_on_document_sculpt_changed):
 			document.sculpt_layers_changed.disconnect(_on_document_sculpt_changed)
+		if document.color_layers_changed.is_connected(_on_document_color_changed):
+			document.color_layers_changed.disconnect(_on_document_color_changed)
 
 	leave_water_paint()
 	cancel_place_object(false)
@@ -1780,6 +1835,7 @@ func open_map(path: String, draft_payload: Dictionary = {}) -> bool:
 	document.environment_changed.connect(on_document_environment_changed)
 	document.layers_changed.connect(on_document_layers_changed)
 	document.sculpt_layers_changed.connect(_on_document_sculpt_changed)
+	document.color_layers_changed.connect(_on_document_color_changed)
 	workspace_state.select_objects()
 	top.bind(document)
 	scene_view.bind(document)
@@ -2000,6 +2056,14 @@ func _on_document_sculpt_changed(_uid: int) -> void:
 		sync_actions()
 		if document.sculpt_stroke_active and document.has_preview():
 			workspace_state.set_preview_owner("sculpt")
+		if document.color_stroke_active and document.has_preview():
+			workspace_state.set_preview_owner("color")
+
+
+func _on_document_color_changed(_uid: int) -> void:
+	if document != null:
+		layers_panel.refresh()
+		sync_actions()
 
 
 func on_document_environment_changed() -> void:
@@ -2886,6 +2950,10 @@ func _process(time: float) -> void:
 			if forward != 0.0 or side != 0.0 or rise != 0.0:
 				scene_view.fly_step(forward, side, rise, time)
 				fly_moved = true
+	if paint_view != null and document != null and document.sculpt_mask_stroke_active and brush_panel.sculpt_mask_active() == false:
+		report("Sculpt Mask target changed during a stroke; the stroke was cancelled.")
+		document.cancel_sculpt_mask_stroke()
+		paint_view = null
 	if paint_view != null:
 		if not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
 			if document.water_stroke_active:
@@ -2926,7 +2994,7 @@ func step_hold_paint(delta: float, fly_moved: bool = false) -> bool:
 		return false
 	# Sculpt strokes use their own transaction state; hold painting must work
 	# for either terrain or sculpt brushing, never both at once.
-	var brushing := document.stroke_active or document.sculpt_stroke_active
+	var brushing := document.stroke_active or document.sculpt_stroke_active or document.sculpt_mask_stroke_active or document.color_stroke_active or document.color_mask_stroke_active
 	if not brushing or anchor.x < 0.0:
 		return false
 	paint_hold_elapsed += minf(delta, 0.25)
@@ -3185,7 +3253,6 @@ func view_input(event: InputEvent, panel: Control) -> void:
 					return
 				var point: Vector2 = panel.sample_at(event.position)
 				if point.x >= 0:
-					clear_incompatible_preview("brush")
 					var layer := brush_panel.paint_layer()
 					if layer == Terrain.Layer.COLOR and not brush_panel.valid_rgb():
 						report("Enter a native RGB color as #RRGGBB.")
@@ -3195,11 +3262,49 @@ func view_input(event: InputEvent, panel: Control) -> void:
 						brush_panel.use_picked_height(h)
 						report("Picked paint height %.2f m" % h)
 						return
+					var painting_mask := layer == Terrain.Layer.COLOR and brush_panel.mask_target.button_pressed
+					var painting_color_layer := layer == Terrain.Layer.COLOR and brush_panel.color_layer_target.button_pressed
+					var painting_sculpt_mask := brush_panel.sculpt_mask_active()
+					if painting_sculpt_mask:
+						# A Sculpt Mask is an operation on the shared Sculpt
+						# composition, so keep the sculpt-owned preview alive.
+						clear_incompatible_preview("sculpt")
+					elif not painting_color_layer and not painting_mask:
+						clear_incompatible_preview("brush")
+					if (painting_color_layer or painting_mask) and document.active_color_uid < 0:
+						report("Create or activate a Color Layer first.")
+						return
+					if painting_sculpt_mask and document.active_sculpt_uid < 0:
+						report("Create or activate a Sculpt Layer first. Add a Sculpt Mask to paint it.")
+						return
+					if painting_sculpt_mask:
+						var mask_index := document.sculpt_index_by_uid(document.active_sculpt_uid)
+						if mask_index < 0 or (document.sculpt_layers[mask_index] as Dictionary).get("mask", null) == null:
+							report("Add a Sculpt Mask first. Sculpt Mask brush needs an attached mask.")
+							return
 					paint_view = panel
 					anchor = Vector2(-1, -1)
 					paint_hold_elapsed = 0.0
-					if document.active_sculpt_uid < 0 or layer != Terrain.Layer.HEIGHT or not brush_panel.mode in [BrushPanel.Mode.RAISE, BrushPanel.Mode.LOWER]:
-						document.begin_stroke(layer)
+					if painting_mask:
+						if not document.begin_color_mask_stroke():
+							report(document.error)
+							paint_view = null
+							return
+					elif painting_color_layer:
+						if not document.begin_color_stroke():
+							report(document.error)
+							paint_view = null
+							return
+					elif painting_sculpt_mask:
+						if not document.begin_sculpt_mask_stroke():
+							report(document.error)
+							paint_view = null
+							return
+					elif document.active_sculpt_uid < 0 or layer != Terrain.Layer.HEIGHT or not brush_panel.mode in [BrushPanel.Mode.RAISE, BrushPanel.Mode.LOWER]:
+						if not document.begin_stroke(layer):
+							report(document.error)
+							paint_view = null
+							return
 					elif not document.begin_sculpt_stroke():
 						report(document.error)
 						paint_view = null
@@ -3234,6 +3339,15 @@ func object_tool_changed() -> void:
 	cancel_all_slider_gestures()
 	if document != null and document.sculpt_stroke_active:
 		document.cancel_sculpt_stroke()
+		paint_view = null
+	if document != null and document.sculpt_mask_stroke_active:
+		document.cancel_sculpt_mask_stroke()
+		paint_view = null
+	if document != null and document.color_stroke_active:
+		document.cancel_color_stroke()
+		paint_view = null
+	if document != null and document.color_mask_stroke_active:
+		document.cancel_color_mask_stroke()
 		paint_view = null
 	if move_objects_button.button_pressed:
 		clear_incompatible_preview("object")
@@ -3323,6 +3437,28 @@ func finish_stroke() -> void:
 		return
 	paint_view = null
 	paint_hold_elapsed = 0.0
+	if document.color_mask_stroke_active:
+		document.end_color_mask_stroke()
+		layers_panel.refresh()
+		report("Color mask stroke recorded in the active layer.")
+		sync_actions()
+		return
+	if document.color_stroke_active:
+		document.end_color_stroke()
+		if document.has_preview() and document.preview_owner == "color":
+			workspace_state.active_preview_owner = "color"
+		layers_panel.refresh()
+		report("Color stroke recorded as sparse RGB samples in the active layer.")
+		sync_actions()
+		return
+	if document.sculpt_mask_stroke_active:
+		document.end_sculpt_mask_stroke()
+		if document.has_preview() and document.preview_owner == "sculpt":
+			workspace_state.active_preview_owner = "sculpt"
+		layers_panel.refresh()
+		report("Sculpt mask stroke recorded in the active layer.")
+		sync_actions()
+		return
 	if document.sculpt_stroke_active:
 		document.end_sculpt_stroke()
 		if not document.has_preview():

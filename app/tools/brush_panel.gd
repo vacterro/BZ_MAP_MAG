@@ -27,6 +27,12 @@ var target_label := Label.new()
 var target := SliderField.new()
 var surface := ChoiceGroup.new(3, true)
 var rgb := LineEdit.new()
+var color_layer_target := CheckBox.new()
+var mask_target := CheckBox.new()
+var mask_reveal := CheckBox.new()
+var sculpt_mask_target := CheckBox.new()
+var sculpt_mask_reveal := CheckBox.new()
+var sculpt_mask_strength := SliderField.new()
 var texture_slot := SliderField.new()
 var texture_lane := SliderField.new()
 
@@ -92,6 +98,24 @@ func _ready() -> void:
 	target.value = 100
 	target.tooltip_text = "Use Pick and click the terrain to set this height."
 	_height_box.add_child(target)
+	sculpt_mask_target.text = "Sculpt Mask"
+	sculpt_mask_target.tooltip_text = "Paint the active sculpt layer's mask instead of height."
+	sculpt_mask_target.toggled.connect(func(_on): update_buttons())
+	_height_box.add_child(sculpt_mask_target)
+	sculpt_mask_reveal.text = "Mask: Reveal / Hide"
+	sculpt_mask_reveal.tooltip_text = "Checked paints white (reveal); unchecked paints black (hide)."
+	sculpt_mask_reveal.set_pressed_no_signal(true)
+	sculpt_mask_reveal.toggled.connect(func(_on): brush_changed.emit())
+	_height_box.add_child(sculpt_mask_reveal)
+	sculpt_mask_strength.min_value = 0.0
+	sculpt_mask_strength.max_value = 1.0
+	sculpt_mask_strength.step = 0.05
+	sculpt_mask_strength.set_slider_range(0.0, 1.0)
+	sculpt_mask_strength.set_unit_suffix("")
+	sculpt_mask_strength.set_readout_width(48.0)
+	sculpt_mask_strength.value = 1.0
+	sculpt_mask_strength.value_changed.connect(func(_value): brush_changed.emit())
+	_height_box.add_child(sculpt_mask_strength)
 
 	layout.add_child(_color_box)
 	section(_color_box, "RGB", "Native vertex color as #RRGGBB")
@@ -99,6 +123,22 @@ func _ready() -> void:
 	rgb.max_length = 7
 	rgb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_color_box.add_child(rgb)
+	color_layer_target.text = "Color Layer"
+	color_layer_target.tooltip_text = "Paint into the active non-destructive color layer instead of native RGB."
+	color_layer_target.toggled.connect(func(_on): brush_changed.emit())
+	_color_box.add_child(color_layer_target)
+	mask_target.text = "Mask"
+	mask_target.tooltip_text = "Paint the active Color Layer's mask instead of RGB."
+	mask_target.toggled.connect(func(on):
+		if on:
+			color_layer_target.set_pressed_no_signal(true)
+		brush_changed.emit())
+	_color_box.add_child(mask_target)
+	mask_reveal.text = "Reveal"
+	mask_reveal.tooltip_text = "Checked paints white (reveal); unchecked paints black (hide)."
+	mask_reveal.set_pressed_no_signal(true)
+	mask_reveal.toggled.connect(func(_on): brush_changed.emit())
+	_color_box.add_child(mask_reveal)
 
 	_tile_box.add_theme_constant_override("separation", 2)
 	layout.add_child(_tile_box)
@@ -188,13 +228,18 @@ func use_picked_height(height: float) -> void:
 	set_mode(Mode.PAINT)
 
 
+func sculpt_mask_active() -> bool:
+	return paint_layer() == Terrain.Layer.HEIGHT and sculpt_mask_target.button_pressed
+
+
 func update_buttons() -> void:
 	var layer := paint_layer()
+	var mask_active := sculpt_mask_active()
 	for index in size_buttons.size():
 		size_buttons[index].set_pressed_no_signal(WIDTHS[index] == radius_m)
 	for index in mode_buttons.size():
 		mode_buttons[index].set_pressed_no_signal(mode == index)
-		mode_buttons[index].disabled = layer != Terrain.Layer.HEIGHT
+		mode_buttons[index].disabled = layer != Terrain.Layer.HEIGHT or mask_active
 	for index in shape_buttons.size():
 		shape_buttons[index].set_pressed_no_signal(shape == index)
 	for index in pressure_buttons.size():
@@ -203,11 +248,13 @@ func update_buttons() -> void:
 	mirror_z_button.set_pressed_no_signal(mirror_z)
 	pressure_label.text = "Pressure · %d%%" % pressure
 	if _modes_grid != null:
-		_modes_grid.visible = (layer == Terrain.Layer.HEIGHT)
+		_modes_grid.visible = (layer == Terrain.Layer.HEIGHT and not mask_active)
 	_height_box.visible = (layer == Terrain.Layer.HEIGHT)
+	sculpt_mask_reveal.visible = mask_active
+	sculpt_mask_strength.visible = mask_active
 	_color_box.visible = (layer == Terrain.Layer.COLOR)
 	_tile_box.visible = (layer == Terrain.Layer.TILES)
-	target.editable = (layer == Terrain.Layer.HEIGHT)
+	target.editable = (layer == Terrain.Layer.HEIGHT and not mask_active)
 	rgb.editable = layer == Terrain.Layer.COLOR
 	texture_slot.editable = layer == Terrain.Layer.TILES
 	texture_lane.editable = layer == Terrain.Layer.TILES
@@ -238,15 +285,33 @@ func mirrored(document: Document, point: Vector2, across_x: bool) -> Vector2:
 func dab_at(document: Document, point: Vector2, hold_scale: float = 1.0, accumulate: bool = false) -> void:
 	if point.x < 0 or point.y < 0:
 		return
-	if document.active_sculpt_uid >= 0 and paint_layer() == Terrain.Layer.HEIGHT and mode in [Mode.RAISE, Mode.LOWER]:
+	var height_layer := paint_layer() == Terrain.Layer.HEIGHT
+	if height_layer and sculpt_mask_target.button_pressed:
+		# Sculpt Mask is an explicit target: every gesture, including Blend,
+		# Paint and Spray modes, routes only into the mask data domain.
+		# Pressure and Hold scale the FLOW (how far one dab moves toward the
+		# target), never the target itself: 20% takes 0 -> 0.2 and 1 -> 0.8.
+		var target_strength := clampf(sculpt_mask_strength.value, 0.0, 1.0)
+		if not sculpt_mask_reveal.button_pressed:
+			target_strength = 1.0 - target_strength
+		document.sculpt_mask_dab(point, radius_m, target_strength, shape,
+			(pressure / 100.0) * hold_scale)
+		return
+	if document.active_sculpt_uid >= 0 and height_layer and mode in [Mode.RAISE, Mode.LOWER]:
 		var amount := 40.0 if mode == Mode.RAISE else -40.0
 		document.sculpt_dab(point, radius_m, amount * (pressure / 100.0) * hold_scale, shape)
 		return
 	var strength := (pressure / 100.0) * hold_scale
 	match paint_layer():
 		Terrain.Layer.COLOR:
+			if mask_target.button_pressed:
+				document.color_mask_dab(point, radius_m, 1.0 if mask_reveal.button_pressed else 0.0, shape)
+				return
 			if valid_rgb():
-				document.dab_material(point, radius_m, Terrain.rgb_word(Color.html(rgb.text)), shape, strength, 0, accumulate)
+				if color_layer_target.button_pressed:
+					document.color_dab(point, radius_m, Terrain.rgb_word(Color.html(rgb.text)), shape, strength)
+				else:
+					document.dab_material(point, radius_m, Terrain.rgb_word(Color.html(rgb.text)), shape, strength, 0, accumulate)
 			return
 		Terrain.Layer.TILES:
 			document.dab_material(point, radius_m, int(texture_slot.value), shape, strength, int(texture_lane.value), accumulate)

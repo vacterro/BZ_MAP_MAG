@@ -246,6 +246,8 @@ if ($runCore) {
     } else {
         $dsScratch = (New-Item -ItemType Directory -Path (Join-Path $runRoot 'draft-safety-scratch') -Force).FullName
         Invoke-GodotScriptStage 'draft-safety' 'FAST' 'res://tests/draft_safety.gd' @($braveBzn, $dsScratch) $false 240000
+        $mcScratch = (New-Item -ItemType Directory -Path (Join-Path $runRoot 'mask-continuity-scratch') -Force).FullName
+        Invoke-GodotScriptStage 'mask-continuity' 'FAST' 'res://tests/mask_continuity.gd' @($braveBzn, $mcScratch) $false 240000
     }
     if (-not (Test-Path -LiteralPath $Game -PathType Container) -or -not (Test-Path -LiteralPath $VrvSource -PathType Container)) {
         Add-StageResult 'playtest-assets' 'FAST' 'BLOCKED' -1 'tools/Test-PlaytestAssets.ps1' 0 '' 'Missing BZCC game dir or VRV checkout required by Test-PlaytestAssets.ps1.'
@@ -254,7 +256,7 @@ if ($runCore) {
     }
     Invoke-PsScriptStage 'run-hygiene' 'FAST' (Join-Path $PSScriptRoot 'Test-RunHygiene.ps1') @()
 } else {
-    foreach ($n in 'bzn-layouts','autosave-store','draft-safety','playtest-assets','run-hygiene') {
+    foreach ($n in 'bzn-layouts','autosave-store','draft-safety','mask-continuity','playtest-assets','run-hygiene') {
         Add-StageResult $n 'FAST' 'SKIPPED_WITH_REASON' 0 '' 0 '' "Not in selected level '$Level'."
     }
 }
@@ -417,13 +419,33 @@ if ($runGame) {
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $emLog = Join-Path $runRoot 'env-and-mission\godot.log'
         $exportedBzn = ''
+        $colorBzn = ''
+        $colorRgb = ''
+        $colorSample = ''
+        $launchColorFixture = $true
         if (Test-Path -LiteralPath $emLog -PathType Leaf) {
+            $mColor = Select-String -Path $emLog -Pattern '^EXPORTED_COLOR_LAYER_BZN=(.+)$' | Select-Object -First 1
+            if ($mColor) { $colorBzn = $mColor.Matches[0].Groups[1].Value.Trim() }
+            $mRgb = Select-String -Path $emLog -Pattern '^COLOR_LAYER_EXPECTED_RGB=(.+)$' | Select-Object -First 1
+            if ($mRgb) { $colorRgb = $mRgb.Matches[0].Groups[1].Value.Trim() }
+            $mSample = Select-String -Path $emLog -Pattern '^COLOR_LAYER_SAMPLE_INDEX=(.+)$' | Select-Object -First 1
+            if ($mSample) { $colorSample = $mSample.Matches[0].Groups[1].Value.Trim() }
             $m = Select-String -Path $emLog -Pattern '^EXPORTED_W567_PLAYTEST_BZN=(.+)$' | Select-Object -First 1
             if ($m) { $exportedBzn = $m.Matches[0].Groups[1].Value.Trim() }
         }
-        if (-not $exportedBzn -or -not (Test-Path -LiteralPath $exportedBzn -PathType Leaf)) {
-            $exportedBzn = $plgrBzn
+        # T-47: the game stage must launch the Color Layer fixture, never a
+        # generic BZN left over from another test. Missing marker is a hard fail.
+        if ($colorBzn -and (Test-Path -LiteralPath $colorBzn -PathType Leaf) -and $colorRgb -match '^[0-9A-Fa-f]{6}$') {
+            $exportedBzn = $colorBzn
+        } else {
+            Add-StageResult 'game-playtest' 'GAME' 'FAIL' 1 'Color Layer fixture' 0 $gLog 'Missing or invalid EXPORTED_COLOR_LAYER_BZN / COLOR_LAYER_EXPECTED_RGB from env-and-mission.'
+            $launchColorFixture = $false
         }
+        if ($launchColorFixture -and (-not $exportedBzn -or -not (Test-Path -LiteralPath $exportedBzn -PathType Leaf))) {
+            Add-StageResult 'game-playtest' 'GAME' 'FAIL' 1 'Color Layer fixture' 0 $gLog "Color Layer fixture BZN missing: $exportedBzn"
+            $launchColorFixture = $false
+        }
+        if ($launchColorFixture) {
         $docsDir = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'My Games/Battlezone Combat Commander'
         $startUtc = [DateTime]::UtcNow.AddSeconds(-2)
         $beforeNames = @{}
@@ -511,13 +533,14 @@ public static class BzAcceptWin32 {
             $logRaw = if ($finalLog) { Get-Content -LiteralPath $finalLog.FullName -Raw } else { '' }
             $gOk = $reached -and $finalLog -and ($logRaw -notmatch 'SAVEGAME CORRUPT') -and ($logRaw -match 'System shutdown normally') -and ($finalLog.Name -notlike 'Battlezone-Crashed*')
             $gSha = if ($finalLog) { Get-OptionalFileSha256 $finalLog.FullName } else { '' }
-            $summary = "mission=$exportedBzn log=$($finalLog.Name) sha256=$gSha reachedRun=$reached normalExit=$($logRaw -match 'System shutdown normally')"
+            $summary = "colorLayerRgb=$colorRgb sample=$colorSample mission=$exportedBzn log=$($finalLog.Name) sha256=$gSha reachedRun=$reached normalExit=$($logRaw -match 'System shutdown normally')"
             [IO.File]::WriteAllText($gLog, $summary, [Text.Encoding]::UTF8)
             Add-StageResult 'game-playtest' 'GAME' $(if ($gOk) { 'PASS' } else { 'FAIL' }) $(if ($gOk) { 0 } else { 1 }) "Start-Playtest.ps1 -ModProfile stock -Mission `"$exportedBzn`"" $sw.Elapsed.TotalSeconds $gLog $summary
         } catch {
             $sw.Stop()
             [IO.File]::WriteAllText($gLog, $_.Exception.Message, [Text.Encoding]::UTF8)
             Add-StageResult 'game-playtest' 'GAME' 'FAIL' 1 "Start-Playtest.ps1" $sw.Elapsed.TotalSeconds $gLog $_.Exception.Message
+        }
         }
     }
 } else {

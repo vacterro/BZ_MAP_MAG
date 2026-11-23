@@ -16,6 +16,8 @@ const BznObjects := preload("res://formats/bzn_objects.gd")
 const SkyEnv := preload("res://formats/sky_env.gd")
 const MissionProfiles := preload("res://core/mission_profiles.gd")
 const CompatibilityEngine := preload("res://core/compatibility_engine.gd")
+const ColorLayers := preload("res://core/color_layers.gd")
+const Terrain := preload("res://formats/terrain_v5.gd")
 
 var failures := 0
 
@@ -469,6 +471,33 @@ func run() -> void:
 	check(String(custom_contract["semantics"]) == "UNKNOWN" and (custom_contract["required"] as Array).is_empty(),
 		"W6 unknown custom DLL keeps UNKNOWN semantics with zero fabricated required paths")
 
+
+	# T-47: deterministic Color Layer playtest fixture. One sparse RGB sample is
+	# composed over native source RGB and exported without Bake. The game stage
+	# must launch THIS map and verify the exact expected RGB bytes.
+	var color_doc := Document.new()
+	check(color_doc.open(exp_bzn), "T-47 open exported Stock map for color fixture")
+	check(color_doc.add_color_layer() == 0, "T-47 add one color layer")
+	var color_terrain: Terrain = color_doc.package.terrain
+	var fixture_index := 200 * color_terrain.dimensions.x + 200
+	var fixture_source := color_terrain.source_material_value(Terrain.Layer.COLOR, fixture_index)
+	var fixture_layer: Dictionary = color_doc.color_layers[0]
+	fixture_layer["name"] = "Playtest Red"
+	fixture_layer["samples"] = {fixture_index: {"rgb": 0xff0000, "coverage": 1.0}}
+	fixture_layer["opacity"] = 0.5
+	var fixture_rgb := ColorLayers.blend_word(fixture_source, 0xff0000, 0.5)
+	var color_dir := scratch.path_join("color-layer-playtest")
+	check(writer.export_native(color_doc, color_dir), "T-47 export Color Layer fixture: " + writer.error)
+	var color_bzn := color_dir.path_join(color_doc.package.source_path.get_file())
+	var color_verify := Package.new()
+	check(color_verify.open(color_bzn), "T-47 reimport Color Layer fixture")
+	check(color_verify.terrain.material_value(Terrain.Layer.COLOR, fixture_index) == fixture_rgb,
+		"T-47 exported native TER contains composed RGB without Bake")
+	check(color_doc.package.terrain.color_edits.is_empty(),
+		"T-47 color fixture did not mutate committed native RGB")
+	print("EXPORTED_COLOR_LAYER_BZN=" + color_bzn)
+	print("COLOR_LAYER_EXPECTED_RGB=" + ("%06X" % fixture_rgb))
+	print("COLOR_LAYER_SAMPLE_INDEX=%d" % fixture_index)
 	print("EXPORTED_W567_PLAYTEST_BZN=" + exp_bzn)
 	editor.free()
 	print("Waves 5, 6 & 7 Native Builders, Mission Studio & Environment Studio checks complete.")

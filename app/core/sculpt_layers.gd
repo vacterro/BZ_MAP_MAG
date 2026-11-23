@@ -10,10 +10,39 @@ const Terrain := preload("res://formats/terrain_v5.gd")
 const MAX_LAYERS := 8
 const MAX_DELTAS := 2_000_000
 const MAX_ABS_DELTA := 100000.0
+const MASK_DEFAULT := 1.0
 
 
 static func layer(uid: int) -> Dictionary:
-	return {"uid": uid, "name": "Sculpt %d" % uid, "enabled": true, "opacity": 1.0, "deltas": {}}
+	return {"uid": uid, "name": "Sculpt %d" % uid, "enabled": true, "opacity": 1.0, "deltas": {}, "mask": null}
+
+
+## A sculpt mask is a sparse per-sample strength multiplier stored on the layer.
+## No mask means strength 1; a mask has an explicit default plus sparse overrides.
+static func mask(default_strength: float = 0.0) -> Dictionary:
+	return {"enabled": true, "default": clampf(default_strength, 0.0, 1.0), "samples": {}}
+
+
+static func normalize_mask(raw: Variant, sample_count: int) -> Variant:
+	if raw == null:
+		return null
+	if not raw is Dictionary:
+		return null
+	var data := raw as Dictionary
+	var result := mask(float(data.get("default", 0.0)))
+	result["enabled"] = bool(data.get("enabled", true))
+	var samples := {}
+	var raw_samples: Variant = data.get("samples", {})
+	if raw_samples is Dictionary:
+		for key in (raw_samples as Dictionary):
+			var index := int(key)
+			if index < 0 or index >= sample_count:
+				continue
+			var value := float((raw_samples as Dictionary)[key])
+			if is_finite(value):
+				samples[index] = clampf(value, 0.0, 1.0)
+	result["samples"] = samples
+	return result
 
 
 static func normalize(raw: Dictionary) -> Dictionary:
@@ -30,6 +59,7 @@ static func normalize(raw: Dictionary) -> Dictionary:
 			if index >= 0 and is_finite(value) and value != 0.0:
 				deltas[index] = value
 	result["deltas"] = deltas
+	result["mask"] = normalize_mask(raw.get("mask", null), 1 << 30)
 	return result
 
 
@@ -87,6 +117,50 @@ static func validate_raw_record(raw: Variant, sample_count: int) -> bool:
 		var delta := float(value)
 		if delta == 0.0 or absf(delta) > MAX_ABS_DELTA:
 			return false
+	if not validate_mask_raw(record.get("mask", null), sample_count):
+		return false
+	return true
+
+
+static func validate_mask_raw(raw: Variant, sample_count: int) -> bool:
+	if raw == null:
+		return true
+	if not raw is Dictionary:
+		return false
+	var data := raw as Dictionary
+	if not data.get("enabled", null) is bool:
+		return false
+	var default_value: Variant = data.get("default", null)
+	if not (default_value is int or default_value is float) or not is_finite(float(default_value)):
+		return false
+	if float(default_value) < 0.0 or float(default_value) > 1.0:
+		return false
+	var raw_samples: Variant = data.get("samples", null)
+	if not raw_samples is Dictionary or (raw_samples as Dictionary).size() > MAX_DELTAS:
+		return false
+	var seen := {}
+	for key: Variant in (raw_samples as Dictionary):
+		var index: int
+		if key is int or key is float:
+			var number := float(key)
+			if not is_finite(number) or number < 0.0 or number != floorf(number) or number > 9007199254740992.0:
+				return false
+			index = int(number)
+		elif key is String:
+			var text := key as String
+			if text.is_empty() or not text.is_valid_int() or str(int(text)) != text:
+				return false
+			index = int(text)
+		else:
+			return false
+		if index < 0 or index >= sample_count or seen.has(index):
+			return false
+		seen[index] = true
+		var value: Variant = (raw_samples as Dictionary)[key]
+		if not (value is int or value is float) or not is_finite(float(value)):
+			return false
+		if float(value) < 0.0 or float(value) > 1.0:
+			return false
 	return true
 
 
@@ -124,6 +198,19 @@ static func validate_stack(stack: Array, sample_count: int) -> bool:
 	return true
 
 
+## Effective mask strength for one sample. No mask means 1; a disabled mask also
+## means 1 (the layer is fully revealed). An enabled mask uses its default for a
+## missing sparse key and the sparse override otherwise.
+static func mask_strength(layer_data: Dictionary, index: int) -> float:
+	var mask_data: Variant = layer_data.get("mask", null)
+	if not mask_data is Dictionary or not bool((mask_data as Dictionary).get("enabled", true)):
+		return 1.0
+	var samples: Variant = (mask_data as Dictionary).get("samples", {})
+	if samples is Dictionary and (samples as Dictionary).has(index):
+		return clampf(float((samples as Dictionary)[index]), 0.0, 1.0)
+	return clampf(float((mask_data as Dictionary).get("default", 0.0)), 0.0, 1.0)
+
+
 ## Composes sculpt deltas over the committed terrain revision. `committed`
 ## holds the document's height edits keyed by TER sample index; a sample absent
 ## from it falls back to the original TER height in `base_heights`. Composition
@@ -156,7 +243,8 @@ static func compose_canonical(base_heights: PackedFloat32Array, stack: Array, li
 			if index < 0 or index >= base_heights.size():
 				continue
 			var before: float = values.get(index, float(committed.get(index, base_heights[index])))
-			var after := clampf(before + float((deltas as Dictionary)[index]) * opacity, -limit, limit)
+			var strength := mask_strength(layer, index)
+			var after := clampf(before + float((deltas as Dictionary)[index]) * opacity * strength, -limit, limit)
 			values[index] = after
 	return values
 
@@ -180,6 +268,7 @@ static func compose(base_heights: PackedFloat32Array, stack: Array, limit: float
 			if index < 0 or index >= base_heights.size():
 				continue
 			var before: float = values.get(index, float(committed.get(index, base_heights[index])))
-			var after := clampf(before + float((layer["deltas"] as Dictionary)[index]) * opacity, -limit, limit)
+			var strength := mask_strength(layer, index)
+			var after := clampf(before + float((layer["deltas"] as Dictionary)[index]) * opacity * strength, -limit, limit)
 			values[index] = after
 	return values

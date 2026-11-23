@@ -71,14 +71,19 @@ func decode(bytes: PackedByteArray) -> bool:
 	return true
 
 
-func encode(dirty: Dictionary) -> PackedByteArray:
-	if dirty.is_empty() and not has_material_edits():
+## `color_override` is an export-only sparse color channel. `null` keeps the
+## committed color_edits; a supplied Dictionary replaces them wholesale. An
+## explicitly empty Dictionary therefore exports the composed/native RGB even
+## when committed color_edits still exist.
+func encode(dirty: Dictionary, color_override: Variant = null) -> PackedByteArray:
+	var colors: Dictionary = color_edits if color_override == null else color_override
+	if dirty.is_empty() and colors.is_empty() and not has_material_edits():
 		return original
 	var changed_blocks := {}
 	for index: int in dirty:
 		var block := block_at(sample_at(index))
 		changed_blocks[block] = changed_blocks.get(block, 0) | (1 << Layer.HEIGHT)
-	for index: int in color_edits:
+	for index: int in colors:
 		var block := block_at(sample_at(index))
 		changed_blocks[block] = changed_blocks.get(block, 0) | (1 << Layer.COLOR)
 	for block: int in tile_edits:
@@ -104,7 +109,7 @@ func encode(dirty: Dictionary) -> PackedByteArray:
 				word.encode_u16(0, tile_edits[block])
 				encoded.append_array(word)
 			else:
-				var pixels := encoded_samples(block, layer, dirty)
+				var pixels := encoded_samples(block, layer, dirty, colors)
 				if pixels.size() == SIZES[layer]:
 					encoded[0] &= ~bit
 				else:
@@ -115,11 +120,12 @@ func encode(dirty: Dictionary) -> PackedByteArray:
 	return bytes
 
 
-func encoded_samples(block: int, layer: int, dirty: Dictionary = {}) -> PackedByteArray:
+func encoded_samples(block: int, layer: int, dirty: Dictionary = {}, color_override: Variant = null) -> PackedByteArray:
 	var start := block_origin(block)
 	var size: int = SIZES[layer]
 	var bytes := PackedByteArray()
 	bytes.resize(256 * size)
+	var colors: Dictionary = color_edits if color_override == null else color_override
 	for z in BLOCK:
 		var row := (start.y + z) * dimensions.x + start.x
 		for x in BLOCK:
@@ -127,7 +133,8 @@ func encoded_samples(block: int, layer: int, dirty: Dictionary = {}) -> PackedBy
 			if layer == Layer.HEIGHT:
 				bytes.encode_float(dst, float(dirty.get(row + x, heights[row + x])))
 			else:
-				var rgb := committed_material_value(Layer.COLOR, row + x)
+				var index := row + x
+				var rgb := int(colors.get(index, source_material_value(Layer.COLOR, index)))
 				bytes[dst] = (rgb >> 16) & 255
 				bytes[dst + 1] = (rgb >> 8) & 255
 				bytes[dst + 2] = rgb & 255

@@ -9,6 +9,7 @@ const Terrain := preload("res://formats/terrain_v5.gd")
 const Water := preload("res://formats/water_v5.gd")
 const SkyEnv := preload("res://formats/sky_env.gd")
 const Sculpt := preload("res://core/sculpt_layers.gd")
+const ColorLayers := preload("res://core/color_layers.gd")
 const SlopeShapes := preload("res://core/slope_shapes.gd")
 const VrvShapes := preload("res://core/vrv_shapes.gd")
 const ModRegistry := preload("res://core/mod_registry.gd")
@@ -77,15 +78,40 @@ var next_sculpt_uid := 1
 var active_sculpt_uid := -1
 var sculpt_revision := 0
 var sculpt_stroke_active := false
+var sculpt_mask_stroke_active := false
+var _sculpt_mask_before: Array = []
+var _sculpt_mask_uid := -1
+var _sculpt_mask_journal := {}
+var _sculpt_mask_journal_present := {}
+var _sculpt_mask_restore_preview := false
 var _sculpt_stroke_before: Array = []
 var _sculpt_stroke_uid := -1
 var _sculpt_stroke_touched := false
 var _sculpt_live_preview := false
 var _sculpt_live_base := {}
+var _sculpt_composition_active := false
 var _sculpt_opacity_preview_uid := -1
 var _sculpt_opacity_preview_value := NAN
 var _sculpt_opacity_restore_preview := false
 signal sculpt_layers_changed(selected_uid: int)
+var color_layers: Array = []
+var next_color_uid := 1
+var active_color_uid := -1
+var color_revision := 0
+var color_stroke_active := false
+var color_mask_stroke_active := false
+var _color_mask_before: Array = []
+var _color_mask_uid := -1
+var _color_stroke_before: Array = []
+var _color_stroke_uid := -1
+var _color_stroke_touched := false
+var _color_stroke_sample_value: Dictionary = {}
+var _color_stroke_coverage: Dictionary = {}
+var _color_live_preview := false
+var _color_composition_active := false
+var _color_opacity_preview_uid := -1
+var _color_opacity_preview_value := NAN
+signal color_layers_changed(selected_uid: int)
 var preview_before := {}
 var preview_after := {}
 var preview_owner := ""
@@ -106,7 +132,7 @@ func _init() -> void:
 var external_transaction := false
 
 func has_active_edit_transaction() -> bool:
-	return stroke_active or water_stroke_active or sculpt_stroke_active or external_transaction
+	return stroke_active or water_stroke_active or sculpt_stroke_active or sculpt_mask_stroke_active or color_stroke_active or color_mask_stroke_active or external_transaction
 
 
 func open(path: String) -> bool:
@@ -152,15 +178,39 @@ func open(path: String) -> bool:
 	next_sculpt_uid = 1
 	active_sculpt_uid = -1
 	sculpt_revision = 0
+	color_layers.clear()
+	next_color_uid = 1
+	active_color_uid = -1
+	color_revision = 0
+	color_stroke_active = false
+	color_mask_stroke_active = false
+	_color_mask_before = []
+	_color_mask_uid = -1
+	_color_stroke_before = []
+	_color_stroke_uid = -1
+	_color_stroke_touched = false
+	_color_stroke_sample_value = {}
+	_color_stroke_coverage = {}
+	_color_live_preview = false
+	_color_composition_active = false
+	_color_opacity_preview_uid = -1
+	_color_opacity_preview_value = NAN
 	preview_owner = ""
 	preview_source_revision = ""
 	preview_sculpt_revision = -1
 	sculpt_stroke_active = false
+	sculpt_mask_stroke_active = false
+	_sculpt_mask_before = []
+	_sculpt_mask_uid = -1
+	_sculpt_mask_journal = {}
+	_sculpt_mask_journal_present = {}
+	_sculpt_mask_restore_preview = false
 	_sculpt_stroke_before = []
 	_sculpt_stroke_uid = -1
 	_sculpt_stroke_touched = false
 	_sculpt_live_preview = false
 	_sculpt_live_base = {}
+	_sculpt_composition_active = false
 	_sculpt_opacity_preview_uid = -1
 	_sculpt_opacity_preview_value = NAN
 	_sculpt_opacity_restore_preview = false
@@ -202,9 +252,14 @@ func open(path: String) -> bool:
 				return fail("Invalid saved layer identity metadata.")
 			var seen_uids := {}
 			for raw_uid in (raw_uids as Array):
-				if not (raw_uid is int or raw_uid is float) or int(raw_uid) <= 0 or seen_uids.has(int(raw_uid)):
+				if not (raw_uid is int or raw_uid is float) or not is_finite(float(raw_uid)):
 					return fail("Invalid saved layer identity metadata.")
-				var uid := int(raw_uid)
+				var uid_number := float(raw_uid)
+				if uid_number <= 0.0 or uid_number != floorf(uid_number) or uid_number > ColorLayers.MAX_UID:
+					return fail("Invalid saved layer identity metadata.")
+				var uid := int(uid_number)
+				if seen_uids.has(uid):
+					return fail("Invalid saved layer identity metadata.")
 				seen_uids[uid] = true
 				layer_uids.append(uid)
 				next_layer_id = maxi(next_layer_id, uid + 1)
@@ -225,23 +280,55 @@ func open(path: String) -> bool:
 				return fail("Invalid sculpt layer deltas.")
 			if not sculpt_layers.is_empty():
 				active_sculpt_uid = int((sculpt_layers[0] as Dictionary)["uid"])
-			if saved.has("activeSculptUid"):
-				var saved_active: Variant = saved["activeSculptUid"]
-				if saved_active == null:
-					active_sculpt_uid = -1
-				elif not (saved_active is int or saved_active is float):
-					return fail("Invalid saved active sculpt selection.")
-				else:
-					var active_number := float(saved_active)
-					if not is_finite(active_number) or active_number != floorf(active_number) or absf(active_number) > 9007199254740992.0:
-						return fail("Invalid saved active sculpt selection.")
-					var saved_active_uid := int(active_number)
-					if saved_active_uid == -1:
+				if saved.has("activeSculptUid"):
+					var saved_active: Variant = saved["activeSculptUid"]
+					if saved_active == null:
 						active_sculpt_uid = -1
-					elif saved_active_uid <= 0 or sculpt_index_by_uid(saved_active_uid) < 0:
+					elif not (saved_active is int or saved_active is float):
 						return fail("Invalid saved active sculpt selection.")
 					else:
-						active_sculpt_uid = saved_active_uid
+						var active_number := float(saved_active)
+						if not is_finite(active_number) or active_number != floorf(active_number) or absf(active_number) > 9007199254740992.0:
+							return fail("Invalid saved active sculpt selection.")
+						var saved_active_uid := int(active_number)
+						if saved_active_uid == -1:
+							active_sculpt_uid = -1
+						elif saved_active_uid <= 0 or sculpt_index_by_uid(saved_active_uid) < 0:
+							return fail("Invalid saved active sculpt selection.")
+						else:
+							active_sculpt_uid = saved_active_uid
+			if saved.has("colorLayers"):
+				var raw_color: Variant = saved["colorLayers"]
+				if not raw_color is Array:
+					return fail("Invalid color layer metadata.")
+				if not ColorLayers.validate_stack_raw(raw_color as Array, terrain.heights.size()):
+					return fail("Malformed color layer payload rejected before normalization.")
+				for item in (raw_color as Array):
+					var clean := ColorLayers.normalize(item as Dictionary)
+					if int(clean["uid"]) <= 0 or next_color_uid <= int(clean["uid"]):
+						next_color_uid = int(clean["uid"]) + 1
+					color_layers.append(clean)
+				if not ColorLayers.validate_stack(color_layers, terrain.heights.size()):
+					return fail("Invalid color layer samples.")
+				if not color_layers.is_empty():
+					active_color_uid = int((color_layers[0] as Dictionary)["uid"])
+				if saved.has("activeColorUid"):
+					var saved_color_active: Variant = saved["activeColorUid"]
+					if saved_color_active == null:
+						active_color_uid = -1
+					elif not (saved_color_active is int or saved_color_active is float):
+						return fail("Invalid saved active color selection.")
+					else:
+						var color_number := float(saved_color_active)
+						if not is_finite(color_number) or color_number != floorf(color_number) or absf(color_number) > ColorLayers.MAX_UID:
+							return fail("Invalid saved active color selection.")
+						var saved_color_uid := int(color_number)
+						if saved_color_uid == -1:
+							active_color_uid = -1
+						elif saved_color_uid <= 0 or color_index_by_uid(saved_color_uid) < 0:
+							return fail("Invalid saved active color selection.")
+						else:
+							active_color_uid = saved_color_uid
 		for key: String in saved["edits"]:
 			var value: Variant = saved["edits"][key]
 			var index := key.to_int()
@@ -720,6 +807,557 @@ func _apply_procedural_layers(state_layers: Array, state_uids: Array[int], focus
 	layers_changed.emit(sel)
 
 
+# --- Non-destructive color layers --------------------------------------------
+
+func _color_snapshot() -> Array:
+	var out: Array = []
+	for item in color_layers:
+		out.append(ColorLayers.normalize(item as Dictionary))
+	return out
+
+
+func _apply_color_layers(state: Array, active_uid: int) -> void:
+	color_layers = []
+	for item in state:
+		color_layers.append(ColorLayers.normalize(item as Dictionary))
+	active_color_uid = active_uid
+	if active_color_uid < 0 and not color_layers.is_empty():
+		active_color_uid = int((color_layers[0] as Dictionary)["uid"])
+	color_revision += 1
+	color_layers_changed.emit(active_color_uid)
+
+
+func _commit_color_layers(state: Array, active_uid: int) -> bool:
+	if package == null or has_active_edit_transaction():
+		return fail("Finish the current stroke before editing color layers.")
+	if not ColorLayers.validate_stack(state, package.terrain.heights.size()):
+		return fail("Invalid color layer stack.")
+	var before := _color_snapshot()
+	var after: Array = []
+	for item in state:
+		after.append(ColorLayers.normalize(item as Dictionary))
+	if before == after and active_color_uid == active_uid:
+		return true
+	var color_preview_active := _color_live_preview or _color_composition_active
+	if color_preview_active:
+		_clear_color_live_preview()
+		if _color_composition_active:
+			clear_preview()
+	push_history({"color": true, "before": before, "after": after,
+		"active_before": active_color_uid, "active_after": active_uid})
+	_apply_color_layers(after, active_uid)
+	if color_preview_active:
+		color_preview()
+	return true
+
+
+func add_color_layer() -> int:
+	if package == null or color_layers.size() >= ColorLayers.MAX_LAYERS or has_active_edit_transaction():
+		return -1
+	var state := _color_snapshot()
+	var uid := next_color_uid
+	state.append(ColorLayers.layer(uid))
+	if not _commit_color_layers(state, uid):
+		return -1
+	next_color_uid += 1
+	return color_layers.size() - 1
+
+
+func remove_color_layer(index: int) -> bool:
+	if index < 0 or index >= color_layers.size():
+		return fail("Invalid color layer index.")
+	var state := _color_snapshot()
+	var removed_uid := int((state[index] as Dictionary)["uid"])
+	state.remove_at(index)
+	var next_uid := active_color_uid
+	if removed_uid == next_uid:
+		next_uid = -1 if state.is_empty() else int((state[mini(index, state.size() - 1)] as Dictionary)["uid"])
+	return _commit_color_layers(state, next_uid)
+
+
+func set_color_layer_enabled(index: int, enabled: bool) -> bool:
+	if index < 0 or index >= color_layers.size():
+		return fail("Invalid color layer index.")
+	var state := _color_snapshot()
+	if bool((state[index] as Dictionary)["enabled"]) == enabled:
+		return true
+	(state[index] as Dictionary)["enabled"] = enabled
+	return _commit_color_layers(state, active_color_uid)
+
+
+## Color masks are sparse per-sample strength multipliers stored on the color
+## layer. No mask means strength 1. A mask has an explicit default plus sparse
+## overrides, so a missing key never ambiguously means 0 or 1.
+func add_color_mask(index: int, default_strength: float = 0.0) -> bool:
+	if package == null or index < 0 or index >= color_layers.size():
+		return fail("Invalid color layer index.")
+	if (color_layers[index] as Dictionary).get("mask", null) != null:
+		return fail("Color layer already has a mask.")
+	if not is_finite(default_strength) or default_strength < 0.0 or default_strength > 1.0:
+		return fail("Invalid color mask default strength.")
+	var state := _color_snapshot()
+	(state[index] as Dictionary)["mask"] = ColorLayers.mask(default_strength)
+	return _commit_color_layers(state, active_color_uid)
+
+
+func remove_color_mask(index: int) -> bool:
+	if package == null or index < 0 or index >= color_layers.size():
+		return fail("Invalid color layer index.")
+	var state := _color_snapshot()
+	if (state[index] as Dictionary).get("mask", null) == null:
+		return true
+	(state[index] as Dictionary)["mask"] = null
+	return _commit_color_layers(state, active_color_uid)
+
+
+func set_color_mask_enabled(index: int, enabled: bool) -> bool:
+	if package == null or index < 0 or index >= color_layers.size():
+		return fail("Invalid color layer index.")
+	var state := _color_snapshot()
+	var mask_data: Variant = (state[index] as Dictionary).get("mask", null)
+	if not mask_data is Dictionary:
+		return fail("Color layer has no mask.")
+	if bool((mask_data as Dictionary)["enabled"]) == enabled:
+		return true
+	(mask_data as Dictionary)["enabled"] = enabled
+	return _commit_color_layers(state, active_color_uid)
+
+
+func set_color_mask_default(index: int, strength: float) -> bool:
+	if package == null or index < 0 or index >= color_layers.size():
+		return fail("Invalid color layer index.")
+	var state := _color_snapshot()
+	var mask_data: Variant = (state[index] as Dictionary).get("mask", null)
+	if not mask_data is Dictionary:
+		return fail("Color layer has no mask.")
+	if not is_finite(strength) or strength < 0.0 or strength > 1.0:
+		return fail("Invalid color mask strength.")
+	(mask_data as Dictionary)["default"] = strength
+	return _commit_color_layers(state, active_color_uid)
+
+
+func begin_color_mask_stroke() -> bool:
+	if package == null or has_active_edit_transaction() or _color_opacity_preview_uid >= 0:
+		return fail("Finish the current edit before painting a color mask.")
+	if has_active_preview_context() and preview_owner != "color" and not _color_composition_active:
+		return fail("Cancel the foreign preview before painting a color mask.")
+	var index := color_index_by_uid(active_color_uid)
+	if index < 0 or (color_layers[index] as Dictionary).get("mask", null) == null:
+		return fail("Select a color layer with a mask.")
+	color_mask_stroke_active = true
+	_color_mask_before = _color_snapshot()
+	_color_mask_uid = active_color_uid
+	return true
+
+
+func color_mask_dab(point: Vector2, radius_m: float, strength: float, shape := BrushShape.BELL) -> bool:
+	if not color_mask_stroke_active or not is_finite(strength):
+		return false
+	var index := color_index_by_uid(_color_mask_uid)
+	if index < 0:
+		return false
+	var value := clampf(strength, 0.0, 1.0)
+	var terrain := package.terrain
+	var region := brush_region(point, radius_m)
+	if not region.has_area():
+		return true
+	var radius := radius_m / terrain.SPACING
+	var layer_data: Dictionary = color_layers[index]
+	var mask_data: Dictionary = layer_data["mask"]
+	var samples: Dictionary = mask_data["samples"]
+	var touched := false
+	for z in range(region.position.y, region.end.y):
+		for x in range(region.position.x, region.end.x):
+			var weight := brush_weight(point - Vector2(x, z), radius, shape)
+			if weight <= 0.0:
+				continue
+			var sample_index := z * terrain.dimensions.x + x
+			if sample_index < 0 or sample_index >= terrain.heights.size():
+				continue
+			samples[sample_index] = value
+			touched = true
+	if not touched:
+		return true
+	if not ColorLayers.validate_stack([layer_data], terrain.heights.size()):
+		_apply_color_layers(_color_mask_before, _color_mask_uid)
+		return fail("Invalid color mask sample produced by stroke.")
+	color_revision += 1
+	return color_preview()
+
+
+func end_color_mask_stroke() -> bool:
+	if not color_mask_stroke_active:
+		return false
+	var before := _color_mask_before
+	var after := _color_snapshot()
+	var uid := _color_mask_uid
+	var changed := after != before
+	color_mask_stroke_active = false
+	_color_mask_before = []
+	_color_mask_uid = -1
+	if not changed:
+		return true
+	push_history({"color": true, "before": before, "after": after,
+		"active_before": uid, "active_after": active_color_uid})
+	return true
+
+
+func cancel_color_mask_stroke() -> void:
+	if not color_mask_stroke_active:
+		return
+	var before := _color_mask_before
+	var uid := _color_mask_uid
+	color_mask_stroke_active = false
+	_color_mask_before = []
+	_color_mask_uid = -1
+	_apply_color_layers(before, uid)
+	if _color_composition_active:
+		color_preview()
+
+
+func begin_color_opacity_preview(index: int) -> bool:
+	if package == null or index < 0 or index >= color_layers.size():
+		return fail("Invalid color layer opacity gesture.")
+	if has_active_edit_transaction() or _color_live_preview:
+		return fail("Finish the current stroke before editing color opacity.")
+	if _color_opacity_preview_uid >= 0:
+		return fail("Finish the current color opacity gesture first.")
+	if has_preview() and preview_owner != "color":
+		return fail("Cancel the foreign preview before editing color opacity.")
+	_color_opacity_preview_uid = int((color_layers[index] as Dictionary)["uid"])
+	_color_opacity_preview_value = float((color_layers[index] as Dictionary)["opacity"])
+	return true
+
+
+func preview_color_layer_opacity(uid: int, value: float) -> bool:
+	if package == null or _color_opacity_preview_uid < 0 or uid != _color_opacity_preview_uid:
+		return false
+	if stroke_active or color_stroke_active:
+		return false
+	if not is_finite(value) or value < 0.0 or value > 1.0:
+		return false
+	if has_preview() and preview_owner != "color":
+		return false
+	var index := color_index_by_uid(uid)
+	if index < 0:
+		return false
+	_color_opacity_preview_value = clampf(value, 0.0, 1.0)
+	var staged := _color_snapshot()
+	(staged[index] as Dictionary)["opacity"] = _color_opacity_preview_value
+	var preview := ColorLayers.compose_all(package.terrain, staged, package.terrain.color_edits)
+	return show_color_preview(preview)
+
+
+func cancel_color_opacity_preview(uid: int = -1) -> void:
+	if _color_opacity_preview_uid < 0:
+		return
+	if uid >= 0 and uid != _color_opacity_preview_uid:
+		return
+	_color_opacity_preview_uid = -1
+	_color_opacity_preview_value = NAN
+	if _color_composition_active:
+		show_color_preview(ColorLayers.compose_all(package.terrain, color_layers, package.terrain.color_edits))
+
+
+func commit_color_opacity_preview(uid: int, value: float) -> bool:
+	if _color_opacity_preview_uid < 0 or uid != _color_opacity_preview_uid:
+		return false
+	var index := color_index_by_uid(uid)
+	var final_value := _color_opacity_preview_value if not is_finite(value) else clampf(value, 0.0, 1.0)
+	var had_preview := _color_composition_active
+	_color_opacity_preview_uid = -1
+	_color_opacity_preview_value = NAN
+	if index < 0 or not is_finite(final_value) or final_value < 0.0 or final_value > 1.0:
+		if had_preview:
+			show_color_preview(ColorLayers.compose_all(package.terrain, color_layers, package.terrain.color_edits))
+		return false
+	var changed := not is_equal_approx(float((color_layers[index] as Dictionary)["opacity"]), final_value)
+	var ok := true
+	if changed:
+		ok = set_color_layer_opacity(index, final_value)
+	if had_preview:
+		show_color_preview(ColorLayers.compose_all(package.terrain, color_layers, package.terrain.color_edits))
+	return ok
+
+
+func set_color_layer_opacity(index: int, value: float) -> bool:
+	if index < 0 or index >= color_layers.size() or not is_finite(value) or value < 0.0 or value > 1.0:
+		return fail("Invalid color layer opacity.")
+	var state := _color_snapshot()
+	if is_equal_approx(float((state[index] as Dictionary)["opacity"]), value):
+		return true
+	(state[index] as Dictionary)["opacity"] = value
+	return _commit_color_layers(state, active_color_uid)
+
+
+func rename_color_layer(index: int, name: String) -> bool:
+	if index < 0 or index >= color_layers.size():
+		return fail("Invalid color layer index.")
+	var state := _color_snapshot()
+	var clean := name.strip_edges().substr(0, ColorLayers.MAX_NAME_LENGTH)
+	if String((state[index] as Dictionary).get("name", "")) == clean:
+		return true
+	(state[index] as Dictionary)["name"] = clean
+	return _commit_color_layers(state, active_color_uid)
+
+
+func move_color_layer(from: int, to: int) -> bool:
+	if from < 0 or to < 0 or from >= color_layers.size() or to >= color_layers.size() or from == to:
+		return false
+	var state := _color_snapshot()
+	var moved: Dictionary = state[from]
+	state.remove_at(from)
+	state.insert(clampi(to, 0, state.size()), moved)
+	return _commit_color_layers(state, active_color_uid)
+
+
+func set_active_color_layer(index: int) -> bool:
+	if index < 0 or index >= color_layers.size():
+		return fail("Invalid color layer index.")
+	var uid := int((color_layers[index] as Dictionary)["uid"])
+	if uid == active_color_uid:
+		return true
+	active_color_uid = uid
+	color_layers_changed.emit(active_color_uid)
+	return true
+
+
+func color_index_by_uid(uid: int) -> int:
+	for i in color_layers.size():
+		if int((color_layers[i] as Dictionary)["uid"]) == uid:
+			return i
+	return -1
+
+
+## One color stroke = one Undo entry, including every mirror dab. Dabs stage
+## RGB words and coverage into the active layer's sparse dictionary; rollback
+## restores only touched samples. Native color_edits are never written.
+func begin_color_stroke() -> bool:
+	if package == null or has_active_edit_transaction() or _color_opacity_preview_uid >= 0:
+		return fail("Finish the current stroke or opacity gesture before color layer painting.")
+	if has_active_preview_context() and preview_owner != "color":
+		return fail("Cancel the foreign preview before color layer painting.")
+	if color_index_by_uid(active_color_uid) < 0:
+		return fail("Create or activate a color layer first.")
+	color_stroke_active = true
+	_color_stroke_before = _color_snapshot()
+	_color_stroke_uid = active_color_uid
+	_color_stroke_touched = false
+	_color_stroke_sample_value = {}
+	_color_stroke_coverage = {}
+	return true
+
+
+func _stage_color_dab(point: Vector2, radius_m: float, value: int, shape: int, pressure: float) -> bool:
+	var index_active := color_index_by_uid(active_color_uid)
+	if index_active < 0:
+		return fail("Create or activate a color layer first.")
+	if value < 0 or value > 0xffffff or not is_finite(pressure):
+		return true
+	var region := brush_region(point, radius_m)
+	if not region.has_area():
+		return true
+	var terrain := package.terrain
+	var radius := radius_m / terrain.SPACING
+	var p := clampf(pressure, 0.0, 1.0)
+	var layer_data: Dictionary = color_layers[index_active]
+	var samples: Dictionary = layer_data["samples"]
+	var journal: Dictionary = {}
+	var changed_indices: Array[int] = []
+	var touched := false
+	for z in range(region.position.y, region.end.y):
+		for x in range(region.position.x, region.end.x):
+			var weight := brush_weight(point - Vector2(x, z), radius, shape)
+			if weight <= 0.0:
+				continue
+			var index := z * terrain.dimensions.x + x
+			if index < 0 or index >= terrain.heights.size():
+				continue
+			var coverage := clampf(weight * p, 0.0, 1.0)
+			if coverage <= 0.0:
+				continue
+			if color_stroke_active and not journal.has(index):
+				journal[index] = (samples[index] as Dictionary).duplicate() if samples.has(index) else null
+			var old_value: int = int((samples[index] as Dictionary)["rgb"]) if samples.has(index) else -1
+			var old_coverage := float((samples[index] as Dictionary)["coverage"]) if samples.has(index) else 0.0
+			# Inside one stroke, repeated or mirrored dabs keep the strongest
+			# coverage across every dab. A new stroke replaces committed coverage.
+			var new_coverage := coverage
+			if color_stroke_active and _color_stroke_coverage.has(index):
+				new_coverage = maxf(coverage, float(_color_stroke_coverage[index]))
+			if old_value == value and is_equal_approx(old_coverage, new_coverage):
+				continue
+			samples[index] = {"rgb": value, "coverage": new_coverage}
+			if color_stroke_active:
+				_color_stroke_coverage[index] = new_coverage
+			changed_indices.append(index)
+			touched = true
+	if not touched:
+		return true
+	if not ColorLayers.validate_stack([layer_data], terrain.heights.size()):
+		for index: int in journal:
+			if journal[index] != null:
+				samples[index] = journal[index]
+			else:
+				samples.erase(index)
+		return fail("Invalid color layer sample produced by stroke.")
+	if color_stroke_active:
+		for index: int in changed_indices:
+			_color_stroke_sample_value[index] = (samples[index] as Dictionary).duplicate()
+		color_revision += 1
+		_color_stroke_touched = true
+		_update_color_live_preview(changed_indices)
+	else:
+		_apply_color_layers(_color_snapshot(), active_color_uid)
+	return true
+
+
+func _update_color_live_preview(changed_indices: Array[int]) -> void:
+	if package == null or not color_stroke_active or changed_indices.is_empty():
+		return
+	if not _color_live_preview:
+		_color_live_preview = true
+		preview_owner = "color"
+		preview_source_revision = document_id_source_revision()
+	var terrain := package.terrain
+	var existing: Dictionary = terrain.material_previews.get(Terrain.Layer.COLOR, {})
+	var preview := existing.duplicate()
+	var repaint: Dictionary = {}
+	for index: int in changed_indices:
+		if index < 0 or index >= terrain.heights.size():
+			continue
+		var word := ColorLayers.compose_word(terrain.source_material_value(Terrain.Layer.COLOR, index),
+			terrain.color_edits, color_layers, index)
+		if word == terrain.committed_material_value(Terrain.Layer.COLOR, index):
+			preview.erase(index)
+		else:
+			preview[index] = word
+		repaint[index] = preview.get(index, terrain.committed_material_value(Terrain.Layer.COLOR, index))
+	show_color_preview(preview, repaint)
+
+
+## A Color preview is allowed only when no live stroke or foreign-tool preview
+## owns the document. An empty color dictionary is a valid composition result,
+## so this admission is independent of has_preview().
+func _admit_color_preview() -> bool:
+	if package == null or stroke_active:
+		return false
+	if color_stroke_active or _color_live_preview:
+		return true
+	return not has_preview() or preview_owner == "color"
+
+
+func show_color_preview(values: Dictionary, repaint: Dictionary = {}) -> bool:
+	if not _admit_color_preview():
+		return fail("Cancel the active stroke or foreign preview before showing color composition.")
+	if not valid_preview({}, {Terrain.Layer.COLOR: values}):
+		return fail("Invalid color preview.")
+	var terrain := package.terrain
+	var previous: Dictionary = terrain.material_previews.get(Terrain.Layer.COLOR, {})
+	var changes := {}
+	for index: int in values:
+		if values[index] != terrain.committed_material_value(Terrain.Layer.COLOR, index):
+			changes[index] = values[index]
+	if changes.is_empty():
+		terrain.material_previews.erase(Terrain.Layer.COLOR)
+	else:
+		terrain.material_previews[Terrain.Layer.COLOR] = changes
+	preview_owner = "color"
+	preview_source_revision = document_id_source_revision()
+	_color_composition_active = true
+	var dirty := repaint.duplicate()
+	if dirty.is_empty():
+		dirty = previous.duplicate()
+		for index: int in changes:
+			dirty[index] = changes[index]
+	for index: int in dirty:
+		if not changes.has(index) and not previous.has(index):
+			continue
+		dirty[index] = changes.get(index, terrain.committed_material_value(Terrain.Layer.COLOR, index))
+	refresh_materials(Terrain.Layer.COLOR, dirty)
+	return true
+
+
+func color_preview() -> bool:
+	if package == null or color_layers.is_empty():
+		return fail("Create a color layer before previewing.")
+	var edits := ColorLayers.compose_all(package.terrain, color_layers, package.terrain.color_edits)
+	return show_color_preview(edits)
+
+
+func _clear_color_live_preview() -> void:
+	if not _color_live_preview:
+		return
+	_color_live_preview = false
+	_color_composition_active = false
+	preview_owner = ""
+	preview_source_revision = ""
+	var terrain := package.terrain
+	var previous: Dictionary = terrain.material_previews.get(Terrain.Layer.COLOR, {})
+	terrain.material_previews.erase(Terrain.Layer.COLOR)
+	refresh_materials(Terrain.Layer.COLOR, previous)
+	if not color_layers.is_empty():
+		color_preview()
+
+
+func end_color_stroke() -> bool:
+	if not color_stroke_active:
+		return false
+	var before := _color_stroke_before
+	var uid := _color_stroke_uid
+	var after := _color_snapshot()
+	var changed := _color_stroke_touched and after != before
+	color_stroke_active = false
+	_color_stroke_before = []
+	_color_stroke_uid = -1
+	_color_stroke_touched = false
+	_color_stroke_sample_value = {}
+	_color_stroke_coverage = {}
+	_clear_color_live_preview()
+	if not changed:
+		return true
+	push_history({"color": true, "before": before, "after": after,
+		"active_before": uid, "active_after": active_color_uid})
+	return true
+
+
+func cancel_color_stroke() -> void:
+	if not color_stroke_active:
+		return
+	var before := _color_stroke_before
+	var uid := _color_stroke_uid
+	color_stroke_active = false
+	_color_stroke_before = []
+	_color_stroke_uid = -1
+	_color_stroke_touched = false
+	_color_stroke_sample_value = {}
+	_color_stroke_coverage = {}
+	_clear_color_live_preview()
+	_apply_color_layers(before, uid)
+
+
+func color_dab(point: Vector2, radius_m: float, value: int, shape := BrushShape.BELL, pressure := 1.0) -> bool:
+	if package == null or stroke_active or (has_preview() and not _color_live_preview and preview_owner != "color"):
+		return fail("Finish the current stroke and cancel previews before color layer painting.")
+	if color_stroke_active:
+		return _stage_color_dab(point, radius_m, value, shape, pressure)
+	if not begin_color_stroke():
+		return false
+	if not _stage_color_dab(point, radius_m, value, shape, pressure):
+		cancel_color_stroke()
+		return false
+	return end_color_stroke()
+
+
+## Final RGB words for native export: committed native edits composited with
+## every enabled color layer. Export staging uses this without mutating
+## Terrain.color_edits, so the editable document keeps its native RGB history.
+func export_colors() -> Dictionary:
+	if package == null:
+		return {}
+	return ColorLayers.compose_all(package.terrain, color_layers, package.terrain.color_edits)
+
+
 # --- Non-destructive sculpt layers -------------------------------------------
 
 func _sculpt_snapshot() -> Array:
@@ -741,7 +1379,7 @@ func _apply_sculpt_layers(state: Array, active_uid: int) -> void:
 
 
 func _commit_sculpt_layers(state: Array, active_uid: int) -> bool:
-	if package == null or stroke_active or water_stroke_active or sculpt_stroke_active:
+	if package == null or has_active_edit_transaction():
 		return fail("Finish the current stroke before editing sculpt layers.")
 	if not Sculpt.validate_stack(state, package.terrain.heights.size()):
 		return fail("Invalid sculpt layer stack.")
@@ -754,13 +1392,16 @@ func _commit_sculpt_layers(state: Array, active_uid: int) -> bool:
 	# A validated layer mutation invalidates the old composite. Clear only a
 	# sculpt-owned preview, then recompose from the new stack; a foreign tool's
 	# preview must stay untouched and must not be silently replaced.
-	var sculpt_preview_active := has_preview() and preview_owner == "sculpt"
+	var sculpt_preview_active := (has_preview() and preview_owner == "sculpt") or _sculpt_composition_active
 	if sculpt_preview_active:
 		clear_preview()
 	push_history({"sculpt": true, "before": before, "after": after,
 		"active_before": active_sculpt_uid, "active_after": active_uid})
 	_apply_sculpt_layers(after, active_uid)
 	if sculpt_preview_active:
+		# An empty recompose is still an active sculpt composition (e.g. a
+		# zero default mask). Keep ownership so the next mutation recomposes.
+		_sculpt_composition_active = true
 		sculpt_preview()
 	return true
 
@@ -805,7 +1446,7 @@ func set_sculpt_layer_enabled(index: int, enabled: bool) -> bool:
 func begin_sculpt_opacity_preview(index: int) -> bool:
 	if package == null or index < 0 or index >= sculpt_layers.size():
 		return fail("Invalid sculpt layer opacity gesture.")
-	if stroke_active or water_stroke_active or sculpt_stroke_active:
+	if has_active_edit_transaction():
 		return fail("Finish the current stroke before editing sculpt opacity.")
 	_sculpt_opacity_preview_uid = int((sculpt_layers[index] as Dictionary)["uid"])
 	_sculpt_opacity_preview_value = float((sculpt_layers[index] as Dictionary)["opacity"])
@@ -816,7 +1457,7 @@ func begin_sculpt_opacity_preview(index: int) -> bool:
 func preview_sculpt_layer_opacity(uid: int, value: float) -> bool:
 	if package == null or _sculpt_opacity_preview_uid < 0 or uid != _sculpt_opacity_preview_uid:
 		return false
-	if stroke_active or water_stroke_active or sculpt_stroke_active:
+	if has_active_edit_transaction():
 		return false
 	if not is_finite(value) or value < 0.0 or value > 1.0:
 		return false
@@ -930,7 +1571,9 @@ func sculpt_index_by_uid(uid: int) -> int:
 ## layer state; only end_sculpt_stroke() records history. Cancel restores the
 ## snapshot taken at BEGIN and records nothing.
 func begin_sculpt_stroke() -> bool:
-	if package == null or stroke_active or water_stroke_active or (has_preview() and preview_owner != "sculpt") or sculpt_stroke_active:
+	if package == null or stroke_active or water_stroke_active or sculpt_stroke_active \
+		or sculpt_mask_stroke_active or color_stroke_active or color_mask_stroke_active \
+		or external_transaction or (has_active_preview_context() and preview_owner != "sculpt"):
 		return fail("Finish the current stroke and cancel previews before sculpting.")
 	if sculpt_index_by_uid(active_sculpt_uid) < 0:
 		return fail("Create or activate a sculpt layer first.")
@@ -1019,7 +1662,10 @@ func _stage_sculpt_dab(point: Vector2, radius_m: float, amount: float, shape: in
 ## only over samples this dab touched, then apply just the changed heights.
 ## preview_before keeps the original committed height for cancel/finish.
 func _update_sculpt_live_preview(changed_indices: Array[int]) -> void:
-	if package == null or not sculpt_stroke_active or changed_indices.is_empty():
+	if package == null or changed_indices.is_empty():
+		return
+	var live := sculpt_stroke_active or sculpt_mask_stroke_active
+	if not live:
 		return
 	if not _sculpt_live_preview:
 		_sculpt_live_preview = true
@@ -1097,7 +1743,7 @@ func cancel_sculpt_stroke() -> void:
 ## committed terrain, so enable/disable and opacity remain reversible. Within
 ## an active stroke, dabs accumulate without creating Undo entries.
 func sculpt_dab(point: Vector2, radius_m: float, amount: float, shape := BrushShape.BELL) -> bool:
-	if package == null or stroke_active or (has_preview() and not _sculpt_live_preview):
+	if package == null or (has_active_edit_transaction() and not sculpt_stroke_active) or (has_preview() and not _sculpt_live_preview):
 		return fail("Finish the current stroke and cancel previews before sculpting.")
 	if sculpt_stroke_active:
 		return _stage_sculpt_dab(point, radius_m, amount, shape)
@@ -1109,14 +1755,219 @@ func sculpt_dab(point: Vector2, radius_m: float, amount: float, shape := BrushSh
 	return end_sculpt_stroke()
 
 
+# --- Non-destructive sculpt layer masks --------------------------------------
+
+func add_sculpt_mask(index: int, default_strength: float = 0.0) -> bool:
+	if package == null or index < 0 or index >= sculpt_layers.size():
+		return fail("Invalid sculpt layer index.")
+	if (sculpt_layers[index] as Dictionary).get("mask", null) != null:
+		return fail("Sculpt layer already has a mask.")
+	if not is_finite(default_strength) or default_strength < 0.0 or default_strength > 1.0:
+		return fail("Invalid sculpt mask default strength.")
+	var state := _sculpt_snapshot()
+	(state[index] as Dictionary)["mask"] = Sculpt.mask(default_strength)
+	return _commit_sculpt_layers(state, active_sculpt_uid)
+
+
+func remove_sculpt_mask(index: int) -> bool:
+	if package == null or index < 0 or index >= sculpt_layers.size():
+		return fail("Invalid sculpt layer index.")
+	var state := _sculpt_snapshot()
+	if (state[index] as Dictionary).get("mask", null) == null:
+		return true
+	(state[index] as Dictionary)["mask"] = null
+	return _commit_sculpt_layers(state, active_sculpt_uid)
+
+
+func set_sculpt_mask_enabled(index: int, enabled: bool) -> bool:
+	if package == null or index < 0 or index >= sculpt_layers.size():
+		return fail("Invalid sculpt layer index.")
+	var state := _sculpt_snapshot()
+	var mask_data: Variant = (state[index] as Dictionary).get("mask", null)
+	if not mask_data is Dictionary:
+		return fail("Sculpt layer has no mask.")
+	if bool((mask_data as Dictionary)["enabled"]) == enabled:
+		return true
+	(mask_data as Dictionary)["enabled"] = enabled
+	return _commit_sculpt_layers(state, active_sculpt_uid)
+
+
+func set_sculpt_mask_default(index: int, strength: float) -> bool:
+	if package == null or index < 0 or index >= sculpt_layers.size():
+		return fail("Invalid sculpt layer index.")
+	var state := _sculpt_snapshot()
+	var mask_data: Variant = (state[index] as Dictionary).get("mask", null)
+	if not mask_data is Dictionary:
+		return fail("Sculpt layer has no mask.")
+	if not is_finite(strength) or strength < 0.0 or strength > 1.0:
+		return fail("Invalid sculpt mask strength.")
+	(mask_data as Dictionary)["default"] = strength
+	return _commit_sculpt_layers(state, active_sculpt_uid)
+
+
+func _mask_stroke_live_base(index: int) -> float:
+	return float(edits.get(index, base_heights[index]))
+
+
+## Sculpt masks reuse the sculpt-owned live preview. Admission is strict: a
+## foreign preview, another stroke or a staged opacity gesture all refuse, but
+## an existing sculpt-owned preview is compatible and may stay visible.
+func begin_sculpt_mask_stroke() -> bool:
+	if package == null or has_active_edit_transaction() or _sculpt_opacity_preview_uid >= 0:
+		return fail("Finish the current edit before painting a sculpt mask.")
+	if has_active_preview_context() and preview_owner != "sculpt" and not _sculpt_live_preview:
+		return fail("Cancel the foreign preview before painting a sculpt mask.")
+	var index := sculpt_index_by_uid(active_sculpt_uid)
+	if index < 0 or (sculpt_layers[index] as Dictionary).get("mask", null) == null:
+		return fail("Select a sculpt layer with a mask.")
+	_sculpt_mask_restore_preview = has_preview() and preview_owner == "sculpt" and not _sculpt_live_preview
+	sculpt_mask_stroke_active = true
+	_sculpt_mask_before = _sculpt_snapshot()
+	_sculpt_mask_uid = active_sculpt_uid
+	_sculpt_mask_journal = {}
+	_sculpt_mask_journal_present = {}
+	return true
+
+
+## One dab blends toward `target_strength` at every affected sample; the blend
+## step is `brush_weight × flow`. BrushPanel feeds pressure × hold into `flow`,
+## never into the target, so Reveal and Hide move samples the same distance:
+## 20% flow takes 0 -> 0.2 and 1 -> 0.8 at the brush centre. Sparse overrides
+## equal to the mask default are removed. Only touched samples are journalled;
+## an invalid dab rolls back this dab alone.
+func sculpt_mask_dab(point: Vector2, radius_m: float, target_strength: float, shape := BrushShape.BELL, flow := 1.0) -> bool:
+	if not sculpt_mask_stroke_active or not is_finite(target_strength) \
+		or target_strength < 0.0 or target_strength > 1.0 \
+		or not is_finite(flow) or flow < 0.0 or flow > 1.0 \
+		or not point.is_finite() or not is_finite(radius_m) \
+		or radius_m <= 0.0 or radius_m > 256.0:
+		return fail("Invalid sculpt mask dab.")
+	var terrain := package.terrain
+	var region := brush_region(point, radius_m)
+	if not region.has_area():
+		return true
+	var radius := radius_m / terrain.SPACING
+	var index_active := sculpt_index_by_uid(_sculpt_mask_uid)
+	if index_active < 0:
+		return fail("The masked sculpt layer is no longer available.")
+	var mask_data: Dictionary = (sculpt_layers[index_active] as Dictionary)["mask"]
+	var samples: Dictionary = mask_data["samples"]
+	var default_value := float(mask_data["default"])
+	var journal: Dictionary = {}
+	var journal_present: Dictionary = {}
+	var changed_indices: Array[int] = []
+	for z in range(region.position.y, region.end.y):
+		for x in range(region.position.x, region.end.x):
+			var weight := brush_weight(point - Vector2(x, z), radius, shape)
+			if weight <= 0.0:
+				continue
+			var sample_index := z * terrain.dimensions.x + x
+			if sample_index < 0 or sample_index >= terrain.heights.size():
+				continue
+			if not journal.has(sample_index):
+				journal[sample_index] = float(samples.get(sample_index, default_value))
+				journal_present[sample_index] = samples.has(sample_index)
+			var previous := float(journal[sample_index])
+			var next := clampf(lerpf(previous, target_strength, clampf(weight * flow, 0.0, 1.0)), 0.0, 1.0)
+			if is_equal_approx(next, default_value):
+				samples.erase(sample_index)
+			else:
+				samples[sample_index] = next
+			changed_indices.append(sample_index)
+	if changed_indices.is_empty():
+		return true
+	if not Sculpt.validate_stack([sculpt_layers[index_active]], terrain.heights.size()):
+		for restore_index: int in journal:
+			if bool(journal_present[restore_index]):
+				samples[restore_index] = float(journal[restore_index])
+			else:
+				samples.erase(restore_index)
+		return fail("Invalid sculpt mask sample produced by stroke.")
+	for restore_index: int in journal:
+		if not _sculpt_mask_journal.has(restore_index):
+			_sculpt_mask_journal[restore_index] = journal[restore_index]
+			_sculpt_mask_journal_present[restore_index] = journal_present[restore_index]
+	sculpt_revision += 1
+	_update_sculpt_live_preview(changed_indices)
+	return true
+
+
+func end_sculpt_mask_stroke() -> bool:
+	if not sculpt_mask_stroke_active:
+		return false
+	var before := _sculpt_mask_before
+	var after := _sculpt_snapshot()
+	var uid := _sculpt_mask_uid
+	var changed := after != before
+	var restore := _sculpt_mask_restore_preview
+	var had_live := _sculpt_live_preview
+	var touched_indices: Array[int] = []
+	for index: int in _sculpt_mask_journal:
+		touched_indices.append(index)
+	sculpt_mask_stroke_active = false
+	_sculpt_mask_before = []
+	_sculpt_mask_uid = -1
+	_sculpt_mask_journal = {}
+	_sculpt_mask_journal_present = {}
+	_sculpt_mask_restore_preview = false
+	# Keep the final composed surface visible before releasing stroke ownership.
+	if had_live:
+		_sculpt_live_preview = true
+		preview_owner = "sculpt"
+		preview_source_revision = document_id_source_revision()
+		preview_sculpt_revision = sculpt_revision
+		_update_sculpt_live_preview(touched_indices)
+	_clear_sculpt_live_preview()
+	if changed:
+		push_history({"sculpt": true, "before": before, "after": after,
+			"active_before": uid, "active_after": active_sculpt_uid})
+	if sculpt_layers.size() > 0 and not Sculpt.compose(base_heights, sculpt_layers,
+		minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0), edits).is_empty():
+		sculpt_preview()
+	elif restore:
+		_mark_empty_sculpt_composition()
+	return true
+
+
+func cancel_sculpt_mask_stroke() -> void:
+	if not sculpt_mask_stroke_active:
+		return
+	var before := _sculpt_mask_before
+	var uid := _sculpt_mask_uid
+	var restore := _sculpt_mask_restore_preview
+	sculpt_mask_stroke_active = false
+	_sculpt_mask_before = []
+	_sculpt_mask_uid = -1
+	_sculpt_mask_journal = {}
+	_sculpt_mask_journal_present = {}
+	_sculpt_mask_restore_preview = false
+	_clear_sculpt_live_preview()
+	_apply_sculpt_layers(before, uid)
+	if restore and sculpt_layers.size() > 0:
+		sculpt_preview()
+
+
+func _mark_empty_sculpt_composition() -> void:
+	# An active sculpt composition can legitimately equal the baseline (e.g. a
+	# default-zero mask). Keep ownership explicit so mask OFF restores the delta
+	# without confusing an empty result with "no compositor".
+	_sculpt_composition_active = true
+	preview_owner = "sculpt"
+	preview_source_revision = document_id_source_revision()
+	preview_sculpt_revision = sculpt_revision
+
+
 func sculpt_preview() -> bool:
-	if package == null or stroke_active or sculpt_layers.is_empty():
+	if package == null or has_active_edit_transaction() or sculpt_layers.is_empty():
 		return fail("Create a sculpt layer before previewing.")
 	if _sculpt_live_preview:
 		_clear_sculpt_live_preview()
 	var limit := minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0)
 	var values := Sculpt.compose(base_heights, sculpt_layers, limit, edits)
 	if values.is_empty():
+		if _sculpt_composition_active:
+			_mark_empty_sculpt_composition()
+			return true
 		return fail("The sculpt layer has no deltas to preview.")
 	return show_preview(values, {}, "sculpt")
 
@@ -1163,15 +2014,18 @@ func bake_sculpt_layers() -> bool:
 	return true
 
 
-func begin_stroke(layer := Terrain.Layer.HEIGHT) -> void:
+func begin_stroke(layer := Terrain.Layer.HEIGHT) -> bool:
+	if has_active_edit_transaction():
+		return fail("Finish the current edit before painting terrain.")
 	if has_preview():
-		return
+		return fail("Clear the terrain preview before painting terrain.")
 	stroke_active = true
 	stroke_layer = layer
 	stroke = {}
 	stroke_weights = {}
 	stroke_exact = {}
 	stroke_tick = 0
+	return true
 
 
 func dab(point: Vector2, radius_m: float, amount: float, mode := Brush.OFFSET, shape := BrushShape.BELL, pressure := 1.0, accumulate := false) -> void:
@@ -1435,9 +2289,14 @@ func end_stroke() -> void:
 ## preview is cleared for the mutation and recomposed from the restored stack,
 ## so the visible surface keeps matching export after undo/redo.
 func _prepare_history_preview() -> bool:
-	if not has_preview():
+	if not has_preview() and not _color_composition_active and not _sculpt_composition_active and not _sculpt_live_preview:
 		return true
-	if preview_owner != "sculpt" and not _sculpt_live_preview:
+	if _color_composition_active or preview_owner == "color" or _color_live_preview:
+		if _color_live_preview:
+			_clear_color_live_preview()
+		terrain_color_preview_suspend()
+		return true
+	if preview_owner != "sculpt" and not _sculpt_live_preview and not _sculpt_composition_active:
 		return false
 	if _sculpt_live_preview:
 		_clear_sculpt_live_preview()
@@ -1446,33 +2305,62 @@ func _prepare_history_preview() -> bool:
 	return true
 
 
-func _restore_history_preview(was_sculpt: bool) -> void:
+func terrain_color_preview_suspend() -> void:
+	if package == null:
+		return
+	var terrain := package.terrain
+	if not terrain.material_previews.has(Terrain.Layer.COLOR):
+		return
+	var changes: Dictionary = terrain.material_previews[Terrain.Layer.COLOR]
+	terrain.material_previews.erase(Terrain.Layer.COLOR)
+	refresh_materials(Terrain.Layer.COLOR, changes)
+
+
+func _restore_history_preview(was_sculpt: bool, was_color: bool = false) -> bool:
+	if was_color and not color_layers.is_empty():
+		return color_preview()
 	if was_sculpt and not sculpt_layers.is_empty():
-		sculpt_preview()
+		var limit := minf(MAX_EDITOR_ABS_HEIGHT, package.granularity * 32000.0)
+		var values := Sculpt.compose(base_heights, sculpt_layers, limit, edits)
+		if values.is_empty():
+			_mark_empty_sculpt_composition()
+			return true
+		return show_preview(values, {}, "sculpt")
+	return false
 
 
 func undo() -> void:
 	if has_active_edit_transaction() or undo_stack.is_empty():
 		return
-	var was_sculpt := has_preview() and (preview_owner == "sculpt" or _sculpt_live_preview)
+	var was_sculpt := _sculpt_composition_active or _sculpt_live_preview or (has_preview() and preview_owner == "sculpt")
+	var was_color := _color_composition_active or _color_live_preview
+	var was_visible := was_sculpt and (has_preview() or _sculpt_composition_active)
 	if not _prepare_history_preview():
 		return
 	var change: Dictionary = undo_stack.pop_back()
 	apply_history(change, "before")
 	redo_stack.append(change)
-	_restore_history_preview(was_sculpt)
+	if was_visible:
+		_restore_history_preview(was_sculpt, was_color)
+	else:
+		_restore_history_preview(false, was_color)
 
 
 func redo() -> void:
 	if has_active_edit_transaction() or redo_stack.is_empty():
 		return
-	var was_sculpt := has_preview() and (preview_owner == "sculpt" or _sculpt_live_preview)
+	var was_sculpt := _sculpt_composition_active or _sculpt_live_preview or (has_preview() and preview_owner == "sculpt")
+	var was_color := _color_composition_active or _color_live_preview
+	var was_visible := was_sculpt and (has_preview() or _sculpt_composition_active)
 	if not _prepare_history_preview():
 		return
 	var change: Dictionary = redo_stack.pop_back()
 	apply_history(change, "after")
 	undo_stack.append(change)
-	_restore_history_preview(was_sculpt)
+	if was_visible:
+		_restore_history_preview(was_sculpt, was_color)
+	else:
+		_restore_history_preview(false, was_color)
 
 
 func record_change(before: Dictionary, after: Dictionary) -> void:
@@ -1556,6 +2444,9 @@ func apply_history(change: Dictionary, direction: String) -> void:
 	elif change.has("sculpt"):
 		var active_key := "active_before" if direction == "before" else "active_after"
 		_apply_sculpt_layers(change[direction] as Array, int(change.get(active_key, -1)))
+	elif change.has("color"):
+		var active_key := "active_before" if direction == "before" else "active_after"
+		_apply_color_layers(change[direction] as Array, int(change.get(active_key, -1)))
 	else:
 		var materials := {}
 		for layer: int in change.get("materials", {}):
@@ -2147,12 +3038,14 @@ func set_water_cover(layer: int, block: int, value: bool) -> void:
 	water_edits[layer][block] = value
 
 
-func begin_water_stroke() -> void:
+func begin_water_stroke() -> bool:
+	if has_active_edit_transaction():
+		return fail("Finish the current edit before painting water.")
 	if has_preview():
-		fail("Clear the terrain preview before painting water.")
-		return
+		return fail("Clear the terrain preview before painting water.")
 	water_stroke = {}
 	water_stroke_active = true
+	return true
 
 
 func water_dab(point: Vector2, radius_m: float, layer: int, add: bool) -> void:
@@ -3099,6 +3992,16 @@ func has_preview() -> bool:
 	return not preview_after.is_empty() or not package.terrain.material_previews.is_empty()
 
 
+## A composition can be logically active while its buffer is empty (e.g. a
+## default-zero mask composes to nothing). Ownership survives that state, so
+## admission checks use this predicate instead of has_preview() alone: an
+## empty composition must never be silently captured by another tool.
+func has_active_preview_context() -> bool:
+	if package == null:
+		return false
+	return has_preview() or _sculpt_composition_active or _color_composition_active
+
+
 func valid_preview(values: Dictionary, materials: Dictionary) -> bool:
 	var terrain := package.terrain
 	for index: Variant in values:
@@ -3130,13 +4033,14 @@ func document_id_source_revision() -> String:
 
 
 func show_preview(values: Dictionary, materials := {}, owner := "") -> bool:
-	if stroke_active or not valid_preview(values, materials):
-		return fail("Invalid terrain preview.")
+	if has_active_edit_transaction() or not valid_preview(values, materials):
+		return fail("Finish the active stroke before showing a terrain preview.")
 	clear_preview()
 	error = ""
 	preview_owner = owner
 	preview_source_revision = document_id_source_revision()
 	preview_sculpt_revision = sculpt_revision if owner == "sculpt" else -1
+	_sculpt_composition_active = owner == "sculpt"
 	var terrain := package.terrain
 	var native_sample := PackedFloat32Array([0.0])
 	for index: int in values:
@@ -3162,6 +4066,8 @@ func clear_preview() -> void:
 	preview_before = {}
 	preview_after = {}
 	preview_owner = ""
+	_color_composition_active = false
+	_sculpt_composition_active = false
 	preview_source_revision = ""
 	preview_sculpt_revision = -1
 	var materials := package.terrain.material_previews

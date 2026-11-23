@@ -417,7 +417,7 @@ func save_project(document: Document, target: String) -> bool:
 			water_records[str(layer)] = {"cover": cover}
 	document.ensure_layer_uids()
 	var record := {"schema": 1, "source": document.package.source_path, "files": document.package.files, "edits": edits,
-		"layers": document.layers, "layerUids": document.layer_uids.duplicate(), "sculptLayers": document.sculpt_layers.duplicate(true), "activeSculptUid": document.active_sculpt_uid, "pathEdits": path_edits, "objectEdits": object_edits, "objectLabelEdits": object_label_edits,
+		"layers": document.layers, "layerUids": document.layer_uids.duplicate(), "sculptLayers": document.sculpt_layers.duplicate(true), "activeSculptUid": document.active_sculpt_uid, "colorLayers": document.color_layers.duplicate(true), "activeColorUid": document.active_color_uid, "pathEdits": path_edits, "objectEdits": object_edits, "objectLabelEdits": object_label_edits,
 		"objectOdfEdits": object_odf_edits, "objectRemovals": object_removals, "objectInserts": object_inserts, "waterEdits": water_records,
 		"target": {
 			"engineProfile": document.engine_profile,
@@ -580,16 +580,17 @@ func export_native(document: Document, target: String) -> bool:
 	var stage := target.get_base_dir().path_join(".bzmag-" + nonce())
 	if DirAccess.make_dir_absolute(stage) != OK:
 		return fail("Could not reserve export staging folder.")
-	# Compose enabled sculpt layers into export staging only. The editable
-	# document, its BZMAG layers and its Undo history stay untouched.
+	# Compose enabled sculpt and color layers into export staging only. The
+	# editable document, its BZMAG layers and its Undo history stay untouched.
 	var export_edits := document.export_heights()
-	var terrain := package.terrain.encode(export_edits)
+	var export_colors := document.export_colors()
+	var terrain := package.terrain.encode(export_edits, export_colors)
 	var names := PackedStringArray(package.files.keys())
 	var hashes := {}
 	for name in names:
 		var output := stage.path_join(name)
 		var expected: String = package.files[name]
-		if name == package.terrain_name and (not export_edits.is_empty() or package.terrain.has_material_edits()):
+		if name == package.terrain_name and (not export_edits.is_empty() or not export_colors.is_empty() or package.terrain.has_material_edits()):
 			if not write_bytes(output, terrain) or FileAccess.get_file_as_bytes(output) != terrain:
 				return rollback(stage, names, "Could not write and verify " + name)
 			expected = FileAccess.get_sha256(output)
@@ -622,7 +623,9 @@ func export_native(document: Document, target: String) -> bool:
 	if not reimport.open(stage.path_join(package.source_path.get_file())) or reimport.files != hashes or reimport.terrain.heights != expected_heights:
 		return rollback(stage, names, "Export re-import failed. " + reimport.error)
 	for layer in [Terrain.Layer.COLOR, Terrain.Layer.TILES]:
-		var edits := package.terrain.material_changes(layer)
+		# Reimport oracle uses composed export colors, not the editable committed
+		# edits: unbaked color layers are present in the TER but absent there.
+		var edits: Dictionary = export_colors if layer == Terrain.Layer.COLOR else package.terrain.material_changes(layer)
 		for index: int in edits:
 			if reimport.terrain.material_value(layer, index) != edits[index]:
 				return rollback(stage, names, "Modified terrain material did not re-import as edited.")
