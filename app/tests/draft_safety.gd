@@ -152,6 +152,8 @@ func run() -> void:
 	test_empty_sculpt_color_preview_refusal(args[0])
 	test_empty_color_sculpt_opacity_refusal(args[0])
 	test_empty_sculpt_color_opacity_refusal(args[0])
+	test_color_mask_flow_oracles(args[0])
+	test_mask_operations(args[0])
 	print("FAILURES: %d" % failures)
 	quit(0 if failures == 0 else 1)
 
@@ -1527,7 +1529,7 @@ func test_mask_brush_panel_integration(fixture: String) -> void:
 	check(doc.end_color_mask_stroke(), "mask brush: end hide stroke")
 	check(doc.undo_stack.size() == undo_before + 1, "mask brush: one Undo per stroke")
 	mask_samples = ((doc.color_layers[0] as Dictionary)["mask"] as Dictionary)["samples"]
-	check(float(mask_samples[sample]) == 0.0, "mask brush: hide strength is 0")
+	check(not mask_samples.has(sample) or is_equal_approx(float(mask_samples[sample]), 0.0), "mask brush: hide strength is 0")
 	brush.queue_free()
 
 
@@ -1956,7 +1958,7 @@ func test_sculpt_mask_pressure_oracles(fixture: String) -> void:
 	check(doc.sculpt_mask_dab(Vector2(220.0, 220.0), 8.0, 1.0, Document.BrushShape.CIRCLE, 0.2),
 		"flow: reveal dab at flow 0.2")
 	var samples: Dictionary = ((doc.sculpt_layers[0] as Dictionary)["mask"] as Dictionary)["samples"]
-	check(absf(float(samples[sample]) - 0.2) < 0.005,
+	check(absf(float(samples.get(sample, -1.0)) - 0.2) < 0.005,
 		"flow: reveal 20%% moves 0 -> 0.2 (got %.4f)" % float(samples[sample]))
 	check(doc.sculpt_mask_dab(Vector2(220.0, 220.0), 8.0, 1.0, Document.BrushShape.CIRCLE, 0.5),
 		"flow: reveal dab at flow 0.5")
@@ -1989,12 +1991,12 @@ func test_sculpt_mask_pressure_oracles(fixture: String) -> void:
 	samples = ((doc.sculpt_layers[0] as Dictionary)["mask"] as Dictionary)["samples"]
 	brush.set_pressure(20)
 	brush.apply_dab(doc, Vector2(220.0, 220.0))
-	check(absf(float(samples[sample]) - 0.2) < 0.005,
-		"flow: brush reveal 20%% writes 0.2 (got %.4f)" % float(samples[sample]))
+	check(absf(float(samples.get(sample, -1.0)) - 0.2) < 0.005,
+		"flow: brush reveal 20%% writes 0.2 (got %.4f)" % float(samples.get(sample, -1.0)))
 	brush.sculpt_mask_reveal.set_pressed_no_signal(false)
 	brush.apply_dab(doc, Vector2(220.0, 220.0))
-	check(absf(float(samples[sample]) - 0.16) < 0.005,
-		"flow: brush hide 20%% from 0.2 removes only 0.04 (got %.4f)" % float(samples[sample]))
+	check(absf(float(samples.get(sample, -1.0)) - 0.16) < 0.005,
+		"flow: brush hide 20%% from 0.2 removes only 0.04 (got %.4f)" % float(samples.get(sample, -1.0)))
 	var contact := float(samples[sample])
 	brush.set_pressure(100)
 	brush.apply_dab(doc, Vector2(220.0, 220.0))
@@ -2322,4 +2324,88 @@ func test_empty_sculpt_color_opacity_refusal(fixture: String) -> void:
 	check(is_equal_approx(float((doc.color_layers[0] as Dictionary)["opacity"]), 0.4),
 		"empty-sculpt-op: committed opacity applied")
 	check(doc.undo_stack.size() == history_before + 1, "empty-sculpt-op: commit is one Undo")
+	unwatch_material_refresh(doc)
+
+
+## T-58 RED: Color Mask must share Sculpt Mask flow physics. Brush pressure is
+## the alpha of lerp(previous, target), not the target itself; BELL falloff must
+## yield graded strengths; invalid args must refuse without partial mutation.
+func test_color_mask_flow_oracles(fixture: String) -> void:
+	var doc := fresh_document(fixture, "color-mask-flow")
+	var terrain: Terrain = doc.package.terrain
+	var sample := 220 * terrain.dimensions.x + 220
+	check(doc.add_color_layer() == 0, "flow: add color layer")
+	check(doc.add_color_mask(0, 0.0), "flow: add default-zero mask")
+	var brush := BrushPanel.new()
+	root.add_child(brush)
+	brush.set_brush_size(8)
+	brush.set_shape(Document.BrushShape.CIRCLE)
+	brush.surface.select(Terrain.Layer.COLOR)
+	brush.mask_target.set_pressed_no_signal(true)
+	brush.mask_reveal.set_pressed_no_signal(true)
+	brush.set_pressure(20)
+	var undo_before := doc.undo_stack.size()
+	check(doc.begin_color_mask_stroke(), "flow: begin color reveal stroke")
+	brush.apply_dab(doc, Vector2(220.0, 220.0))
+	var samples: Dictionary = ((doc.color_layers[0] as Dictionary)["mask"] as Dictionary)["samples"]
+	check(absf(float(samples.get(sample, -1.0)) - 0.2) < 0.005,
+		"flow: brush reveal 20%% writes 0.2 (got %.4f)" % float(samples.get(sample, -1.0)))
+	brush.mask_reveal.set_pressed_no_signal(false)
+	brush.apply_dab(doc, Vector2(220.0, 220.0))
+	samples = ((doc.color_layers[0] as Dictionary)["mask"] as Dictionary)["samples"]
+	check(absf(float(samples.get(sample, -1.0)) - 0.16) < 0.005,
+		"flow: brush hide 20%% from 0.2 removes only 0.04 (got %.4f)" % float(samples.get(sample, -1.0)))
+	check(doc.end_color_mask_stroke(), "flow: end color stroke")
+	check(doc.undo_stack.size() == undo_before + 1, "flow: color stroke is one Undo")
+	brush.queue_free()
+	unwatch_material_refresh(doc)
+
+
+## T-59 RED: mask utilities operate on the canonical sparse representation and
+## use the existing one-Undo layer commit lifecycle. No active stroke admitted.
+func test_mask_operations(fixture: String) -> void:
+	var doc := fresh_document(fixture, "mask-operations")
+	var terrain: Terrain = doc.package.terrain
+	var a := 200 * terrain.dimensions.x + 200
+	var b := 201 * terrain.dimensions.x + 201
+	check(doc.add_color_layer() == 0, "ops: add color layer")
+	check(doc.add_color_mask(0, 0.2), "ops: add color mask default 0.2")
+	var mask_data: Dictionary = (doc.color_layers[0] as Dictionary)["mask"]
+	var samples_set: Dictionary = mask_data["samples"]
+	samples_set[a] = 0.8
+	samples_set[b] = 0.0
+	var before := doc.undo_stack.size()
+	check(doc.invert_color_mask(0), "ops: invert color mask")
+	var mask: Dictionary = (doc.color_layers[0] as Dictionary)["mask"]
+	check(is_equal_approx(float(mask["default"]), 0.8), "ops: inverted default 0.8")
+	var samples: Dictionary = mask["samples"]
+	check(is_equal_approx(float(samples[a]), 0.2), "ops: inverted A 0.2")
+	check(is_equal_approx(float(samples[b]), 1.0), "ops: inverted B 1.0")
+	check(doc.undo_stack.size() == before + 1, "ops: invert is one Undo")
+	doc.undo()
+	mask = (doc.color_layers[0] as Dictionary)["mask"]
+	check(is_equal_approx(float(mask["default"]), 0.2), "ops: undo restores default")
+	doc.redo()
+	check(doc.clear_color_mask_overrides(0), "ops: clear color overrides")
+	samples = ((doc.color_layers[0] as Dictionary)["mask"] as Dictionary)["samples"]
+	check(samples.is_empty(), "ops: clear removes all sparse overrides")
+	check(doc.fill_color_mask(0, 1.0), "ops: fill white")
+	mask = (doc.color_layers[0] as Dictionary)["mask"]
+	check(is_equal_approx(float(mask["default"]), 1.0), "ops: fill sets default 1")
+	check((mask["samples"] as Dictionary).is_empty(), "ops: fill clears overrides")
+	check(doc.fill_color_mask(0, 0.0), "ops: fill black")
+	check(not doc.fill_color_mask(0, 2.0), "ops: invalid strength refused")
+	check(doc.add_sculpt_layer() == 0, "ops: add sculpt layer")
+	check(doc.add_sculpt_mask(0, 0.25), "ops: add sculpt mask")
+	check(doc.invert_sculpt_mask(0), "ops: invert sculpt mask")
+	var smask: Dictionary = (doc.sculpt_layers[0] as Dictionary)["mask"]
+	check(is_equal_approx(float(smask["default"]), 0.75), "ops: sculpt inverted default")
+	check(doc.clear_sculpt_mask_overrides(0), "ops: clear sculpt overrides")
+	check(doc.fill_sculpt_mask(0, 1.0), "ops: sculpt fill white")
+	check(doc.invert_color_mask(0) and doc.invert_color_mask(0), "ops: double invert color")
+	mask = (doc.color_layers[0] as Dictionary)["mask"]
+	check(is_equal_approx(float(mask["default"]), 0.0), "ops: double invert restores default")
+	check(doc.invert_sculpt_mask(0) and doc.invert_sculpt_mask(0), "ops: double invert sculpt")
+	smask = (doc.sculpt_layers[0] as Dictionary)["mask"]
+	check(is_equal_approx(float(smask["default"]), 1.0), "ops: double invert restores sculpt default")
 	unwatch_material_refresh(doc)

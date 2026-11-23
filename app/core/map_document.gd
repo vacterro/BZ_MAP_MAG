@@ -936,6 +936,58 @@ func set_color_mask_default(index: int, strength: float) -> bool:
 	return _commit_color_layers(state, active_color_uid)
 
 
+## Sparse mask utilities: Fill, Clear and Invert operate on the canonical
+## mask record and commit through the existing one-Undo layer lifecycle.
+func _mask_op_guard_color(index: int) -> Array:
+	if package == null or index < 0 or index >= color_layers.size():
+		fail("Invalid color layer index.")
+		return []
+	if has_active_edit_transaction():
+		fail("Finish the current stroke before editing a color mask.")
+		return []
+	var state := _color_snapshot()
+	var mask_data: Variant = (state[index] as Dictionary).get("mask", null)
+	if not mask_data is Dictionary:
+		fail("Color layer has no mask.")
+		return []
+	return state
+
+
+func fill_color_mask(index: int, strength: float) -> bool:
+	var state := _mask_op_guard_color(index)
+	if state.is_empty() or not is_finite(strength) or strength < 0.0 or strength > 1.0:
+		return fail("Invalid color mask fill strength.")
+	var mask_data: Dictionary = (state[index] as Dictionary)["mask"]
+	mask_data["default"] = strength
+	mask_data["samples"] = {}
+	return _commit_color_layers(state, active_color_uid)
+
+
+func clear_color_mask_overrides(index: int) -> bool:
+	var state := _mask_op_guard_color(index)
+	if state.is_empty():
+		return false
+	var mask_data: Dictionary = (state[index] as Dictionary)["mask"]
+	(mask_data["samples"] as Dictionary).clear()
+	return _commit_color_layers(state, active_color_uid)
+
+
+func invert_color_mask(index: int) -> bool:
+	var state := _mask_op_guard_color(index)
+	if state.is_empty():
+		return false
+	var mask_data: Dictionary = (state[index] as Dictionary)["mask"]
+	var new_default := 1.0 - float(mask_data["default"])
+	var inverted: Dictionary = {}
+	for key: Variant in (mask_data["samples"] as Dictionary):
+		var value := 1.0 - float((mask_data["samples"] as Dictionary)[key])
+		if not is_equal_approx(value, new_default):
+			inverted[key] = value
+	mask_data["default"] = new_default
+	mask_data["samples"] = inverted
+	return _commit_color_layers(state, active_color_uid)
+
+
 func begin_color_mask_stroke() -> bool:
 	if package == null or has_active_edit_transaction() or _color_opacity_preview_uid >= 0:
 		return fail("Finish the current edit before painting a color mask.")
@@ -950,13 +1002,16 @@ func begin_color_mask_stroke() -> bool:
 	return true
 
 
-func color_mask_dab(point: Vector2, radius_m: float, strength: float, shape := BrushShape.BELL) -> bool:
-	if not color_mask_stroke_active or not is_finite(strength):
-		return false
+func color_mask_dab(point: Vector2, radius_m: float, strength: float, shape := BrushShape.BELL, flow := 1.0) -> bool:
+	if not color_mask_stroke_active or not is_finite(strength) \
+		or strength < 0.0 or strength > 1.0 \
+		or not is_finite(flow) or flow < 0.0 or flow > 1.0 \
+		or not point.is_finite() or not is_finite(radius_m) \
+		or radius_m <= 0.0 or radius_m > 256.0:
+		return fail("Invalid color mask dab.")
 	var index := color_index_by_uid(_color_mask_uid)
 	if index < 0:
-		return false
-	var value := clampf(strength, 0.0, 1.0)
+		return fail("The masked color layer is no longer available.")
 	var terrain := package.terrain
 	var region := brush_region(point, radius_m)
 	if not region.has_area():
@@ -965,7 +1020,10 @@ func color_mask_dab(point: Vector2, radius_m: float, strength: float, shape := B
 	var layer_data: Dictionary = color_layers[index]
 	var mask_data: Dictionary = layer_data["mask"]
 	var samples: Dictionary = mask_data["samples"]
-	var touched := false
+	var default_value := float(mask_data["default"])
+	var journal: Dictionary = {}
+	var journal_present: Dictionary = {}
+	var changed_indices: Array[int] = []
 	for z in range(region.position.y, region.end.y):
 		for x in range(region.position.x, region.end.x):
 			var weight := brush_weight(point - Vector2(x, z), radius, shape)
@@ -974,15 +1032,28 @@ func color_mask_dab(point: Vector2, radius_m: float, strength: float, shape := B
 			var sample_index := z * terrain.dimensions.x + x
 			if sample_index < 0 or sample_index >= terrain.heights.size():
 				continue
-			samples[sample_index] = value
-			touched = true
-	if not touched:
+			if not journal.has(sample_index):
+				journal[sample_index] = float(samples.get(sample_index, default_value))
+				journal_present[sample_index] = samples.has(sample_index)
+			var previous := float(journal[sample_index])
+			var next := clampf(lerpf(previous, strength, clampf(weight * flow, 0.0, 1.0)), 0.0, 1.0)
+			if is_equal_approx(next, default_value):
+				samples.erase(sample_index)
+			else:
+				samples[sample_index] = next
+			changed_indices.append(sample_index)
+	if changed_indices.is_empty():
 		return true
 	if not ColorLayers.validate_stack([layer_data], terrain.heights.size()):
-		_apply_color_layers(_color_mask_before, _color_mask_uid)
+		for restore_index: int in journal:
+			if bool(journal_present[restore_index]):
+				samples[restore_index] = float(journal[restore_index])
+			else:
+				samples.erase(restore_index)
 		return fail("Invalid color mask sample produced by stroke.")
 	color_revision += 1
-	return color_preview()
+	_update_color_live_preview(changed_indices)
+	return true
 
 
 func end_color_mask_stroke() -> bool:
@@ -996,9 +1067,11 @@ func end_color_mask_stroke() -> bool:
 	_color_mask_before = []
 	_color_mask_uid = -1
 	if not changed:
+		_clear_color_live_preview()
 		return true
 	push_history({"color": true, "before": before, "after": after,
 		"active_before": uid, "active_after": active_color_uid})
+	_clear_color_live_preview()
 	return true
 
 
@@ -1010,6 +1083,7 @@ func cancel_color_mask_stroke() -> void:
 	color_mask_stroke_active = false
 	_color_mask_before = []
 	_color_mask_uid = -1
+	_clear_color_live_preview()
 	_apply_color_layers(before, uid)
 	if _color_composition_active:
 		color_preview()
@@ -1213,7 +1287,7 @@ func _stage_color_dab(point: Vector2, radius_m: float, value: int, shape: int, p
 
 
 func _update_color_live_preview(changed_indices: Array[int]) -> void:
-	if package == null or not color_stroke_active or changed_indices.is_empty():
+	if package == null or not (color_stroke_active or color_mask_stroke_active) or changed_indices.is_empty():
 		return
 	if not _color_live_preview:
 		_color_live_preview = true
@@ -1804,6 +1878,56 @@ func set_sculpt_mask_default(index: int, strength: float) -> bool:
 	if not is_finite(strength) or strength < 0.0 or strength > 1.0:
 		return fail("Invalid sculpt mask strength.")
 	(mask_data as Dictionary)["default"] = strength
+	return _commit_sculpt_layers(state, active_sculpt_uid)
+
+
+func _mask_op_guard_sculpt(index: int) -> Array:
+	if package == null or index < 0 or index >= sculpt_layers.size():
+		fail("Invalid sculpt layer index.")
+		return []
+	if has_active_edit_transaction():
+		fail("Finish the current stroke before editing a sculpt mask.")
+		return []
+	var state := _sculpt_snapshot()
+	var mask_data: Variant = (state[index] as Dictionary).get("mask", null)
+	if not mask_data is Dictionary:
+		fail("Sculpt layer has no mask.")
+		return []
+	return state
+
+
+func fill_sculpt_mask(index: int, strength: float) -> bool:
+	var state := _mask_op_guard_sculpt(index)
+	if state.is_empty() or not is_finite(strength) or strength < 0.0 or strength > 1.0:
+		return fail("Invalid sculpt mask fill strength.")
+	var mask_data: Dictionary = (state[index] as Dictionary)["mask"]
+	mask_data["default"] = strength
+	mask_data["samples"] = {}
+	return _commit_sculpt_layers(state, active_sculpt_uid)
+
+
+func clear_sculpt_mask_overrides(index: int) -> bool:
+	var state := _mask_op_guard_sculpt(index)
+	if state.is_empty():
+		return false
+	var mask_data: Dictionary = (state[index] as Dictionary)["mask"]
+	(mask_data["samples"] as Dictionary).clear()
+	return _commit_sculpt_layers(state, active_sculpt_uid)
+
+
+func invert_sculpt_mask(index: int) -> bool:
+	var state := _mask_op_guard_sculpt(index)
+	if state.is_empty():
+		return false
+	var mask_data: Dictionary = (state[index] as Dictionary)["mask"]
+	var new_default := 1.0 - float(mask_data["default"])
+	var inverted: Dictionary = {}
+	for key: Variant in (mask_data["samples"] as Dictionary):
+		var value := 1.0 - float((mask_data["samples"] as Dictionary)[key])
+		if not is_equal_approx(value, new_default):
+			inverted[key] = value
+	mask_data["default"] = new_default
+	mask_data["samples"] = inverted
 	return _commit_sculpt_layers(state, active_sculpt_uid)
 
 

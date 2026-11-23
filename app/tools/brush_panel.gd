@@ -305,7 +305,8 @@ func dab_at(document: Document, point: Vector2, hold_scale: float = 1.0, accumul
 	match paint_layer():
 		Terrain.Layer.COLOR:
 			if mask_target.button_pressed:
-				document.color_mask_dab(point, radius_m, 1.0 if mask_reveal.button_pressed else 0.0, shape)
+				var mask_target_strength := 1.0 if mask_reveal.button_pressed else 0.0
+				document.color_mask_dab(point, radius_m, mask_target_strength, shape, strength)
 				return
 			if valid_rgb():
 				if color_layer_target.button_pressed:
