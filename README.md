@@ -1,5 +1,7 @@
 # BZ_MAP_MAG
 
+**v0.0.1**
+
 Windows x64 terrain editor for Battlezone Combat Commander. The first working slice opens a native map package, renders its TER in 2D and 3D, edits the same heightfield in either view, and exports a validated native snapshot. The compatibility baseline is public BZCC 2.0.185.
 
 ## Run

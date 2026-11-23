@@ -1,0 +1,21 @@
+{
+  "op_id": "scope-179decfb2acf48a18ee24daa862f63e3",
+  "paths": {
+    "CHANGELOG.md": "52a2ca91962cea2dea0fcece84a8785f806379865c3e655cfcea5e4d8ae5b806",
+    "README.ded.md": "30d1024c2a3cf98d7313be1d01dd3049af8a158007fe2045bc622038e7c144ff",
+    "README.ee.md": "10f669e481430e5cc8a6323dbef105244dae397ebdf4067663450d0970b599c3",
+    "README.ja.md": "9c37716854aa5ed051d927eae4acce072b623fc3d8ac4f55b9c52566aab2be15",
+    "README.md": "87b0e73094fdf014b668691ed478155d04c6ae9c0dfbf8790f2993fc005d4da5",
+    "VERSION": "e6635045e1d2478ec4ca712d8c0e1dfcef8bb7b5b1e8e3bb560d37fe399a9e72",
+    "app/core/map_document.gd": "a5b3bb0c6bc7863893f06f85c839fbcfd0ff1c6c1be00cf0d51abda5da62a9b8",
+    "app/tests/draft_safety.gd": "8c958e6a0c1562603a92e991fce9d5b3c1bbd1bd51cdf48bf7377fe6322865bc",
+    "docs/EVIDENCE.md": "411395bb2477671bac5319aec4121d713fd0421827fdd7a1ced42d0a4c747949"
+  },
+  "project_identity": "v:\\___vac\\__k\\__code\\_misc\\_bz_map_mag",
+  "project_lineage": "lineage-f667d49fb5fb4a0394a6d5cbac5e1b90",
+  "recorded_at": "2026-11-23T20:30:20Z",
+  "schema_version": 2,
+  "source_head": "9804ad02080348eab05da1e085b1a16daf75c904",
+  "source_tree_fingerprint": "git-delta-v1:68a5627614cf20dad360f24f5de407a42005cc0d32297dcf174ca0a09fef397f",
+  "ticket": "T-57"
+}
